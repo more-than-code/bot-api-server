@@ -26,7 +26,11 @@
 -- set to deploybot_migrator. Migrations SET ROLE deploybot_owner.
 -- They do not create the extension or the schemas.
 --
--- deploybot_owner    NOLOGIN. Owns schemas app and metrics.
+-- deploybot_owner    LOGIN with NO password. Owns schemas app and metrics.
+--                    TimescaleDB runs policy jobs (retention) as the job
+--                    owner in a background worker, which needs rolcanlogin.
+--                    With no password and no pg_hba line, no client can
+--                    log in as this role.
 -- deploybot_migrator LOGIN. Member of deploybot_owner.
 -- deploybot_api      LOGIN. Runtime role (design §6.3).
 --                    No superuser, CREATEDB, or CREATEROLE.
@@ -44,8 +48,10 @@ CREATE EXTENSION IF NOT EXISTS timescaledb;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deploybot_owner') THEN
-        CREATE ROLE deploybot_owner NOLOGIN;
+        CREATE ROLE deploybot_owner LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE;
     END IF;
+    -- Existing installs created before 2026-10-14 had NOLOGIN; see header.
+    ALTER ROLE deploybot_owner LOGIN PASSWORD NULL;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deploybot_migrator') THEN
         CREATE ROLE deploybot_migrator LOGIN PASSWORD 'CHANGE_ME' NOSUPERUSER NOCREATEDB NOCREATEROLE;
     END IF;
