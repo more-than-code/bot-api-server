@@ -1,6 +1,6 @@
 # Agent protocol v1 (bot-agent ↔ bot-api-server), phase 1 contract
 
-**Status:** Frozen for wave 1 (2026-10-13). Source of truth: umbrella `docs/contracts/agent-protocol-v1.md`. Copies in each repo's `docs/contracts/` must not be edited. Report problems in `NOTES.md`.
+**Status:** Frozen for wave 1 (2026-10-13), v1.0.1 (redaction regex fix, tag-type clarification). Source of truth: umbrella `docs/contracts/agent-protocol-v1.md`. Copies in each repo's `docs/contracts/` must not be edited. Report problems in `NOTES.md`.
 **Design:** umbrella `docs/design-bot-agent-deploy.md` §3.2 and §4.
 
 ## Transport
@@ -82,6 +82,7 @@ Server → agent: `{"v":1,"type":"metrics_ack","batch_id":"<uuid>"}`. It is sent
 | `process` | `pid`, `process_name`, `user`, `cmdline` (≤ 1024 characters, raw), `service` (optional Discovered name) | `cpu_usage` (float, irix: 100 = one core), `memory_rss` (int bytes), `memory_usage` (float %), `num_threads` (int), `started_at` (RFC3339 string) |
 | `health` | `service`, `check_id`, `protocol`, `port` | `result` (`success`, `status_mismatch`, `timeout`, `connection_refused`, `error`), `http_status` (int or null), `latency_ms` (float) |
 
+- **Tag values are always JSON strings** (e.g. health `port` is `"8080"`); field types are as in the table. *(v1.0.1 clarification.)*
 - The server rejects (logs, and does not ack) a batch containing an unknown `m`, tag, or field, or a wrong type. It ignores `host_id` claims inside samples; the host always comes from the connection.
 - Processes: each `process_interval_sec`, the top 20 by `cpu_usage` plus the top 20 by `memory_rss` (union), plus every process of a discovered service.
 - `disk` covers real filesystems only (no tmpfs, overlay, squashfs, proc, sysfs, devtmpfs).
@@ -119,4 +120,43 @@ ProbeResult {"service","protocol","port","path","result","http_status":int|null,
 
 ## Redaction
 
-The agent never logs a frame body, token, or credential. It truncates `cmdline` to 1024 characters and replaces any match of `(?i)(authorization|api[_-]?key|password|passwd|token|secret|credential)[=: ]\S+` with `$1=[REDACTED]` before sending.
+The agent never logs a frame body, token, or credential. It truncates `cmdline` to 1024 characters and replaces any match of `(?i)(authorization|api[_-]?key|password|passwd|token|secret|credential)(\s*[=:]\s*|\s+)(bearer\s+)?\S+` with `$1=[REDACTED]` before sending. *(v1.0.1, 2026-10-13: the v1.0 pattern missed `Authorization: Bearer x` and `token: x`.)*
+
+## v1.0.2 amendments (2026-10-14)
+
+These take precedence over the sections above.
+
+1. **Redaction (agent, and server on ingest and snapshots).** Apply in this order:
+   - URL userinfo: `(?i)(\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@` → `$1[REDACTED]@`.
+   - Then keywords: `(?i)([A-Za-z0-9_.-]*(?:authorization|api[_-]?key|password|passwd|token|secret|credential)[A-Za-z0-9_.-]*)(\s*[=:]\s*|\s+)(bearer\s+)?("[^"]*"|'[^']*'|\S+)` → `$1=[REDACTED]`.
+
+   Required test vectors (input → output):
+
+   | Input | Output |
+   |---|---|
+   | `Authorization: Bearer abc123` | `Authorization=[REDACTED]` |
+   | `AWS_SECRET_ACCESS_KEY=AKIAxyz` | `AWS_SECRET_ACCESS_KEY=[REDACTED]` |
+   | `password="two words" next` | `password=[REDACTED] next` |
+   | `postgres://app:s3cret@127.0.0.1/db` | `postgres://app:[REDACTED]@127.0.0.1/db` |
+   | `redis://localhost:6379` | unchanged |
+   | `/usr/bin/node build` | unchanged |
+   | `postgres: joe tour_agent 127.0.0.1(5000) idle` | unchanged |
+
+   Over-redaction such as `--token-file=[REDACTED]` is accepted.
+2. **`task_reject` code `busy`.** The agent runs host, expiry, kind, and spec checks before queuing. It runs at most 4 tasks and holds at most 16 waiting; beyond that it sends `task_reject` with `busy`. The server maps `busy` to `unavailable` (503).
+3. **Outbound frame size.** The agent splits `metrics` batches so that each serialized frame is ≤ 1 MiB, as well as ≤ 5000 samples.
+4. **Join token via stdin.** `bot-agent init --server <url> --join-token-stdin` reads the token from stdin (one line, trimmed). The `--join-token <tok>` argv form is removed, because argv is visible in `ps`.
+
+## v1.0.3 amendment (2026-10-14)
+
+The URL-userinfo pattern is replaced by `(?i)(\b[a-z][a-z0-9+.-]*://[^/\s:@]*:)[^\s/]*@` → `$1[REDACTED]@`. The keyword pattern is unchanged.
+
+Additional required vectors:
+
+| Input | Output |
+|---|---|
+| `redis://:s3cret@127.0.0.1:6379` | `redis://:[REDACTED]@127.0.0.1:6379` |
+| `https://user:p@ss@host/db` | `https://user:[REDACTED]@host/db` |
+| `ssh://git@host:22/repo` | unchanged |
+| `http://127.0.0.1:3031/health` | unchanged |
+| `a://u:p@h/x b://c:d@e/y` | `a://u:[REDACTED]@h/x b://c:[REDACTED]@e/y` |

@@ -1,0 +1,332 @@
+// Package api is the phase-1 REST surface.
+package api
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/more-than-code/bot-api-server/internal/agentws"
+	"github.com/more-than-code/bot-api-server/internal/audit"
+	"github.com/more-than-code/bot-api-server/internal/auth"
+	"github.com/more-than-code/bot-api-server/internal/authz"
+	"github.com/more-than-code/bot-api-server/internal/store"
+)
+
+var errBadCursor = errors.New("bad cursor")
+
+// Server serves /v1 and /health. The agent socket is mounted separately so
+// this middleware never wraps a hijacked connection.
+type Server struct {
+	Store        store.Store
+	Auth         *auth.Service
+	Hub          *agentws.Hub
+	Audit        audit.Writer
+	AgentWSURL   string
+	TrustedProxy string
+	Log          *slog.Logger
+	Now          func() time.Time
+}
+
+type route struct {
+	pattern string
+	public  bool
+	fn      func(*Server, http.ResponseWriter, *http.Request)
+}
+
+func contractRoutes() []route {
+	return []route{
+		{"GET /health", true, (*Server).handleHealth},
+		{"GET /v1/auth/google/start", true, (*Server).handleGoogleStart},
+		{"POST /v1/auth/google/callback", true, (*Server).handleGoogleCallback},
+		{"POST /v1/auth/signout", false, (*Server).handleSignOut},
+		{"GET /v1/me", false, (*Server).handleMe},
+		{"POST /v1/auth/device/code", true, (*Server).handleDeviceCode},
+		{"POST /v1/auth/device/token", true, (*Server).handleDeviceToken},
+		{"GET /v1/auth/device/{user_code}", false, (*Server).handleDeviceGet},
+		{"POST /v1/auth/device/{user_code}/approve", false, (*Server).handleDeviceApprove},
+		{"POST /v1/auth/device/{user_code}/deny", false, (*Server).handleDeviceDeny},
+		{"POST /v1/projects", false, (*Server).handleProjectCreate},
+		{"GET /v1/projects", false, (*Server).handleProjectList},
+		{"GET /v1/projects/{id}", false, (*Server).handleProjectGet},
+		{"PATCH /v1/projects/{id}", false, (*Server).handleProjectPatch},
+		{"DELETE /v1/projects/{id}", false, (*Server).handleProjectDelete},
+		{"GET /v1/projects/{id}/members", false, (*Server).handleMemberList},
+		{"POST /v1/projects/{id}/members", false, (*Server).handleMemberAdd},
+		{"PATCH /v1/projects/{id}/members/{user_id}", false, (*Server).handleMemberPatch},
+		{"DELETE /v1/projects/{id}/members/{user_id}", false, (*Server).handleMemberDelete},
+		{"POST /v1/projects/{id}/transfer-ownership", false, (*Server).handleTransfer},
+		{"POST /v1/projects/{id}/join-tokens", false, (*Server).handleJoinCreate},
+		{"GET /v1/projects/{id}/join-tokens", false, (*Server).handleJoinList},
+		{"DELETE /v1/projects/{id}/join-tokens/{token_id}", false, (*Server).handleJoinRevoke},
+		{"GET /v1/projects/{id}/hosts", false, (*Server).handleHostList},
+		{"GET /v1/hosts/{id}", false, (*Server).handleHostGet},
+		{"DELETE /v1/hosts/{id}/credential", false, (*Server).handleHostRevoke},
+		{"GET /v1/hosts/{id}/services", false, (*Server).handleServiceList},
+		{"GET /v1/services/{id}", false, (*Server).handleServiceGet},
+		{"PUT /v1/services/{id}/health-checks", false, (*Server).handleHealthPut},
+		{"GET /v1/hosts/{id}/metrics", false, (*Server).handleMetrics},
+		{"GET /v1/hosts/{id}/processes", false, (*Server).handleProcesses},
+		{"GET /v1/services/{id}/health", false, (*Server).handleHealthHistory},
+		{"POST /v1/hosts/{id}/snapshot", false, (*Server).handleSnapshot},
+		{"POST /v1/services/{id}/probe", false, (*Server).handleProbe},
+		{"GET /v1/projects/{id}/audit", false, (*Server).handleAudit},
+	}
+}
+
+// Patterns is the frozen route table, including the method.
+func Patterns() []string {
+	routes := contractRoutes()
+	out := make([]string, len(routes))
+	for i, rt := range routes {
+		out[i] = rt.pattern
+	}
+	return out
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	code int
+}
+
+func (s *statusWriter) WriteHeader(code int) {
+	if s.code == 0 {
+		s.code = code
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusWriter) Write(b []byte) (int, error) {
+	if s.code == 0 {
+		s.code = http.StatusOK
+	}
+	return s.ResponseWriter.Write(b)
+}
+
+// Handler is the REST mux. It does not serve the agent WebSocket.
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	for _, rt := range contractRoutes() {
+		s.route(mux, rt.pattern, rt.public, rt.fn)
+	}
+	s.route(mux, "/", true, (*Server).handleNotFound)
+	return mux
+}
+
+func (s *Server) route(mux *http.ServeMux, pattern string, public bool, fn func(*Server, http.ResponseWriter, *http.Request)) {
+	mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+		sw := &statusWriter{ResponseWriter: w}
+		start := time.Now()
+		defer func() {
+			if rec := recover(); rec != nil {
+				s.logger().Error("panic", "pattern", r.Pattern)
+				if sw.code == 0 {
+					writeCode(sw, "error", "internal error")
+				}
+			}
+			code := sw.code
+			if code == 0 {
+				code = http.StatusOK
+			}
+			s.logger().Info("request", "method", r.Method, "pattern", r.Pattern, "status", code, "ms", time.Since(start).Milliseconds())
+		}()
+		if !public {
+			sess, user, err := s.Auth.Authenticate(r.Context(), r.Header.Get("Authorization"))
+			if err != nil {
+				writeCode(sw, "unauthorized", "unauthorized")
+				return
+			}
+			if s.now().Sub(sess.LastSeenAt) > time.Minute {
+				_ = s.Store.TouchSession(r.Context(), sess.ID, s.now())
+			}
+			ctx := authz.WithLookup(r.Context(), s.lookup)
+			ctx = withPrincipal(ctx, principal{User: user, Session: sess})
+			r = r.WithContext(ctx)
+		}
+		fn(s, sw, r)
+	})
+}
+
+func (s *Server) lookup(ctx context.Context, userID, projectID uuid.UUID) (string, bool, error) {
+	role, err := s.Store.Role(ctx, projectID, userID)
+	if errors.Is(err, store.ErrNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return role, true, nil
+}
+
+type principal struct {
+	User    store.User
+	Session store.Session
+}
+
+type principalKey struct{}
+
+func withPrincipal(ctx context.Context, p principal) context.Context {
+	return context.WithValue(ctx, principalKey{}, p)
+}
+
+func principalFrom(ctx context.Context) (principal, bool) {
+	p, ok := ctx.Value(principalKey{}).(principal)
+	return p, ok
+}
+
+func (s *Server) now() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (s *Server) logger() *slog.Logger {
+	if s.Log != nil {
+		return s.Log
+	}
+	return slog.Default()
+}
+
+func (s *Server) logErr(err error) {
+	msg := err.Error()
+	if strings.Contains(msg, "://") {
+		msg = "redacted"
+	}
+	s.logger().Error("request failed", "err", msg)
+}
+
+func (s *Server) handleNotFound(w http.ResponseWriter, _ *http.Request) {
+	writeCode(w, "not_found", "not found")
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, []byte(`{"status":"ok"}`))
+}
+
+func mutating(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
+		return true
+	default:
+		return false
+	}
+}
+
+func viaKind(kind string) string {
+	if kind == "mcp" {
+		return audit.ViaMCP
+	}
+	return audit.ViaConsole
+}
+
+func idPtr(id uuid.UUID) *uuid.UUID {
+	v := id
+	return &v
+}
+
+func (s *Server) deny(w http.ResponseWriter, r *http.Request, p principal, projectID, hostID, serviceID *uuid.UUID, action string, err error) {
+	var denied *authz.Denied
+	if errors.As(err, &denied) {
+		if mutating(r.Method) && action != "" {
+			code := denied.Code
+			s.Audit.Record(r.Context(), store.AuditRow{
+				ActorUserID: idPtr(p.User.ID),
+				Via:         viaKind(p.Session.Kind),
+				ProjectID:   projectID,
+				HostID:      hostID,
+				ServiceID:   serviceID,
+				Action:      action,
+				Decision:    audit.DecisionDenied,
+				ErrorCode:   &code,
+			})
+		}
+		writeCode(w, denied.Code, phrase(denied.Code))
+		return
+	}
+	s.logErr(err)
+	writeCode(w, "error", "internal error")
+}
+
+func (s *Server) fail(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeCode(w, "not_found", "not found")
+	case errors.Is(err, store.ErrConflict):
+		writeCode(w, "conflict", "conflict")
+	case errors.Is(err, store.ErrUnauthorized):
+		writeCode(w, "unauthorized", "unauthorized")
+	case errors.Is(err, store.ErrOwner):
+		writeCode(w, "forbidden", "forbidden")
+	case errors.Is(err, store.ErrExpired):
+		writeCode(w, "bad_request", "expired")
+	case errors.Is(err, store.ErrState):
+		writeCode(w, "conflict", "conflict")
+	default:
+		s.logErr(err)
+		writeCode(w, "error", "internal error")
+	}
+}
+
+func (s *Server) ownerErr(w http.ResponseWriter, r *http.Request, p principal, projectID *uuid.UUID, action string, err error) {
+	if errors.Is(err, store.ErrOwner) {
+		code := "forbidden"
+		s.Audit.Record(r.Context(), store.AuditRow{
+			ActorUserID: idPtr(p.User.ID),
+			Via:         viaKind(p.Session.Kind),
+			ProjectID:   projectID,
+			Action:      action,
+			Decision:    audit.DecisionDenied,
+			ErrorCode:   &code,
+		})
+		writeCode(w, "forbidden", "forbidden")
+		return
+	}
+	s.fail(w, err)
+}
+
+func (s *Server) require(w http.ResponseWriter, r *http.Request) (principal, bool) {
+	p, ok := principalFrom(r.Context())
+	if !ok {
+		writeCode(w, "unauthorized", "unauthorized")
+		return principal{}, false
+	}
+	return p, true
+}
+
+func (s *Server) pathID(w http.ResponseWriter, r *http.Request, name string) (uuid.UUID, bool) {
+	id, err := uuid.Parse(r.PathValue(name))
+	if err != nil {
+		writeCode(w, "bad_request", "invalid id")
+		return uuid.Nil, false
+	}
+	return id, true
+}
+
+func (s *Server) hostStatus(h store.Host) string {
+	if s.Hub != nil {
+		return s.Hub.Status(h, s.now())
+	}
+	if h.RevokedAt != nil {
+		return "revoked"
+	}
+	if !h.AlwaysOn {
+		return "asleep"
+	}
+	return "offline"
+}
+
+func (s *Server) auditOK(ctx context.Context, p principal, row store.AuditRow) {
+	row.ActorUserID = idPtr(p.User.ID)
+	if row.Via == "" {
+		row.Via = viaKind(p.Session.Kind)
+	}
+	if row.Decision == "" {
+		row.Decision = audit.DecisionAllowed
+	}
+	s.Audit.Record(ctx, row)
+}

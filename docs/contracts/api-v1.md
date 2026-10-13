@@ -1,6 +1,6 @@
 # bot-api-server REST API v1 (phase 1 contract)
 
-**Status:** Frozen for wave 1 (2026-10-13). Source of truth: umbrella `docs/contracts/api-v1.md`. Each repo gets a copy at `docs/contracts/api-v1.md`, and copies must not be edited. Report a contract problem in `NOTES.md` instead of changing it.
+**Status:** Frozen for wave 1 (2026-10-13), v1.0.1 (clarifications at the end). Source of truth: umbrella `docs/contracts/api-v1.md`. Each repo gets a copy at `docs/contracts/api-v1.md`, and copies must not be edited. Report a contract problem in `NOTES.md` instead of changing it.
 **Design:** umbrella `docs/design-bot-agent-deploy.md` (§2 permissions, §3 auth, §6 server).
 **Consumers:** bot-console (BFF server routes), bot-mcp-server, the `deploybot login` CLI.
 
@@ -136,3 +136,26 @@ The server waits up to 30 s for the agent. An offline or asleep host gives `unav
 | Method | Path | Role | Notes |
 |---|---|---|---|
 | GET | `/v1/projects/{id}/audit` | admin+ | list of AuditEntry, newest first |
+
+## v1.0.1 clarifications (2026-10-13)
+
+Raised by the wave 1 workers and decided by the orchestrator. They take precedence over anything above that conflicts.
+
+1. **Audit ids:** `AuditEntry.id` is a decimal string (from `bigserial`), not a UUID. All other ids are UUIDs.
+2. **Services list:** `GET /v1/hosts/{id}/services` uses the list envelope `{"items":[...],"next_cursor":null}`. It never paginates (≤ 500 items).
+3. **Health history:** `GET /v1/services/{id}/health` returns `{"items":[...]}` with no cursor.
+4. **One-sided windows:** `from` only → `to` = now. `to` only → `from` = `to` − 1 h. `from` ≥ `to` → `bad_request`.
+5. **Live call outcomes:**
+   - The agent answered with `succeeded` → `ok` with the payload. A probe whose `result` is not `success` is still `ok`: the probe ran.
+   - The agent answered `failed` → `error` (HTTP 500), with the agent's payload if present.
+   - The agent answered `timed_out` → `timeout` (504).
+   - `task_reject`: `forbidden` → `forbidden`; `unknown_service` → `not_found`; `bad_spec` → `bad_request`; `wrong_host`/`expired` → `error`.
+6. **Token formats:** session tokens, join tokens, device codes, and host credentials are 43-character unpadded base64url. OAuth `state` is 43-character base64url. `user_code` is as stated above.
+7. **Probe/health-check `path`:** must start with `/`, must not start with `//`, ≤ 512 bytes, and contain no `@ \ ? #`, spaces, or control characters.
+8. **Server-side redaction:** the server applies the agent-protocol redaction regex again to `cmdline` on ingest and on snapshot payloads (defense in depth).
+
+## v1.0.2 amendments (2026-10-14)
+
+1. **`install_command`** is now exactly `printf '%s' '<token>' | sudo -u bot-agent bot-agent init --server '<BOT_API_AGENT_WS_URL>' --join-token-stdin`. `printf` is a shell builtin, so the token never appears in any process argv.
+2. Agent `task_reject` `busy` → `unavailable` (503).
+3. Server-side redaction uses the agent-protocol v1.0.2 patterns.

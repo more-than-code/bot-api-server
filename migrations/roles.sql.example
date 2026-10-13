@@ -1,0 +1,85 @@
+-- roles.sql.example
+--
+-- NOT APPLIED BY bot-api-server --migrate. This is step 1 of bootstrap.
+-- Run it as a superuser BEFORE any numbered migration.
+--
+-- Every password below is the literal placeholder CHANGE_ME.
+-- Replace CHANGE_ME before use. These are not real secrets and must not be
+-- left in place on a shared server.
+--
+-- CREATE EXTENSION timescaledb must be the first command of its own session.
+-- Start a new psql session and run this file as the first thing you send.
+-- Do not paste it into a session that has already run other commands.
+--
+-- Run this file twice, once connected to each database:
+--
+--   1. Database deploybot (the server database). The script grants
+--      CONNECT on deploybot to deploybot_migrator and deploybot_api.
+--      psql "postgres://SUPERUSER@127.0.0.1:5432/deploybot" -f migrations/roles.sql.example
+--
+--   2. Database deploybot_test (integration tests). Connect to that
+--      database and run this same file. The script grants CONNECT on
+--      deploybot_test instead.
+--      psql "postgres://SUPERUSER@127.0.0.1:5432/deploybot_test" -f migrations/roles.sql.example
+--
+-- Then run bot-api-server --migrate with BOT_API_MIGRATE_DATABASE_URL
+-- set to deploybot_migrator. Migrations SET ROLE deploybot_owner.
+-- They do not create the extension or the schemas.
+--
+-- deploybot_owner    NOLOGIN. Owns schemas app and metrics.
+-- deploybot_migrator LOGIN. Member of deploybot_owner.
+-- deploybot_api      LOGIN. Runtime role (design §6.3).
+--                    No superuser, CREATEDB, or CREATEROLE.
+-- Default privileges (for objects deploybot_owner creates later):
+--   app:      SELECT, INSERT, UPDATE, DELETE, plus sequence USAGE/SELECT
+--             so bigserial inserts work.
+--   metrics:  SELECT, INSERT.
+-- audit_log (INSERT/SELECT only), schema_migrations (nothing), and
+-- DELETE on metrics.ingest_batches are applied in the numbered migrations,
+-- which run as deploybot_owner. Default privileges cannot name one table.
+
+-- First command of this session.
+CREATE EXTENSION IF NOT EXISTS timescaledb;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deploybot_owner') THEN
+        CREATE ROLE deploybot_owner NOLOGIN;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deploybot_migrator') THEN
+        CREATE ROLE deploybot_migrator LOGIN PASSWORD 'CHANGE_ME' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'deploybot_api') THEN
+        CREATE ROLE deploybot_api LOGIN PASSWORD 'CHANGE_ME' NOSUPERUSER NOCREATEDB NOCREATEROLE;
+    END IF;
+END
+$$;
+
+GRANT deploybot_owner TO deploybot_migrator;
+
+DO $$
+BEGIN
+    IF current_database() = 'deploybot' THEN
+        GRANT CONNECT ON DATABASE deploybot TO deploybot_migrator;
+        GRANT CONNECT ON DATABASE deploybot TO deploybot_api;
+    ELSIF current_database() = 'deploybot_test' THEN
+        GRANT CONNECT ON DATABASE deploybot_test TO deploybot_migrator;
+        GRANT CONNECT ON DATABASE deploybot_test TO deploybot_api;
+    ELSE
+        RAISE EXCEPTION 'run this script connected to deploybot or deploybot_test, not %', current_database();
+    END IF;
+END
+$$;
+
+CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION deploybot_owner;
+CREATE SCHEMA IF NOT EXISTS metrics AUTHORIZATION deploybot_owner;
+
+GRANT USAGE ON SCHEMA app TO deploybot_api;
+GRANT USAGE ON SCHEMA metrics TO deploybot_api;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE deploybot_owner IN SCHEMA app
+    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO deploybot_api;
+ALTER DEFAULT PRIVILEGES FOR ROLE deploybot_owner IN SCHEMA app
+    GRANT USAGE, SELECT ON SEQUENCES TO deploybot_api;
+ALTER DEFAULT PRIVILEGES FOR ROLE deploybot_owner IN SCHEMA metrics
+    GRANT SELECT, INSERT ON TABLES TO deploybot_api;
