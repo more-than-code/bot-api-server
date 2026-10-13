@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 2,
+  "extends": [],
+  "skills": {
+    "dependencies": {
+      "api-contracts": "^0.1.0",
+      "coding-discipline": "^0.3.1",
+      "security-baseline": "^0.1.0",
+      "code-quality": "^0.1.1"
+    },
+    "shims": [
+      "claude-code"
+    ]
+  },
+  "instructions": {
+    "role": "repo"
+  }
+}

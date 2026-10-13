@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "registry": {
+    "name": "skill-forge",
+    "version": "1.3.0",
+    "commit": "4f26a7d1f91107e575ba9af3382bda631482ebb5",
+    "lockIntegrity": "sha256-tqWJW7Wqum75Dd+EqUT3lpC65ZaVx/R0vWe4OhmLV0I="
+  },
+  "skills": {
+    "api-contracts": {
+      "version": "0.1.0",
+      "integrity": "sha256-49RjFOkIjO4LhrwrHrXWJbjZXGYh/zdk/Gi2Hpo4TqY=",
+      "source": "registry"
+    },
+    "code-quality": {
+      "version": "0.1.1",
+      "integrity": "sha256-URPCJOroQR0mJlQPoOkRpTe0xtF/qps48iLkoTwKAEo=",
+      "source": "registry"
+    },
+    "coding-discipline": {
+      "version": "0.3.1",
+      "integrity": "sha256-jS3r/aYrv7m5msRqm8PkAZqwyuVXNNTrNfMRiK1zMBg=",
+      "source": "registry"
+    },
+    "security-baseline": {
+      "version": "0.1.0",
+      "integrity": "sha256-6BrEv3S5yb6PakSghKmbONVwHilAxmkNQppRNPTv9tc=",
+      "source": "registry"
+    }
+  }
+}
