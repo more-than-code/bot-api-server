@@ -22,14 +22,15 @@ var errBadCursor = errors.New("bad cursor")
 // Server serves /v1 and /health. The agent socket is mounted separately so
 // this middleware never wraps a hijacked connection.
 type Server struct {
-	Store        store.Store
-	Auth         *auth.Service
-	Hub          *agentws.Hub
-	Audit        audit.Writer
-	AgentWSURL   string
-	TrustedProxy string
-	Log          *slog.Logger
-	Now          func() time.Time
+	Store         store.Store
+	Auth          *auth.Service
+	Hub           *agentws.Hub
+	Audit         audit.Writer
+	AgentWSURL    string
+	ConsoleOrigin string
+	TrustedProxy  string
+	Log           *slog.Logger
+	Now           func() time.Time
 }
 
 type route struct {
@@ -73,6 +74,11 @@ func contractRoutes() []route {
 		{"POST /v1/projects/{id}/join-tokens", false, (*Server).handleJoinCreate},
 		{"GET /v1/projects/{id}/join-tokens", false, (*Server).handleJoinList},
 		{"DELETE /v1/projects/{id}/join-tokens/{token_id}", false, (*Server).handleJoinRevoke},
+		{"POST /v1/projects/{id}/invites", false, (*Server).handleInviteCreate},
+		{"GET /v1/projects/{id}/invites", false, (*Server).handleInviteList},
+		{"DELETE /v1/projects/{id}/invites/{invite_id}", false, (*Server).handleInviteRevoke},
+		{"POST /v1/invites/lookup", false, (*Server).handleInviteLookup},
+		{"POST /v1/invites/accept", false, (*Server).handleInviteAccept},
 		{"GET /v1/projects/{id}/hosts", false, (*Server).handleHostList},
 		{"GET /v1/projects/{id}/services", false, (*Server).handleProjectServices},
 		{"GET /v1/hosts/{id}", false, (*Server).handleHostGet},
@@ -309,6 +315,16 @@ func (s *Server) denyDetail(w http.ResponseWriter, r *http.Request, p principal,
 }
 
 func (s *Server) fail(w http.ResponseWriter, err error) {
+	s.writeErr(w, err, true)
+}
+
+// failInvite maps store errors the same way as fail. A database error can
+// echo token_hash, so the log line does not include err.Error().
+func (s *Server) failInvite(w http.ResponseWriter, err error) {
+	s.writeErr(w, err, false)
+}
+
+func (s *Server) writeErr(w http.ResponseWriter, err error, log bool) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		writeCode(w, "not_found", "not found")
@@ -325,7 +341,11 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrInvalid):
 		writeCode(w, "bad_request", "bad request")
 	default:
-		s.logErr(err)
+		if log {
+			s.logErr(err)
+		} else {
+			s.logger().Error("request failed")
+		}
 		writeCode(w, "error", "internal error")
 	}
 }

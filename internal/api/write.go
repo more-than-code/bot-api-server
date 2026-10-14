@@ -42,6 +42,8 @@ func phrase(code string) string {
 		return "internal error"
 	case "invalid_token":
 		return "invalid token"
+	case "rate_limited":
+		return "rate limited"
 	default:
 		return code
 	}
@@ -55,6 +57,8 @@ func statusFor(code string) int {
 		return http.StatusBadRequest
 	case "unauthorized", "invalid_token":
 		return http.StatusUnauthorized
+	case "rate_limited":
+		return http.StatusTooManyRequests
 	case "forbidden":
 		return http.StatusForbidden
 	case "not_found":

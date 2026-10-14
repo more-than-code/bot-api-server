@@ -65,6 +65,7 @@ TRUNCATE TABLE
     app.host_shares,
     app.services,
     app.agent_credentials,
+    app.invites,
     app.join_tokens,
     app.device_codes,
     app.oauth_codes,
@@ -102,7 +103,7 @@ TRUNCATE TABLE
 		t.Fatalf("migrations: %v", err)
 	}
 	rows.Close()
-	if !names["0001_app.sql"] || !names["0002_metrics.sql"] || !names["0003_shared_hosts.sql"] || !names["0004_service_names.sql"] || !names["0005_mcp_oauth.sql"] || names["0003_shared_hosts.down.sql"] || names["0004_service_names.down.sql"] || names["0005_mcp_oauth.down.sql"] {
+	if !names["0001_app.sql"] || !names["0002_metrics.sql"] || !names["0003_shared_hosts.sql"] || !names["0004_service_names.sql"] || !names["0005_mcp_oauth.sql"] || !names["0006_invites.sql"] || names["0003_shared_hosts.down.sql"] || names["0004_service_names.down.sql"] || names["0005_mcp_oauth.down.sql"] || names["0006_invites.down.sql"] {
 		t.Fatalf("schema_migrations = %v", names)
 	}
 
@@ -242,6 +243,7 @@ WHERE id = $1::uuid
 	}
 	sharedHostsIntegration(t, d, ctx, user, project, enrolled, serviceID, at)
 	oauthHTTPIntegration(t, d, ctx)
+	assertInvites(t, d, ctx)
 }
 
 // sharedHostsIntegration is the Postgres half of spec §6: backfill shape,

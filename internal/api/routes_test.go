@@ -52,6 +52,11 @@ func TestRouteTable(t *testing.T) {
 		"POST /v1/projects/{id}/join-tokens",
 		"GET /v1/projects/{id}/join-tokens",
 		"DELETE /v1/projects/{id}/join-tokens/{token_id}",
+		"POST /v1/projects/{id}/invites",
+		"GET /v1/projects/{id}/invites",
+		"DELETE /v1/projects/{id}/invites/{invite_id}",
+		"POST /v1/invites/lookup",
+		"POST /v1/invites/accept",
 		"GET /v1/projects/{id}/hosts",
 		"GET /v1/projects/{id}/services",
 		"GET /v1/hosts/{id}",
@@ -82,6 +87,7 @@ func TestRouteTable(t *testing.T) {
 		path = strings.ReplaceAll(path, "{id}", id)
 		path = strings.ReplaceAll(path, "{user_id}", id)
 		path = strings.ReplaceAll(path, "{token_id}", id)
+		path = strings.ReplaceAll(path, "{invite_id}", id)
 		path = strings.ReplaceAll(path, "{user_code}", "ABCD-EFGH")
 		var body []byte
 		switch pattern {
@@ -203,6 +209,7 @@ func TestEnvelopeStatus(t *testing.T) {
 		{"expired_token", 400},
 		{"access_denied", 400},
 		{"invalid_token", 401},
+		{"rate_limited", 429},
 	}
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()

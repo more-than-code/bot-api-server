@@ -1,6 +1,6 @@
 # bot-api-server: per-repo design
 
-**Date:** 2026-10-13. **Status:** Approved design (D1–D31), wave 1 = phase 1. D34 (2026-10-14) amends umbrella D21. Service names and `GET /v1/projects/{id}/services` (2026-10-14) follow `docs/spec-project-services.md`. The MCP OAuth authorization server (2026-10-14) follows `docs/spec-mcp-oauth.md` and `docs/contracts/oauth-v1.md`.
+**Date:** 2026-10-13. **Status:** Approved design (D1–D31), wave 1 = phase 1. D34 (2026-10-14) amends umbrella D21. Service names and `GET /v1/projects/{id}/services` (2026-10-14) follow `docs/spec-project-services.md`. The MCP OAuth authorization server (2026-10-14) follows `docs/spec-mcp-oauth.md` and `docs/contracts/oauth-v1.md`. Project invite links (2026-10-15) follow `docs/spec-project-invites.md` and api-v1 v1.5.
 Cross-repo design: umbrella `docs/design-bot-agent-deploy.md` §2 (permissions), §3 (auth), §6 (server, app schema, Postgres roles and metrics). Contracts: `docs/contracts/`.
 
 ## Layout
@@ -15,7 +15,7 @@ internal/api/              REST handlers, envelope, error mapping
 internal/agentws/          /agent/v1/ws: enroll, hello, heartbeat, ingest, tasks, hub of live connections
 internal/ingest/           sample validation (allowlists) and batched inserts
 internal/audit/            append-only audit writer
-migrations/                0001_app.sql, 0002_metrics.sql (TimescaleDB hypertables), 0003_shared_hosts.sql, 0004_service_names.sql, 0005_mcp_oauth.sql
+migrations/                0001_app.sql, 0002_metrics.sql (TimescaleDB hypertables), 0003_shared_hosts.sql, 0004_service_names.sql, 0005_mcp_oauth.sql, 0006_invites.sql
 ```
 
 ## Config (env)
@@ -31,7 +31,7 @@ migrations/                0001_app.sql, 0002_metrics.sql (TimescaleDB hypertabl
 | `BOT_API_AGENT_WS_URL` | the public `wss://…/agent/v1/ws` shown in `install_command` |
 | `BOT_API_PUBLIC_ORIGIN` | OAuth issuer (trailing slash removed) and the startup log |
 | `BOT_API_MCP_RESOURCE` | MCP audience. When set, startup reads the client secret file before opening the database |
-| `BOT_API_CONSOLE_ORIGIN` | browser origin for `/oauth/authorize` consent redirects |
+| `BOT_API_CONSOLE_ORIGIN` | browser origin for `/oauth/authorize` consent redirects and for invite links (`<origin>/invite/<token>`) |
 | `BOT_API_MCP_CLIENT_SECRET_FILE` | mode `0600` file; first line is the plaintext `bot-mcp-server` secret, at least 32 characters |
 
 TLS terminates at the reverse proxy in production; dev listens on the tailnet.
@@ -68,3 +68,15 @@ Public clients register themselves. The browser consent routes, the device-code 
 An `mcp_access`, `mcp_refresh`, or legacy `mcp` session on any `/v1/*` route is rejected with `invalid_token` before the handler runs. An `api_delegated` token acts as its user. Audit rows it causes use `via = 'mcp'`. The column check is `allowed|denied`, so an allow or deny decision is stored as `allowed` or `denied`.
 
 `migrations/0005_mcp_oauth.sql` is applied by `--migrate` as `deploybot_owner`. It adds `app.oauth_clients`, `app.oauth_grants`, `app.oauth_requests`, and `app.oauth_codes`, the session columns `audience`, `grant_id`, `client_id`, `code_id`, and `rotated_at`, and widens `sessions_kind_chk` to `console|mcp|mcp_access|mcp_refresh|api_delegated`. `kind = 'mcp'` stays legal so the cut-over can expire those rows in place: `UPDATE app.sessions SET expires_at = now() WHERE kind = 'mcp' AND expires_at > now()`. `deploybot-cli` is inserted for the device flow. `deploybot_api` receives select, insert, update, and delete on the four new tables. `--migrate` ignores `*.down.sql`. `migrations/0005_mcp_oauth.down.sql` is a hand-run rollback: run it as `deploybot_owner`, then `DELETE FROM app.schema_migrations WHERE name = '0005_mcp_oauth.sql'` before `--migrate` will apply 0005 again. The down script deletes sessions whose kind is not `console` or `mcp`, restores the 0001 kind check, and drops the new columns and tables. Legacy `mcp` rows stay expired. Clients, grants, codes, and pending requests are lost.
+
+## Project invite links
+
+An invite is a bearer token for project membership, separate from host join tokens. The plaintext is 256 bits, 43-character unpadded base64url, shown once in `POST /v1/projects/{id}/invites` as `token` and as `url`. The store keeps only `secret.Hash` of that string. List, revoke, lookup, and accept never return it. Logs and audit detail do not contain it or its hash.
+
+`url` is `<BOT_API_CONSOLE_ORIGIN>/invite/<token>`. The handler trims trailing slashes on the origin, the same way the OAuth consent redirect does. An empty origin fails the create with 500 before `secret.NewToken` runs. Admin routes use `authz.CapMembers` (owner or admin). A viewer is `forbidden`. A non-member is `not_found`. Lookup and accept require a `console` session; another kind is 401 `unauthorized`. Those two routes call `authz.Authorize` with `CapSession`, then `auth.AllowInvite`: 30 per minute per user and 60 per minute per source IP, one window, and a rejected call is not counted. The HTTP body is the v1 envelope `rate_limited` (429). The OAuth token endpoint still uses its own `{"error":"rate_limited"}` body.
+
+Lookup is a plain select. It returns the invite's role and `already_member`, and it does not write. Accept locks the invite row by `UPDATE app.invites SET uses = uses WHERE token_hash = $1`, which `deploybot_api` is allowed to do. `SELECT … FOR UPDATE` would also need `UPDATE` on every returned column, and this role only has `UPDATE` on `uses` and `revoked_at`. The lock update is rolled back unless a new membership row was inserted and `uses` was incremented. An existing member gets their current role back; `uses` and the role stay as they were. A new member is inserted with the invite's role and `added_by` set to the invite's `created_by`. `uses` is incremented only while `uses < max_uses`. The memstore holds its mutex for the whole accept, so the cap is the same there. Unknown, malformed, expired, revoked, and used-up tokens hash to a lookup and return one `not_found` body. A used-up invite is `not_found` even for someone who is already a member.
+
+Audit rows are `invite.create` (invite id, role, max_uses, expires_at), `invite.revoke` (invite id), and `invite.accept` (invite id, user id), including an accept that finds an existing member. Lookup writes no audit row.
+
+`migrations/0006_invites.sql` is applied by `--migrate` as `deploybot_owner`. `app.invites.project_id` references `app.projects` `ON DELETE CASCADE`. `token_hash` is unique and 32 bytes. `role` is `admin` or `viewer`. `max_uses` is 1–50. `uses` is 0–`max_uses`. Default privileges would grant `deploybot_api` full CRUD, so the migration revokes that and grants select, insert, and update of `uses` and `revoked_at` only. Soft-delete does not fire the foreign key. `DeleteProject` calls `app.invites_delete_for_project`, a `SECURITY DEFINER` function with `search_path = pg_catalog, app`, executable by `deploybot_api` and not by `PUBLIC`. The memstore deletes that project's invite rows under the same mutex. `--migrate` ignores `*.down.sql`. `migrations/0006_invites.down.sql` is a hand-run rollback: run it as `deploybot_owner`, then `DELETE FROM app.schema_migrations WHERE name = '0006_invites.sql'` before `--migrate` will apply 0006 again. The down script drops the function and the table. Memberships already created by an accept stay. Invite links stop working.

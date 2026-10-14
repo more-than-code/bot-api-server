@@ -65,3 +65,17 @@ This process is the OAuth authorization server MCP clients use (`docs/contracts/
 ```sql
 DELETE FROM app.schema_migrations WHERE name = '0005_mcp_oauth.sql';
 ```
+
+## Project invites
+
+An owner or admin creates a link with `POST /v1/projects/{id}/invites`. The body is `role` (`admin` or `viewer`), optional `expires_in_sec` (3600–2592000, default 604800), and optional `max_uses` (1–50, default 1). The 201 response is the invite plus `token` and `url`. Those two fields are not returned again. `url` is `<BOT_API_CONSOLE_ORIGIN>/invite/<token>`. A trailing slash on the origin is removed. If the origin is empty, create returns 500 and does not store a token. `GET /v1/projects/{id}/invites` lists every invite for that project, newest first, including expired, revoked, and used-up rows. `DELETE /v1/projects/{id}/invites/{invite_id}` sets `revoked_at`. A second delete keeps the original timestamp. An invite that belongs to another project is `not_found`.
+
+`POST /v1/invites/lookup` and `POST /v1/invites/accept` take `{"token":"..."}`. Both require a console session. Any other session kind is 401 `unauthorized`. Lookup and accept share a limit of 30 requests a minute per user and 60 a minute per source IP. Past either limit the response is 429 `rate_limited`. Lookup does not change the invite or the membership. An unknown, malformed, expired, revoked, or used-up token is `not_found`, and those responses are the same body. Accept runs in one transaction. Someone who is already a member gets their current role, and `uses` stays unchanged. Anyone else is added with the invite's role and `uses` increases by one. Concurrent accepts never go past `max_uses`.
+
+The plaintext token is not stored, not logged, and not written into audit detail. Audit actions are `invite.create`, `invite.revoke`, and `invite.accept`. Deleting a project deletes its invites. Contract: `docs/contracts/api-v1.md` (v1.5). Behaviour: `docs/spec-project-invites.md`.
+
+`migrations/0006_invites.sql` creates `app.invites`. `deploybot_api` may select and insert, and may update only `uses` and `revoked_at`. Soft-delete does not fire the foreign key, so the migration adds `app.invites_delete_for_project`, which runs as `deploybot_owner`. A real `DELETE` of the project still cascades. `--migrate` does not apply `migrations/0006_invites.down.sql`. Run that file by hand as `deploybot_owner`. It drops the helper and the table. Memberships already created by an accept stay. Invite links stop working. Then delete the applied row before `--migrate` will apply 0006 again:
+
+```sql
+DELETE FROM app.schema_migrations WHERE name = '0006_invites.sql';
+```

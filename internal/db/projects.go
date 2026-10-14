@@ -189,6 +189,16 @@ WHERE project_id = $1::uuid
 `, id.String()); err != nil {
 		return nil, mapErr(err)
 	}
+	// Soft-delete does not fire ON DELETE CASCADE. The function runs as
+	// the table owner so deploybot_api can remove invites without DELETE.
+	deleted, err := tx.Query(ctx, `SELECT app.invites_delete_for_project($1::uuid)`, id.String())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	deleted.Close()
+	if err := deleted.Err(); err != nil {
+		return nil, mapErr(err)
+	}
 	rows, err := tx.Query(ctx, `
 SELECT id::text FROM app.hosts WHERE project_id = $1::uuid ORDER BY id::text
 `, id.String())

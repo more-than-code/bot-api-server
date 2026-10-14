@@ -1,5 +1,5 @@
 // Package memstore is the in-memory Store used by handler and WebSocket tests.
-// A single mutex makes join-token consumption and device consumption atomic.
+// A single mutex makes join-token consumption, invite acceptance, and device consumption atomic.
 package memstore
 
 import (
@@ -40,6 +40,9 @@ type Mem struct {
 
 	tokens      map[uuid.UUID]tokenRec
 	tokenByHash map[string]uuid.UUID
+
+	invites      map[uuid.UUID]inviteRec
+	inviteByHash map[string]uuid.UUID
 
 	hosts      map[uuid.UUID]store.Host
 	creds      map[uuid.UUID]credRec
@@ -83,6 +86,11 @@ type tokenRec struct {
 	hash []byte
 }
 
+type inviteRec struct {
+	store.Invite
+	hash []byte
+}
+
 type credRec struct {
 	store.Credential
 }
@@ -107,6 +115,8 @@ func New() *Mem {
 		members:       map[string]memberRec{},
 		tokens:        map[uuid.UUID]tokenRec{},
 		tokenByHash:   map[string]uuid.UUID{},
+		invites:       map[uuid.UUID]inviteRec{},
+		inviteByHash:  map[string]uuid.UUID{},
 		hosts:         map[uuid.UUID]store.Host{},
 		creds:         map[uuid.UUID]credRec{},
 		credByHash:    map[string]uuid.UUID{},

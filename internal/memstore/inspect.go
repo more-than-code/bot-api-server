@@ -16,9 +16,9 @@ func (m *Mem) AllAudits() []store.AuditEntry {
 	return out
 }
 
-// HoldsPlaintext reports whether a session, join token, device code, or
-// host credential is stored as the plaintext bytes. User codes are plaintext
-// on purpose and are not checked here.
+// HoldsPlaintext reports whether a session, join token, invite, device code,
+// or host credential is stored as the plaintext bytes. User codes are
+// plaintext on purpose and are not checked here.
 func (m *Mem) HoldsPlaintext(plain string) bool {
 	if plain == "" {
 		return false
@@ -32,6 +32,11 @@ func (m *Mem) HoldsPlaintext(plain string) bool {
 		}
 	}
 	for _, rec := range m.tokens {
+		if bytes.Contains(rec.hash, raw) {
+			return true
+		}
+	}
+	for _, rec := range m.invites {
 		if bytes.Contains(rec.hash, raw) {
 			return true
 		}

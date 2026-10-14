@@ -79,14 +79,15 @@ func run(args []string, getenv func(string) string, d deps) error {
 		log.Info("mcp oauth client ready")
 	}
 	srv := &api.Server{
-		Store:        pool,
-		Auth:         authn,
-		Hub:          hub,
-		Audit:        aud,
-		AgentWSURL:   cfg.AgentWSURL,
-		TrustedProxy: cfg.TrustedProxy,
-		Log:          log,
-		Now:          now,
+		Store:         pool,
+		Auth:          authn,
+		Hub:           hub,
+		Audit:         aud,
+		AgentWSURL:    cfg.AgentWSURL,
+		ConsoleOrigin: cfg.ConsoleOrigin,
+		TrustedProxy:  cfg.TrustedProxy,
+		Log:           log,
+		Now:           now,
 	}
 	root := http.NewServeMux()
 	root.Handle("GET /agent/v1/ws", hub)

@@ -36,6 +36,9 @@ const (
 	oauthRegisterWindow = time.Hour
 	oauthMinuteLimit    = 60
 	oauthMinuteWindow   = time.Minute
+	inviteUserLimit     = 30
+	inviteIPLimit       = 60
+	inviteWindow        = time.Minute
 )
 
 var (
@@ -66,6 +69,8 @@ type Service struct {
 	oauthRegIPs map[string][]time.Time
 	oauthAzIPs  map[string][]time.Time
 	oauthTokIPs map[string][]time.Time
+	inviteUsers map[string][]time.Time
+	inviteIPs   map[string][]time.Time
 	mcpSecret   []byte
 	lastSweep   time.Time
 }
@@ -104,6 +109,8 @@ func New(st store.Store, cfg config.Config, now func() time.Time) *Service {
 		oauthRegIPs: map[string][]time.Time{},
 		oauthAzIPs:  map[string][]time.Time{},
 		oauthTokIPs: map[string][]time.Time{},
+		inviteUsers: map[string][]time.Time{},
+		inviteIPs:   map[string][]time.Time{},
 	}
 }
 
@@ -240,6 +247,8 @@ func (s *Service) sweepLocked(now time.Time) {
 	pruneIPBucket(s.oauthRegIPs, now.Add(-oauthRegisterWindow))
 	pruneIPBucket(s.oauthAzIPs, now.Add(-oauthMinuteWindow))
 	pruneIPBucket(s.oauthTokIPs, now.Add(-oauthMinuteWindow))
+	pruneIPBucket(s.inviteUsers, now.Add(-inviteWindow))
+	pruneIPBucket(s.inviteIPs, now.Add(-inviteWindow))
 	for key, rec := range s.polls {
 		expired := !rec.expires.IsZero() && !now.Before(rec.expires)
 		idle := rec.seen && !rec.last.IsZero() && now.Sub(rec.last) > 24*time.Hour
@@ -293,6 +302,43 @@ func (s *Service) AllowOAuthAuthorize(ip string) error {
 // AllowOAuthToken counts one token request for ip. More than 60 in a minute returns ErrRateLimited.
 func (s *Service) AllowOAuthToken(ip string) error {
 	return s.hitIP(s.oauthTokIPs, ip, oauthMinuteLimit, oauthMinuteWindow, ErrRateLimited)
+}
+
+// AllowInvite counts one invite lookup or accept. More than 30 in a minute
+// for the user, or 60 in a minute for the IP, returns ErrRateLimited.
+// A rejected call is not counted.
+func (s *Service) AllowInvite(userID, ip string) error {
+	if userID == "" {
+		userID = "unknown"
+	}
+	if ip == "" {
+		ip = "unknown"
+	}
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked(now)
+	users := freshHits(s.inviteUsers[userID], now, inviteWindow)
+	ips := freshHits(s.inviteIPs[ip], now, inviteWindow)
+	if len(users) >= inviteUserLimit || len(ips) >= inviteIPLimit {
+		s.inviteUsers[userID] = users
+		s.inviteIPs[ip] = ips
+		return ErrRateLimited
+	}
+	s.inviteUsers[userID] = append(users, now)
+	s.inviteIPs[ip] = append(ips, now)
+	return nil
+}
+
+func freshHits(hits []time.Time, now time.Time, window time.Duration) []time.Time {
+	cut := now.Add(-window)
+	kept := make([]time.Time, 0, len(hits)+1)
+	for _, at := range hits {
+		if at.After(cut) {
+			kept = append(kept, at)
+		}
+	}
+	return kept
 }
 
 // TokenRateExempt reports a token request that authenticated as bot-mcp-server.

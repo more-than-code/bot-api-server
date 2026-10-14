@@ -125,6 +125,7 @@ func (m *Mem) DeleteProject(_ context.Context, id uuid.UUID, at time.Time) ([]uu
 		m.revokeCredsLocked(hid, at)
 	}
 	m.cascadeProjectLocked(id)
+	m.deleteInvitesLocked(id)
 	sortUUIDs(ids)
 	return ids, nil
 }

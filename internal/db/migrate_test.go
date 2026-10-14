@@ -8,10 +8,10 @@ import (
 )
 
 func TestMigrationSkipsDownScript(t *testing.T) {
-	if numberedSQL("0003_shared_hosts.down.sql") || numberedSQL("0004_service_names.down.sql") || numberedSQL("0005_mcp_oauth.down.sql") {
+	if numberedSQL("0003_shared_hosts.down.sql") || numberedSQL("0004_service_names.down.sql") || numberedSQL("0005_mcp_oauth.down.sql") || numberedSQL("0006_invites.down.sql") {
 		t.Fatal("down script is numbered SQL")
 	}
-	if !numberedSQL("0003_shared_hosts.sql") || !numberedSQL("0004_service_names.sql") || !numberedSQL("0005_mcp_oauth.sql") {
+	if !numberedSQL("0003_shared_hosts.sql") || !numberedSQL("0004_service_names.sql") || !numberedSQL("0005_mcp_oauth.sql") || !numberedSQL("0006_invites.sql") {
 		t.Fatal("numbered migration was skipped")
 	}
 	names, err := migrationFiles()
@@ -19,7 +19,7 @@ func TestMigrationSkipsDownScript(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(names, ",")
-	for _, want := range []string{"0001_app.sql", "0002_metrics.sql", "0003_shared_hosts.sql", "0004_service_names.sql", "0005_mcp_oauth.sql"} {
+	for _, want := range []string{"0001_app.sql", "0002_metrics.sql", "0003_shared_hosts.sql", "0004_service_names.sql", "0005_mcp_oauth.sql", "0006_invites.sql"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("migrations = %s", got)
 		}
@@ -224,4 +224,68 @@ func sharedHostsBackfillSQL(t *testing.T) string {
 	}
 	t.Fatal("backfill statement not found in 0003_shared_hosts.sql")
 	return ""
+}
+
+func TestInviteMigrationText(t *testing.T) {
+	body, err := migrations.FS.ReadFile("0006_invites.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		"CREATE TABLE app.invites",
+		"ON DELETE CASCADE",
+		"CHECK (role IN ('admin', 'viewer'))",
+		"CHECK (max_uses BETWEEN 1 AND 50)",
+		"CHECK (uses BETWEEN 0 AND max_uses)",
+		"CHECK (octet_length(token_hash) = 32)",
+		"CREATE INDEX invites_project_idx ON app.invites (project_id)",
+		"REVOKE ALL ON TABLE app.invites FROM deploybot_api",
+		"GRANT SELECT, INSERT ON TABLE app.invites TO deploybot_api",
+		"GRANT UPDATE (uses, revoked_at) ON TABLE app.invites TO deploybot_api",
+		"SECURITY DEFINER",
+		"SET search_path = pg_catalog, app",
+		"REVOKE ALL ON FUNCTION app.invites_delete_for_project(uuid) FROM PUBLIC",
+		"GRANT EXECUTE ON FUNCTION app.invites_delete_for_project(uuid) TO deploybot_api",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("0006 missing %s", want)
+		}
+	}
+	if strings.Contains(text, "GRANT UPDATE, DELETE") || strings.Contains(text, "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.invites") {
+		t.Fatal("0006 grants deploybot_api more than select, insert, and two columns")
+	}
+	fn := 0
+	for _, stmt := range splitSQL(text) {
+		if strings.Contains(stmt, "CREATE FUNCTION app.invites_delete_for_project") {
+			fn++
+			if !strings.Contains(stmt, "DELETE FROM app.invites WHERE project_id = p_project_id") {
+				t.Fatal("function body was split")
+			}
+		}
+		if strings.TrimSpace(stmt) == "DELETE FROM app.invites WHERE project_id = p_project_id" {
+			t.Fatal("function body was split into its own statement")
+		}
+	}
+	if fn != 1 {
+		t.Fatalf("function statements %d", fn)
+	}
+	down, err := migrations.FS.ReadFile("0006_invites.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	downText := string(down)
+	for _, want := range []string{
+		"--migrate does not apply",
+		"DELETE FROM app.schema_migrations WHERE name = '0006_invites.sql'",
+		"DROP FUNCTION IF EXISTS app.invites_delete_for_project(uuid)",
+		"DROP TABLE IF EXISTS app.invites",
+	} {
+		if !strings.Contains(downText, want) {
+			t.Fatalf("down script missing %s", want)
+		}
+	}
+	if strings.Index(downText, "DROP FUNCTION") > strings.Index(downText, "DROP TABLE") {
+		t.Fatal("down script drops the table before the function")
+	}
 }

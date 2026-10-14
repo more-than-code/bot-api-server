@@ -117,6 +117,41 @@ type JoinToken struct {
 	RevokedAt    *time.Time `json:"revoked_at"`
 }
 
+// Invite is a project membership link. The plaintext token is never stored
+// and is not a field on this struct.
+type Invite struct {
+	ID        uuid.UUID  `json:"id"`
+	ProjectID uuid.UUID  `json:"-"`
+	Role      string     `json:"role"`
+	CreatedBy uuid.UUID  `json:"created_by"`
+	CreatedAt time.Time  `json:"created_at"`
+	ExpiresAt time.Time  `json:"expires_at"`
+	MaxUses   int        `json:"max_uses"`
+	Uses      int        `json:"uses"`
+	RevokedAt *time.Time `json:"revoked_at"`
+}
+
+// InviteUsable is the v1.5 rule: not revoked, not expired, and uses remain.
+func InviteUsable(inv Invite, at time.Time) bool {
+	return inv.RevokedAt == nil && at.Before(inv.ExpiresAt) && inv.Uses < inv.MaxUses
+}
+
+// InviteLookup is the read-only preview of an invite. Role is the invite's
+// role, not the caller's current membership role.
+type InviteLookup struct {
+	ProjectID     uuid.UUID
+	ProjectName   string
+	Role          string
+	AlreadyMember bool
+}
+
+// InviteAccept is the result of joining, or of already being a member.
+type InviteAccept struct {
+	InviteID  uuid.UUID
+	ProjectID uuid.UUID
+	Role      string
+}
+
 type Host struct {
 	ID           uuid.UUID  `json:"id"`
 	ProjectID    uuid.UUID  `json:"project_id"`
@@ -398,8 +433,9 @@ type Store interface {
 	Role(ctx context.Context, projectID, userID uuid.UUID) (string, error)
 	RenameProject(ctx context.Context, id uuid.UUID, name string) (Project, error)
 	// DeleteProject soft-deletes the project, revokes every host credential, and returns the host ids.
-	// Shares of the project and of its hosts are removed. Services of the project that
-	// sit on another project's host move to that host's owner, in the same transaction.
+	// Shares of the project and of its hosts are removed. Invites of the project are deleted.
+	// Services of the project that sit on another project's host move to that host's owner,
+	// in the same transaction.
 	DeleteProject(ctx context.Context, id uuid.UUID, at time.Time) ([]uuid.UUID, error)
 
 	ListMembers(ctx context.Context, projectID uuid.UUID, limit int, cursor *Cursor) ([]Member, *Cursor, error)
@@ -414,6 +450,17 @@ type Store interface {
 	// ConsumeJoinToken marks the token used and creates the host and credential in one step.
 	// A bad, used, revoked, or expired token returns ErrUnauthorized.
 	ConsumeJoinToken(ctx context.Context, tokenHash []byte, in EnrollInput, credentialID uuid.UUID, credentialHash []byte, at time.Time) (Host, error)
+
+	CreateInvite(ctx context.Context, projectID uuid.UUID, hash []byte, role string, createdBy uuid.UUID, expiresAt, at time.Time, maxUses int) (Invite, error)
+	// ListInvites returns every invite of the project, newest first, including unusable rows.
+	ListInvites(ctx context.Context, projectID uuid.UUID, limit int, cursor *Cursor) ([]Invite, *Cursor, error)
+	// RevokeInvite sets revoked_at. A second call keeps the original time. Another project's invite is ErrNotFound.
+	RevokeInvite(ctx context.Context, projectID, inviteID uuid.UUID, at time.Time) error
+	// LookupInvite does not change state. An unknown digest, or an expired, revoked, used-up, or deleted-project invite, is ErrNotFound.
+	LookupInvite(ctx context.Context, tokenHash []byte, userID uuid.UUID, at time.Time) (InviteLookup, error)
+	// AcceptInvite locks the invite and either returns the caller's current role or inserts one membership and increments uses.
+	// Those two outcomes never both happen. Unknown and unusable tokens are ErrNotFound.
+	AcceptInvite(ctx context.Context, tokenHash []byte, userID uuid.UUID, at time.Time) (InviteAccept, error)
 
 	GetHost(ctx context.Context, id uuid.UUID) (Host, error)
 	// ListHosts returns hosts owned by projectID, then hosts shared with it.

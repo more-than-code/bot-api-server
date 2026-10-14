@@ -20,6 +20,7 @@
 | `unavailable` | 503 (host offline or asleep) |
 | `timeout` | 504 (agent did not answer within 30 s) |
 | `error` | 500 |
+| `rate_limited` | 429 (v1.5) |
 
   The device token endpoint also uses `authorization_pending`, `slow_down`, `expired_token`, and `access_denied`, all with HTTP 400.
 - **Auth:** `Authorization: Bearer <session token>` on every route except those marked public. A missing, expired, or unknown token, or a disabled user, gives `unauthorized`.
@@ -229,3 +230,28 @@ The full contract is `docs/contracts/oauth-v1.md` (frozen). Changes to this API:
 4. **Audit actions:** `oauth.client_register`, `oauth.authorize`, `oauth.token_revoke`, `oauth.refresh_reuse`.
 5. **Cut-over:** legacy `mcp` sessions are revoked by migration 0005.
 6. **v1.4.1:** the device-approval routes (`GET /v1/auth/device/{user_code}`, `/approve`, `/deny`) need a `console` session; other kinds → 401. Other v1.4.1 changes are in oauth-v1 "v1.4.1 amendments".
+
+## v1.5 project invite links (2026-10-14, approved spec `docs/spec-project-invites.md`)
+
+Types: `Invite {"id","role","created_by","created_at","expires_at","max_uses","uses","revoked_at"}`. An invite is **usable** when `revoked_at` is null, `expires_at` > now, and `uses` < `max_uses`.
+
+| Method | Path | Who | Body | Result |
+|---|---|---|---|---|
+| POST | `/v1/projects/{id}/invites` | admin+ | `{"role":"admin"\|"viewer","expires_in_sec"?:3600..2592000 (default 604800),"max_uses"?:1..50 (default 1)}` | `Invite` + `"token"` + `"url"`, 201. Both appear **only here**. |
+| GET | `/v1/projects/{id}/invites` | admin+ | — | list of `Invite`, newest first, never the token. Includes unusable invites. |
+| DELETE | `/v1/projects/{id}/invites/{invite_id}` | admin+ | — | `null`; sets `revoked_at` (idempotent). An invite of another project → `not_found`. |
+| POST | `/v1/invites/lookup` | any signed-in console user | `{"token"}` | `{"project_id","project_name","role","already_member":bool}` |
+| POST | `/v1/invites/accept` | any signed-in console user | `{"token"}` | `{"project_id","role"}`, 200 |
+
+1. **Token:** 43-character unpadded base64url (256 bits), stored as SHA-256 and compared by hash. `url` is exactly `<BOT_API_CONSOLE_ORIGIN>/invite/<token>`. The token is only ever sent in request bodies to the API.
+2. **Validation:** `role` `owner` or any other value → `bad_request`. Values out of range → `bad_request`. Viewer → `forbidden`; non-member → `not_found` (general rule).
+3. **Lookup and accept:** a token that is unknown, malformed, expired, revoked, or used up → `not_found` with one identical body for all of them. Lookup never changes state.
+4. **Accept** runs in one transaction that locks the invite row (`SELECT … FOR UPDATE`):
+   - if the caller is already a member → 200 with their current role; `uses` is unchanged and the role is never changed;
+   - otherwise it inserts the membership with the invite's role and increments `uses`.
+   Concurrent accepts never exceed `max_uses`.
+5. **Session kinds:** lookup and accept need a `console` session; other kinds → 401.
+6. **Rate limit:** lookup and accept together: 30/min per user and 60/min per source IP, in memory → new envelope error code `rate_limited` with HTTP 429 (added to the error table by this version).
+7. **Audit:** `invite.create` (role, max_uses, expires_at), `invite.revoke`, `invite.accept` (invite id, user id). No audit row contains the token.
+8. **Deletion:** deleting a project deletes its invites.
+9. **Unchanged:** `POST /v1/projects/{id}/members` by email, and every other route.
