@@ -41,10 +41,20 @@ type route struct {
 func contractRoutes() []route {
 	return []route{
 		{"GET /health", true, (*Server).handleHealth},
+		{"GET /.well-known/oauth-authorization-server", true, (*Server).handleOAuthMetadata},
+		{"POST /oauth/register", true, (*Server).handleOAuthRegister},
+		{"GET /oauth/authorize", true, (*Server).handleOAuthAuthorize},
+		{"POST /oauth/token", true, (*Server).handleOAuthToken},
+		{"POST /oauth/revoke", true, (*Server).handleOAuthRevoke},
 		{"GET /v1/auth/google/start", true, (*Server).handleGoogleStart},
 		{"POST /v1/auth/google/callback", true, (*Server).handleGoogleCallback},
 		{"POST /v1/auth/signout", false, (*Server).handleSignOut},
 		{"GET /v1/me", false, (*Server).handleMe},
+		{"GET /v1/oauth/requests/{id}", false, (*Server).handleOAuthRequestGet},
+		{"POST /v1/oauth/requests/{id}/approve", false, (*Server).handleOAuthRequestApprove},
+		{"POST /v1/oauth/requests/{id}/deny", false, (*Server).handleOAuthRequestDeny},
+		{"GET /v1/me/grants", false, (*Server).handleGrantList},
+		{"DELETE /v1/me/grants/{id}", false, (*Server).handleGrantDelete},
 		{"POST /v1/auth/device/code", true, (*Server).handleDeviceCode},
 		{"POST /v1/auth/device/token", true, (*Server).handleDeviceToken},
 		{"GET /v1/auth/device/{user_code}", false, (*Server).handleDeviceGet},
@@ -139,6 +149,9 @@ func (s *Server) route(mux *http.ServeMux, pattern string, public bool, fn func(
 			}
 			s.logger().Info("request", "method", r.Method, "pattern", r.Pattern, "status", code, "ms", time.Since(start).Milliseconds())
 		}()
+		if strings.Contains(pattern, " /v1/") && s.rejectMCPAudience(sw, r) {
+			return
+		}
 		if !public {
 			sess, user, err := s.Auth.Authenticate(r.Context(), r.Header.Get("Authorization"))
 			if err != nil {
@@ -236,10 +249,30 @@ func mutating(method string) bool {
 }
 
 func viaKind(kind string) string {
-	if kind == "mcp" {
+	switch kind {
+	case store.KindLegacyMCP, store.KindMCPAccess, store.KindMCPRefresh, store.KindDelegated:
 		return audit.ViaMCP
+	default:
+		return audit.ViaConsole
 	}
-	return audit.ViaConsole
+}
+
+// rejectMCPAudience refuses a live MCP token on /v1/*.
+// That is mcp_access, mcp_refresh, or a legacy mcp session that survived cut-over.
+// A missing or unknown bearer is left for the route. Expired tokens are not live.
+func (s *Server) rejectMCPAudience(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get("Authorization") == "" {
+		return false
+	}
+	sess, _, err := s.Auth.Authenticate(r.Context(), r.Header.Get("Authorization"))
+	if err != nil {
+		return false
+	}
+	if sess.Kind != store.KindMCPAccess && sess.Kind != store.KindMCPRefresh && sess.Kind != store.KindLegacyMCP {
+		return false
+	}
+	writeCode(w, "invalid_token", "invalid token")
+	return true
 }
 
 func idPtr(id uuid.UUID) *uuid.UUID {

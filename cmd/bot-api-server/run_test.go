@@ -81,6 +81,64 @@ func TestRunMigrateIsOptIn(t *testing.T) {
 	}
 }
 
+func TestRunRejectsMCPSecretMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mcp-secret")
+	if err := os.WriteFile(path, []byte("test-mcp-client-secret-0123456789ab\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var opened bool
+	d := deps{
+		open: func(context.Context, string) (*db.DB, error) {
+			opened = true
+			return nil, errors.New("database connection failed")
+		},
+		migrate: func(context.Context, string) error { return nil },
+		serve:   func(string, http.Handler, func()) error { return nil },
+	}
+	getenv := func(k string) string {
+		switch k {
+		case "BOT_API_LISTEN":
+			return "127.0.0.1:0"
+		case "DATABASE_URL":
+			return "postgres://example.invalid/deploybot"
+		case "BOT_API_GOOGLE_CLIENT_ID":
+			return "dummy-google-client-id"
+		case "BOT_API_GOOGLE_CLIENT_SECRET":
+			return "dummy-google-client-secret"
+		case "BOT_API_DEVICE_VERIFICATION_URI":
+			return "http://127.0.0.1/device"
+		case "BOT_API_AGENT_WS_URL":
+			return "ws://127.0.0.1/agent/v1/ws"
+		case "BOT_API_OAUTH_REDIRECT_URIS":
+			return "http://127.0.0.1/callback"
+		case "BOT_API_MCP_RESOURCE":
+			return "http://mcp.example"
+		case "BOT_API_MCP_CLIENT_SECRET_FILE":
+			return path
+		default:
+			return ""
+		}
+	}
+	err := run(nil, getenv, d)
+	if err == nil || !strings.Contains(err.Error(), "0600") {
+		t.Fatalf("mode error: %v", err)
+	}
+	if opened {
+		t.Fatal("bad secret file opened the database")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = run(nil, getenv, d)
+	if err == nil || !opened {
+		t.Fatalf("0600 file err=%v opened=%v", err, opened)
+	}
+}
+
 func walkGo(root string) ([]string, error) {
 	var out []string
 	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {

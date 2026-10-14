@@ -198,6 +198,9 @@ func (s *Service) PollDevice(ctx context.Context, deviceCode string) (DeviceToke
 	if d.ConsumedAt != nil {
 		return DeviceToken{}, ErrExpiredToken
 	}
+	if s.cfg.MCPResource == "" {
+		return DeviceToken{}, errors.New("mcp resource is not configured")
+	}
 	consumed, err := s.st.ConsumeDevice(ctx, sum, now)
 	if err != nil {
 		return DeviceToken{}, s.mapConsumeErr(ctx, sum, err)
@@ -211,7 +214,13 @@ func (s *Service) PollDevice(ctx context.Context, deviceCode string) (DeviceToke
 	if consumed.ApprovedBy != nil {
 		userID = *consumed.ApprovedBy
 	}
-	sess, err := s.st.CreateSession(ctx, userID, hash, sessionMCP, exp, now)
+	sess, err := s.st.IssueDeviceAccess(ctx, store.IssueDevice{
+		UserID:    userID,
+		TokenHash: hash,
+		Audience:  s.cfg.MCPResource,
+		ExpiresAt: exp,
+		At:        now,
+	})
 	if err != nil {
 		return DeviceToken{}, err
 	}

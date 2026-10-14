@@ -59,7 +59,7 @@ AuditEntry {"id","at","actor_user_id","via","project_id","host_id","service_id",
 | POST | `/v1/auth/signout` | — (session) | `null` (deletes this session) |
 | GET | `/v1/me` | — (session) | `{"user":User,"identities":[{"provider","email"}],"projects":[Project]}` |
 | POST | `/v1/auth/device/code` | `{"client_name"}` (1–100 chars) | `{"device_code","user_code","verification_uri","verification_uri_complete","expires_in":600,"interval":5}` |
-| POST | `/v1/auth/device/token` | `{"device_code"}` | `{"token","expires_at"}` (session kind `mcp`, 30 days), or one of the four device codes |
+| POST | `/v1/auth/device/token` | `{"device_code"}` | `{"token","expires_at"}` (session kind `mcp`, 30 days; **since v1.4** kind `mcp_access`, see oauth-v1 §9), or one of the four device codes |
 | GET | `/v1/auth/device/{user_code}` | — (session) | `{"user_code","client_name","expires_at","status":"pending|approved|denied|expired"}` |
 | POST | `/v1/auth/device/{user_code}/approve` | — (session) | `null` |
 | POST | `/v1/auth/device/{user_code}/deny` | — (session) | `null` |
@@ -216,3 +216,16 @@ These take precedence over earlier sections for the routes they name. v1.2 is im
    - **Cursors:** a cursor is bound to the `q`, `host_id`, `sort`, and `dir` it was issued for. Reusing it with different values → `bad_request` "cursor does not match query". Cursors are offset-based: a row inserted or deleted between pages may be skipped or repeated.
 2. `GET /v1/hosts/{id}/services` is unchanged apart from the v1.2 fields on each row.
 3. Every row returned by (1) is a service the caller may read with `GET /v1/services/{id}`; (1) never widens access.
+
+## v1.4 OAuth for MCP (2026-10-14, approved spec `docs/spec-mcp-oauth.md`)
+
+The full contract is `docs/contracts/oauth-v1.md` (frozen). Changes to this API:
+
+1. **Audience rule:** on every `/v1/*` route, a token of session kind `mcp_access` or `mcp_refresh` → 401 `invalid_token` (oauth-v1 §8). `api_delegated` tokens act as their user; audit rows they cause carry `via='mcp'`.
+2. **New console-only routes** (they need a `console` session; other kinds → 401):
+   - `GET /v1/oauth/requests/{id}`, `POST /v1/oauth/requests/{id}/approve`, `POST /v1/oauth/requests/{id}/deny` (oauth-v1 §3.1);
+   - `GET /v1/me/grants`, `DELETE /v1/me/grants/{id}` (oauth-v1 §11).
+3. **Device flow:** `POST /v1/auth/device/token` issues an MCP-audience `mcp_access` token (oauth-v1 §9).
+4. **Audit actions:** `oauth.client_register`, `oauth.authorize`, `oauth.token_revoke`, `oauth.refresh_reuse`.
+5. **Cut-over:** legacy `mcp` sessions are revoked by migration 0005.
+6. **v1.4.1:** the device-approval routes (`GET /v1/auth/device/{user_code}`, `/approve`, `/deny`) need a `console` session; other kinds → 401. Other v1.4.1 changes are in oauth-v1 "v1.4.1 amendments".

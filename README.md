@@ -3,7 +3,7 @@
 Go service for deploybot: Google OAuth sign-in and sessions, projects and members, join tokens and host credentials, the bot-agent WebSocket, metrics ingest into Postgres `deploybot`, live probes, and the REST API used by bot-console and bot-mcp-server.
 
 - Design: `docs/design.md` (repo layout) and the umbrella `docs/design-bot-agent-deploy.md` §6 (server) and §3 (auth).
-- Contracts (frozen, do not edit here): `docs/contracts/api-v1.md` and `docs/contracts/agent-protocol-v1.md`.
+- Contracts (frozen, do not edit here): `docs/contracts/api-v1.md`, `docs/contracts/oauth-v1.md`, and `docs/contracts/agent-protocol-v1.md`.
 
 ## Run locally
 
@@ -52,4 +52,16 @@ A service keeps the discovered `name` the agent uses as its key. People set `dis
 
 ```sql
 DELETE FROM app.schema_migrations WHERE name = '0004_service_names.sql';
+```
+
+## MCP OAuth
+
+This process is the OAuth authorization server MCP clients use (`docs/contracts/oauth-v1.md`, api-v1 v1.4). A public client registers at `POST /oauth/register`. The person approves at the console. `POST /oauth/token` then issues an MCP access token (one hour) and a rotating refresh token (30 days). A second use of that code revokes the whole grant family, including later refreshes and delegated API tokens. `bot-mcp-server` exchanges a live MCP access token for a five-minute API token. Those exchanges are not counted against the token endpoint's per-IP limit; a missing or wrong client secret is. An MCP access token, an MCP refresh token, or a legacy `mcp` session presented to any `/v1/*` route is `401` with code `invalid_token`. The device flow (`POST /v1/auth/device/token`) issues an MCP access token for 30 days, in a grant family for the pseudo-client `deploybot-cli`. Looking up, approving, or denying a device code needs a console session.
+
+`BOT_API_PUBLIC_ORIGIN` is the issuer. A trailing slash is removed. `BOT_API_MCP_RESOURCE` is the audience clients must send; it is not trimmed. `BOT_API_CONSOLE_ORIGIN` is where `/oauth/authorize` sends the browser (`/oauth/consent?request=…`). When `BOT_API_MCP_RESOURCE` is set, `BOT_API_MCP_CLIENT_SECRET_FILE` is required before the process opens the database. The file must be a regular non-symlink file with mode `0600`. The first line is the plaintext secret for client id `bot-mcp-server` (a trailing CR is removed; a leading space is kept). That line must be at least 32 characters. A shorter line refuses to start, and the error does not include the secret. The database stores only the SHA-256 of that line. Leave `BOT_API_MCP_RESOURCE` empty to start without that client.
+
+`migrations/0005_mcp_oauth.sql` adds the OAuth tables, the session columns (`audience`, `grant_id`, `client_id`, `code_id`, `rotated_at`), widens `sessions.kind`, inserts `deploybot-cli`, and expires every live `kind = 'mcp'` session. It grants `deploybot_api` select, insert, update, and delete on the four new tables. `--migrate` does not apply `migrations/0005_mcp_oauth.down.sql`. Run that file by hand as `deploybot_owner`. It deletes `mcp_access`, `mcp_refresh`, and `api_delegated` sessions, restores the old kind check, and drops the new columns and tables. Legacy `mcp` rows stay expired. Clients, grants, codes, and pending requests are lost. Then delete the applied row before `--migrate` will apply 0005 again:
+
+```sql
+DELETE FROM app.schema_migrations WHERE name = '0005_mcp_oauth.sql';
 ```

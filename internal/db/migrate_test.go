@@ -8,10 +8,10 @@ import (
 )
 
 func TestMigrationSkipsDownScript(t *testing.T) {
-	if numberedSQL("0003_shared_hosts.down.sql") || numberedSQL("0004_service_names.down.sql") {
+	if numberedSQL("0003_shared_hosts.down.sql") || numberedSQL("0004_service_names.down.sql") || numberedSQL("0005_mcp_oauth.down.sql") {
 		t.Fatal("down script is numbered SQL")
 	}
-	if !numberedSQL("0003_shared_hosts.sql") || !numberedSQL("0004_service_names.sql") {
+	if !numberedSQL("0003_shared_hosts.sql") || !numberedSQL("0004_service_names.sql") || !numberedSQL("0005_mcp_oauth.sql") {
 		t.Fatal("numbered migration was skipped")
 	}
 	names, err := migrationFiles()
@@ -19,7 +19,7 @@ func TestMigrationSkipsDownScript(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(names, ",")
-	for _, want := range []string{"0001_app.sql", "0002_metrics.sql", "0003_shared_hosts.sql", "0004_service_names.sql"} {
+	for _, want := range []string{"0001_app.sql", "0002_metrics.sql", "0003_shared_hosts.sql", "0004_service_names.sql", "0005_mcp_oauth.sql"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("migrations = %s", got)
 		}
@@ -136,6 +136,77 @@ func assertSharedHostsMigration(t *testing.T) {
 	if !strings.Contains(downText, "--migrate does not apply") {
 		t.Fatal("down script does not say --migrate skips it")
 	}
+}
+
+func TestOAuthMigrationText(t *testing.T) {
+	body, err := migrations.FS.ReadFile("0005_mcp_oauth.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		"CREATE TABLE app.oauth_clients",
+		"CREATE TABLE app.oauth_grants",
+		"CREATE TABLE app.oauth_requests",
+		"CREATE TABLE app.oauth_codes",
+		"'deploybot-cli'",
+		"ADD COLUMN audience text NULL",
+		"ADD COLUMN grant_id uuid NULL",
+		"ADD COLUMN client_id text NULL",
+		"ADD COLUMN code_id uuid NULL",
+		"ADD COLUMN rotated_at timestamptz NULL",
+		"kind IN ('console', 'mcp', 'mcp_access', 'mcp_refresh', 'api_delegated')",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.oauth_clients TO deploybot_api",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.oauth_grants TO deploybot_api",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.oauth_requests TO deploybot_api",
+		"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE app.oauth_codes TO deploybot_api",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("0005 missing %s", want)
+		}
+	}
+	stmt := mcpCutoverSQL(t)
+	if !strings.Contains(stmt, "SET expires_at = now()") || !strings.Contains(stmt, "kind = 'mcp'") {
+		t.Fatalf("cut-over statement %q", stmt)
+	}
+	kindAt := strings.Index(text, "sessions_kind_chk")
+	updateAt := strings.Index(text, "SET expires_at = now()")
+	if kindAt < 0 || updateAt < 0 || kindAt > updateAt {
+		t.Fatal("cut-over UPDATE must run after the kind check allows mcp")
+	}
+	down, err := migrations.FS.ReadFile("0005_mcp_oauth.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	downText := string(down)
+	for _, want := range []string{
+		"--migrate does not apply",
+		"DELETE FROM app.schema_migrations WHERE name = '0005_mcp_oauth.sql'",
+		"DELETE FROM app.sessions WHERE kind NOT IN ('console', 'mcp')",
+		"DROP TABLE app.oauth_codes",
+		"DROP TABLE app.oauth_clients",
+		"kind IN ('console', 'mcp')",
+	} {
+		if !strings.Contains(downText, want) {
+			t.Fatalf("down script missing %s", want)
+		}
+	}
+}
+
+// mcpCutoverSQL is the UPDATE in 0005 that expires legacy mcp sessions.
+func mcpCutoverSQL(t *testing.T) string {
+	t.Helper()
+	body, err := migrations.FS.ReadFile("0005_mcp_oauth.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range splitSQL(string(body)) {
+		if strings.Contains(stmt, "SET expires_at = now()") && strings.Contains(stmt, "kind = 'mcp'") {
+			return stmt
+		}
+	}
+	t.Fatal("cut-over statement not found in 0005_mcp_oauth.sql")
+	return ""
 }
 
 // sharedHostsBackfillSQL is the UPDATE in 0003 that copies hosts.project_id

@@ -1,6 +1,6 @@
 # bot-api-server: per-repo design
 
-**Date:** 2026-10-13. **Status:** Approved design (D1–D31), wave 1 = phase 1. D34 (2026-10-14) amends umbrella D21. Service names and `GET /v1/projects/{id}/services` (2026-10-14) follow `docs/spec-project-services.md`.
+**Date:** 2026-10-13. **Status:** Approved design (D1–D31), wave 1 = phase 1. D34 (2026-10-14) amends umbrella D21. Service names and `GET /v1/projects/{id}/services` (2026-10-14) follow `docs/spec-project-services.md`. The MCP OAuth authorization server (2026-10-14) follows `docs/spec-mcp-oauth.md` and `docs/contracts/oauth-v1.md`.
 Cross-repo design: umbrella `docs/design-bot-agent-deploy.md` §2 (permissions), §3 (auth), §6 (server, app schema, Postgres roles and metrics). Contracts: `docs/contracts/`.
 
 ## Layout
@@ -9,13 +9,13 @@ Cross-repo design: umbrella `docs/design-bot-agent-deploy.md` §2 (permissions),
 cmd/bot-api-server/        main: config, DB pool, migrations on start (flag), HTTP server
 internal/config/           env config (below)
 internal/db/               pgx pool, migrations (embedded SQL), queries
-internal/auth/             Google OIDC + PKCE, sessions, device flow
+internal/auth/             Google OIDC + PKCE, sessions, device flow, MCP OAuth tokens
 internal/authz/            authorize(user, project, capability), plus host relation (D34)
 internal/api/              REST handlers, envelope, error mapping
 internal/agentws/          /agent/v1/ws: enroll, hello, heartbeat, ingest, tasks, hub of live connections
 internal/ingest/           sample validation (allowlists) and batched inserts
 internal/audit/            append-only audit writer
-migrations/                0001_app.sql, 0002_metrics.sql (TimescaleDB hypertables), 0003_shared_hosts.sql
+migrations/                0001_app.sql, 0002_metrics.sql (TimescaleDB hypertables), 0003_shared_hosts.sql, 0004_service_names.sql, 0005_mcp_oauth.sql
 ```
 
 ## Config (env)
@@ -29,7 +29,10 @@ migrations/                0001_app.sql, 0002_metrics.sql (TimescaleDB hypertabl
 | `BOT_API_OAUTH_REDIRECT_URIS` | comma-separated allowlist (console callbacks) |
 | `BOT_API_DEVICE_VERIFICATION_URI` | console `/device` URL |
 | `BOT_API_AGENT_WS_URL` | the public `wss://…/agent/v1/ws` shown in `install_command` |
-| `BOT_API_PUBLIC_ORIGIN` | for logs only |
+| `BOT_API_PUBLIC_ORIGIN` | OAuth issuer (trailing slash removed) and the startup log |
+| `BOT_API_MCP_RESOURCE` | MCP audience. When set, startup reads the client secret file before opening the database |
+| `BOT_API_CONSOLE_ORIGIN` | browser origin for `/oauth/authorize` consent redirects |
+| `BOT_API_MCP_CLIENT_SECRET_FILE` | mode `0600` file; first line is the plaintext `bot-mcp-server` secret, at least 32 characters |
 
 TLS terminates at the reverse proxy in production; dev listens on the tailnet.
 
@@ -57,3 +60,11 @@ Deleting a sharing project drops its shares and moves its services on other host
 `GET /v1/projects/{id}/services` requires project membership (`CapRead`). Rows are every service on hosts the project owns, plus services whose `project_id` is that project on hosts shared at `deploy`. A metrics share contributes nothing, including services that belong to the metrics project. Each row is the Service object plus `host_name`, `host_status` (the same rules as `Host.status`), and `project_name`. Search, sort, `total`, and paging run in SQL: one count and one page. `q` is bound with `LIKE` wildcards escaped. Sort and direction are an allowlist. Names sort by byte order of the lowercased label (`COLLATE "C"`), not locale. Host and kind use that same collation on the stored text. Ties break by `id` ascending. Nulls sort last in both directions. The cursor is opaque base64url JSON `{o, h}`: an offset and a short hash of `q`, `host_id`, `sort`, and `dir`. The first page has `prev_cursor` null. `GET /v1/hosts/{id}/services` orders by name in byte order (`COLLATE "C"`), like every other name sort, so Postgres and memstore agree. That list is otherwise unchanged apart from the two new Service fields.
 
 `migrations/0004_service_names.sql` adds the columns and `services_host_display_name_uidx`. `services_project_idx` already exists from 0003; 0004 creates it only if it is missing, and the down script does not drop it. `--migrate` does not apply `migrations/0004_service_names.down.sql`. Running that file by hand drops the two columns and the unique index. Names typed by people are lost. Then `DELETE FROM app.schema_migrations WHERE name = '0004_service_names.sql'` before `--migrate` will apply 0004 again. Grants are unchanged.
+
+## MCP OAuth authorization server
+
+Public clients register themselves. The browser consent routes, the device-code lookup and approve/deny routes, and `GET`/`DELETE /v1/me/grants` require a console session. Any other session kind on those routes is 401. `POST /oauth/token` accepts `authorization_code`, `refresh_token`, and the token-exchange grant. Only `bot-mcp-server`, authenticated with HTTP Basic and the secret from `BOT_API_MCP_CLIENT_SECRET_FILE`, may call token exchange. A request that passes that Basic authentication is not counted against the token endpoint's 60-per-minute per-IP limit. A missing or wrong secret is counted. That client is inserted at process start from the SHA-256 of the file's first line. It is not created by dynamic registration. Codes, refresh tokens, access tokens, and the client secret are stored as SHA-256. Comparison is constant-time. Identifiers and codes are at least 128 bits from `crypto/rand`; tokens are 256 bits. A second redemption of an authorization code revokes every session in that grant family, including tokens from later refreshes and `api_delegated` sessions. Presenting an already-rotated refresh token does the same.
+
+An `mcp_access`, `mcp_refresh`, or legacy `mcp` session on any `/v1/*` route is rejected with `invalid_token` before the handler runs. An `api_delegated` token acts as its user. Audit rows it causes use `via = 'mcp'`. The column check is `allowed|denied`, so an allow or deny decision is stored as `allowed` or `denied`.
+
+`migrations/0005_mcp_oauth.sql` is applied by `--migrate` as `deploybot_owner`. It adds `app.oauth_clients`, `app.oauth_grants`, `app.oauth_requests`, and `app.oauth_codes`, the session columns `audience`, `grant_id`, `client_id`, `code_id`, and `rotated_at`, and widens `sessions_kind_chk` to `console|mcp|mcp_access|mcp_refresh|api_delegated`. `kind = 'mcp'` stays legal so the cut-over can expire those rows in place: `UPDATE app.sessions SET expires_at = now() WHERE kind = 'mcp' AND expires_at > now()`. `deploybot-cli` is inserted for the device flow. `deploybot_api` receives select, insert, update, and delete on the four new tables. `--migrate` ignores `*.down.sql`. `migrations/0005_mcp_oauth.down.sql` is a hand-run rollback: run it as `deploybot_owner`, then `DELETE FROM app.schema_migrations WHERE name = '0005_mcp_oauth.sql'` before `--migrate` will apply 0005 again. The down script deletes sessions whose kind is not `console` or `mcp`, restores the 0001 kind check, and drops the new columns and tables. Legacy `mcp` rows stay expired. Clients, grants, codes, and pending requests are lost.

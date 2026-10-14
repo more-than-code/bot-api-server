@@ -40,6 +40,8 @@ func phrase(code string) string {
 		return "timed out"
 	case "error":
 		return "internal error"
+	case "invalid_token":
+		return "invalid token"
 	default:
 		return code
 	}
@@ -51,7 +53,7 @@ func statusFor(code string) int {
 		return http.StatusOK
 	case "bad_request", "authorization_pending", "slow_down", "expired_token", "access_denied":
 		return http.StatusBadRequest
-	case "unauthorized":
+	case "unauthorized", "invalid_token":
 		return http.StatusUnauthorized
 	case "forbidden":
 		return http.StatusForbidden

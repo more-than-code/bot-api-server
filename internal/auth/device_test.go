@@ -38,6 +38,7 @@ func TestDeviceFlow(t *testing.T) {
 	clk := &manualClock{t: time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)}
 	svc := auth.New(mem, config.Config{
 		DeviceVerificationURI: "https://console.example/device",
+		MCPResource:           "http://mcp.example",
 	}, clk.Now)
 
 	user, err := mem.UpsertGoogleUser(ctx, store.GoogleSignIn{
@@ -130,7 +131,7 @@ func TestDeviceFlow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sess.Kind != "mcp" || gotUser.ID != user.ID || !sess.ExpiresAt.Equal(wantExp) {
+	if sess.Kind != store.KindMCPAccess || sess.Audience != "http://mcp.example" || sess.ClientID != store.ClientDevice || sess.GrantID == nil || gotUser.ID != user.ID || !sess.ExpiresAt.Equal(wantExp) {
 		t.Fatalf("session %+v user %s", sess, gotUser.ID)
 	}
 	seen := sess.LastSeenAt

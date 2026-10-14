@@ -46,6 +46,16 @@ func (m *Mem) HoldsPlaintext(plain string) bool {
 			return true
 		}
 	}
+	for _, code := range m.oauthCodes {
+		if bytes.Contains(code.hash, raw) {
+			return true
+		}
+	}
+	for _, client := range m.oauthClients {
+		if bytes.Contains(client.SecretHash, raw) {
+			return true
+		}
+	}
 	return false
 }
 

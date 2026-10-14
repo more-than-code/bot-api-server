@@ -256,14 +256,19 @@ func (d *DB) GetSession(ctx context.Context, tokenHash []byte, now time.Time) (s
 	var user store.User
 	var sessID, userID, userText string
 	var stored []byte
+	var audience, clientID, grantText, codeText *string
+	var grantRevoked *time.Time
 	err := d.pool.QueryRow(ctx, `
 SELECT s.id::text, s.user_id::text, s.kind, s.created_at, s.expires_at, s.last_seen_at, s.token_hash,
+       s.audience, s.client_id, s.grant_id::text, s.code_id::text, s.rotated_at, g.revoked_at,
        u.id::text, u.email, u.name, u.avatar_url, u.disabled_at, u.created_at
 FROM app.sessions s
 JOIN app.users u ON u.id = s.user_id
+LEFT JOIN app.oauth_grants g ON g.id = s.grant_id
 WHERE s.token_hash = $1
 `, tokenHash).Scan(
 		&sessID, &userID, &sess.Kind, &sess.CreatedAt, &sess.ExpiresAt, &sess.LastSeenAt, &stored,
+		&audience, &clientID, &grantText, &codeText, &sess.RotatedAt, &grantRevoked,
 		&userText, &user.Email, &user.Name, &user.AvatarURL, &user.DisabledAt, &user.CreatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -283,7 +288,19 @@ WHERE s.token_hash = $1
 	if user.ID, err = parseID(userText); err != nil {
 		return store.Session{}, store.User{}, err
 	}
-	if !match || !now.Before(sess.ExpiresAt) || user.DisabledAt != nil {
+	if sess.GrantID, err = parseOptID(grantText); err != nil {
+		return store.Session{}, store.User{}, err
+	}
+	if sess.CodeID, err = parseOptID(codeText); err != nil {
+		return store.Session{}, store.User{}, err
+	}
+	if audience != nil {
+		sess.Audience = *audience
+	}
+	if clientID != nil {
+		sess.ClientID = *clientID
+	}
+	if !match || !now.Before(sess.ExpiresAt) || user.DisabledAt != nil || grantRevoked != nil {
 		return store.Session{}, store.User{}, store.ErrUnauthorized
 	}
 	return sess, user, nil

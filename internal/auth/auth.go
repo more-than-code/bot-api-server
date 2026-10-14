@@ -1,5 +1,6 @@
-// Package auth implements Google OIDC sign-in, console sessions, and the device flow.
-// Plaintext session tokens, device codes, and OAuth state stay out of the store.
+// Package auth implements Google OIDC sign-in, console sessions, the device flow,
+// and the MCP OAuth authorization server.
+// Plaintext session tokens, device codes, authorization codes, and OAuth state stay out of the store.
 package auth
 
 import (
@@ -19,18 +20,22 @@ import (
 )
 
 const (
-	oauthStateTTL     = 10 * time.Minute
-	oauthSweepEvery   = time.Minute
-	oauthStateCap     = 10000
-	consoleSessionTTL = 7 * 24 * time.Hour
-	mcpSessionTTL     = 30 * 24 * time.Hour
-	sessionConsole    = "console"
-	sessionMCP        = "mcp"
-	deviceIPLimit     = 10
-	tokenIPLimit      = 30
-	googleIPLimit     = 20
-	deviceIPWindow    = time.Minute
-	pollCap           = 10000
+	oauthStateTTL       = 10 * time.Minute
+	oauthSweepEvery     = time.Minute
+	oauthStateCap       = 10000
+	consoleSessionTTL   = 7 * 24 * time.Hour
+	mcpSessionTTL       = 30 * 24 * time.Hour
+	sessionConsole      = "console"
+	sessionMCP          = "mcp"
+	deviceIPLimit       = 10
+	tokenIPLimit        = 30
+	googleIPLimit       = 20
+	deviceIPWindow      = time.Minute
+	pollCap             = 10000
+	oauthRegisterLimit  = 10
+	oauthRegisterWindow = time.Hour
+	oauthMinuteLimit    = 60
+	oauthMinuteWindow   = time.Minute
 )
 
 var (
@@ -42,22 +47,27 @@ var (
 	ErrAccessDenied = errors.New("access_denied")
 	ErrRedirect     = errors.New("redirect_uri not allowed")
 	ErrUnavailable  = errors.New("unavailable")
+	ErrRateLimited  = errors.New("rate_limited")
 )
 
 // Service is the Google and device-flow authenticator.
 type Service struct {
-	st        store.Store
-	cfg       config.Config
-	clock     func() time.Time
-	mu        sync.Mutex
-	client    *http.Client
-	prov      *oidc.Provider
-	states    map[string]oauthState
-	polls     map[string]pollRec
-	ips       map[string][]time.Time
-	tokenIPs  map[string][]time.Time
-	googleIPs map[string][]time.Time
-	lastSweep time.Time
+	st          store.Store
+	cfg         config.Config
+	clock       func() time.Time
+	mu          sync.Mutex
+	client      *http.Client
+	prov        *oidc.Provider
+	states      map[string]oauthState
+	polls       map[string]pollRec
+	ips         map[string][]time.Time
+	tokenIPs    map[string][]time.Time
+	googleIPs   map[string][]time.Time
+	oauthRegIPs map[string][]time.Time
+	oauthAzIPs  map[string][]time.Time
+	oauthTokIPs map[string][]time.Time
+	mcpSecret   []byte
+	lastSweep   time.Time
 }
 
 type oauthState struct {
@@ -83,14 +93,17 @@ type SessionIssue struct {
 // New returns a service. A nil clock uses time.Now().UTC.
 func New(st store.Store, cfg config.Config, now func() time.Time) *Service {
 	return &Service{
-		st:        st,
-		cfg:       cfg,
-		clock:     now,
-		states:    map[string]oauthState{},
-		polls:     map[string]pollRec{},
-		ips:       map[string][]time.Time{},
-		tokenIPs:  map[string][]time.Time{},
-		googleIPs: map[string][]time.Time{},
+		st:          st,
+		cfg:         cfg,
+		clock:       now,
+		states:      map[string]oauthState{},
+		polls:       map[string]pollRec{},
+		ips:         map[string][]time.Time{},
+		tokenIPs:    map[string][]time.Time{},
+		googleIPs:   map[string][]time.Time{},
+		oauthRegIPs: map[string][]time.Time{},
+		oauthAzIPs:  map[string][]time.Time{},
+		oauthTokIPs: map[string][]time.Time{},
 	}
 }
 
@@ -224,6 +237,9 @@ func (s *Service) sweepLocked(now time.Time) {
 	pruneIPBucket(s.ips, cut)
 	pruneIPBucket(s.tokenIPs, cut)
 	pruneIPBucket(s.googleIPs, cut)
+	pruneIPBucket(s.oauthRegIPs, now.Add(-oauthRegisterWindow))
+	pruneIPBucket(s.oauthAzIPs, now.Add(-oauthMinuteWindow))
+	pruneIPBucket(s.oauthTokIPs, now.Add(-oauthMinuteWindow))
 	for key, rec := range s.polls {
 		expired := !rec.expires.IsZero() && !now.Before(rec.expires)
 		idle := rec.seen && !rec.last.IsZero() && now.Sub(rec.last) > 24*time.Hour
@@ -251,20 +267,45 @@ func pruneIPBucket(bucket map[string][]time.Time, cut time.Time) {
 
 // AllowDeviceIP counts one code request for ip. More than 10 in a minute returns ErrIPLimited.
 func (s *Service) AllowDeviceIP(ip string) error {
-	return s.hitIP(s.ips, ip, deviceIPLimit, ErrIPLimited)
+	return s.hitIP(s.ips, ip, deviceIPLimit, deviceIPWindow, ErrIPLimited)
 }
 
 // AllowDeviceTokenIP counts one token poll for ip. More than 30 in a minute returns ErrIPLimited.
 func (s *Service) AllowDeviceTokenIP(ip string) error {
-	return s.hitIP(s.tokenIPs, ip, tokenIPLimit, ErrIPLimited)
+	return s.hitIP(s.tokenIPs, ip, tokenIPLimit, deviceIPWindow, ErrIPLimited)
 }
 
 // AllowGoogleIP counts one authorization start for ip. More than 20 in a minute returns ErrUnavailable.
 func (s *Service) AllowGoogleIP(ip string) error {
-	return s.hitIP(s.googleIPs, ip, googleIPLimit, ErrUnavailable)
+	return s.hitIP(s.googleIPs, ip, googleIPLimit, deviceIPWindow, ErrUnavailable)
 }
 
-func (s *Service) hitIP(bucket map[string][]time.Time, ip string, limit int, over error) error {
+// AllowOAuthRegister counts one dynamic registration for ip. More than 10 in an hour returns ErrRateLimited.
+func (s *Service) AllowOAuthRegister(ip string) error {
+	return s.hitIP(s.oauthRegIPs, ip, oauthRegisterLimit, oauthRegisterWindow, ErrRateLimited)
+}
+
+// AllowOAuthAuthorize counts one authorization request for ip. More than 60 in a minute returns ErrRateLimited.
+func (s *Service) AllowOAuthAuthorize(ip string) error {
+	return s.hitIP(s.oauthAzIPs, ip, oauthMinuteLimit, oauthMinuteWindow, ErrRateLimited)
+}
+
+// AllowOAuthToken counts one token request for ip. More than 60 in a minute returns ErrRateLimited.
+func (s *Service) AllowOAuthToken(ip string) error {
+	return s.hitIP(s.oauthTokIPs, ip, oauthMinuteLimit, oauthMinuteWindow, ErrRateLimited)
+}
+
+// TokenRateExempt reports a token request that authenticated as bot-mcp-server.
+// A missing Basic header or a wrong secret is not exempt, and the secret compare still runs when Basic is present.
+func (s *Service) TokenRateExempt(user, pass string, hasBasic bool) bool {
+	if !hasBasic {
+		return false
+	}
+	match := s.secretMatches(pass)
+	return user == store.ClientMCP && match
+}
+
+func (s *Service) hitIP(bucket map[string][]time.Time, ip string, limit int, window time.Duration, over error) error {
 	if ip == "" {
 		ip = "unknown"
 	}
@@ -272,7 +313,7 @@ func (s *Service) hitIP(bucket map[string][]time.Time, ip string, limit int, ove
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked(now)
-	cut := now.Add(-deviceIPWindow)
+	cut := now.Add(-window)
 	kept := make([]time.Time, 0, len(bucket[ip])+1)
 	for _, at := range bucket[ip] {
 		if at.After(cut) {

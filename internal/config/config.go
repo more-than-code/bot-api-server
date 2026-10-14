@@ -20,6 +20,9 @@ type Config struct {
 	AgentWSURL            string
 	PublicOrigin          string
 	TrustedProxy          string
+	MCPResource           string
+	ConsoleOrigin         string
+	MCPClientSecretFile   string
 }
 
 const defaultIssuer = "https://accounts.google.com"
@@ -38,6 +41,9 @@ func FromEnv(getenv func(string) string, migrateOnly bool) (Config, error) {
 		AgentWSURL:            strings.TrimSpace(getenv("BOT_API_AGENT_WS_URL")),
 		PublicOrigin:          strings.TrimSpace(getenv("BOT_API_PUBLIC_ORIGIN")),
 		TrustedProxy:          strings.TrimSpace(getenv("BOT_API_TRUSTED_PROXY")),
+		MCPResource:           strings.TrimSpace(getenv("BOT_API_MCP_RESOURCE")),
+		ConsoleOrigin:         strings.TrimSpace(getenv("BOT_API_CONSOLE_ORIGIN")),
+		MCPClientSecretFile:   strings.TrimSpace(getenv("BOT_API_MCP_CLIENT_SECRET_FILE")),
 	}
 	if cfg.GoogleIssuer == "" {
 		cfg.GoogleIssuer = defaultIssuer

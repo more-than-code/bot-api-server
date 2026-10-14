@@ -39,9 +39,15 @@ func TestIntegration(t *testing.T) {
 		t.Fatalf("refusing database %s", dbName)
 	}
 
+	legacySession, seededLegacy := seedLegacyMCPSession(t, d, ctx)
 	if err := Migrate(ctx, url); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
+	if seededLegacy {
+		assertLegacyMCPExpired(t, d, ctx, legacySession)
+	}
+	replayMCPCutover(t, d, ctx)
+	assertOAuthSchema(t, d, ctx)
 	if _, err := d.pool.Exec(ctx, `
 TRUNCATE TABLE
     metrics.ingest_batches,
@@ -61,6 +67,9 @@ TRUNCATE TABLE
     app.agent_credentials,
     app.join_tokens,
     app.device_codes,
+    app.oauth_codes,
+    app.oauth_requests,
+    app.oauth_grants,
     app.hosts,
     app.project_members,
     app.sessions,
@@ -69,6 +78,10 @@ TRUNCATE TABLE
     app.users
 `); err != nil {
 		t.Fatalf("truncate: %v", err)
+	}
+	// Migration-seeded internal clients (deploybot-cli) must survive, or the next run's schema check fails.
+	if _, err := d.pool.Exec(ctx, `DELETE FROM app.oauth_clients WHERE kind <> 'internal'`); err != nil {
+		t.Fatalf("clear clients: %v", err)
 	}
 
 	names := map[string]bool{}
@@ -89,7 +102,7 @@ TRUNCATE TABLE
 		t.Fatalf("migrations: %v", err)
 	}
 	rows.Close()
-	if !names["0001_app.sql"] || !names["0002_metrics.sql"] || !names["0003_shared_hosts.sql"] || !names["0004_service_names.sql"] || names["0003_shared_hosts.down.sql"] || names["0004_service_names.down.sql"] {
+	if !names["0001_app.sql"] || !names["0002_metrics.sql"] || !names["0003_shared_hosts.sql"] || !names["0004_service_names.sql"] || !names["0005_mcp_oauth.sql"] || names["0003_shared_hosts.down.sql"] || names["0004_service_names.down.sql"] || names["0005_mcp_oauth.down.sql"] {
 		t.Fatalf("schema_migrations = %v", names)
 	}
 
@@ -228,6 +241,7 @@ WHERE id = $1::uuid
 		t.Fatalf("project_id = %s, want %s", projectText, project.ID)
 	}
 	sharedHostsIntegration(t, d, ctx, user, project, enrolled, serviceID, at)
+	oauthHTTPIntegration(t, d, ctx)
 }
 
 // sharedHostsIntegration is the Postgres half of spec §6: backfill shape,

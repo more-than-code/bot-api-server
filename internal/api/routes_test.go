@@ -20,10 +20,20 @@ import (
 func TestRouteTable(t *testing.T) {
 	want := []string{
 		"GET /health",
+		"GET /.well-known/oauth-authorization-server",
+		"POST /oauth/register",
+		"GET /oauth/authorize",
+		"POST /oauth/token",
+		"POST /oauth/revoke",
 		"GET /v1/auth/google/start",
 		"POST /v1/auth/google/callback",
 		"POST /v1/auth/signout",
 		"GET /v1/me",
+		"GET /v1/oauth/requests/{id}",
+		"POST /v1/oauth/requests/{id}/approve",
+		"POST /v1/oauth/requests/{id}/deny",
+		"GET /v1/me/grants",
+		"DELETE /v1/me/grants/{id}",
 		"POST /v1/auth/device/code",
 		"POST /v1/auth/device/token",
 		"GET /v1/auth/device/{user_code}",
@@ -92,7 +102,8 @@ func TestRouteTable(t *testing.T) {
 			if strings.Contains(rec.Body.String(), `"code"`) {
 				t.Fatalf("health has an envelope: %s", rec.Body.String())
 			}
-		case "GET /v1/auth/google/start", "POST /v1/auth/google/callback", "POST /v1/auth/device/code", "POST /v1/auth/device/token":
+		case "GET /v1/auth/google/start", "POST /v1/auth/google/callback", "POST /v1/auth/device/code", "POST /v1/auth/device/token",
+			"GET /.well-known/oauth-authorization-server", "POST /oauth/register", "GET /oauth/authorize", "POST /oauth/token", "POST /oauth/revoke":
 			if rec.Code == http.StatusUnauthorized {
 				t.Fatalf("%s should be public, got 401", pattern)
 			}
@@ -117,6 +128,11 @@ func TestHandlersCallAuthorize(t *testing.T) {
 		"handleDeviceCode":     true,
 		"handleDeviceToken":    true,
 		"handleNotFound":       true,
+		"handleOAuthMetadata":  true,
+		"handleOAuthRegister":  true,
+		"handleOAuthAuthorize": true,
+		"handleOAuthToken":     true,
+		"handleOAuthRevoke":    true,
 	}
 	matches, err := filepath.Glob("*.go")
 	if err != nil {
@@ -186,6 +202,7 @@ func TestEnvelopeStatus(t *testing.T) {
 		{"slow_down", 400},
 		{"expired_token", 400},
 		{"access_denied", 400},
+		{"invalid_token", 401},
 	}
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()

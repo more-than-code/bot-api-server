@@ -28,6 +28,12 @@ type Mem struct {
 	sessions      map[uuid.UUID]sessionRec
 	sessionByHash map[string]uuid.UUID
 
+	oauthClients  map[string]store.OAuthClient
+	oauthRequests map[string]store.OAuthRequest
+	oauthCodes    map[uuid.UUID]oauthCodeRec
+	codeByHash    map[string]uuid.UUID
+	oauthGrants   map[uuid.UUID]store.OAuthGrant
+
 	projects map[uuid.UUID]store.Project
 	bySlug   map[string]uuid.UUID
 	members  map[string]memberRec
@@ -59,6 +65,11 @@ type sessionRec struct {
 	hash []byte
 }
 
+type oauthCodeRec struct {
+	store.OAuthCode
+	hash []byte
+}
+
 type memberRec struct {
 	ProjectID uuid.UUID
 	UserID    uuid.UUID
@@ -86,6 +97,11 @@ func New() *Mem {
 		bySubject:     map[string]uuid.UUID{},
 		sessions:      map[uuid.UUID]sessionRec{},
 		sessionByHash: map[string]uuid.UUID{},
+		oauthClients:  map[string]store.OAuthClient{},
+		oauthRequests: map[string]store.OAuthRequest{},
+		oauthCodes:    map[uuid.UUID]oauthCodeRec{},
+		codeByHash:    map[string]uuid.UUID{},
+		oauthGrants:   map[uuid.UUID]store.OAuthGrant{},
 		projects:      map[uuid.UUID]store.Project{},
 		bySlug:        map[string]uuid.UUID{},
 		members:       map[string]memberRec{},
@@ -235,10 +251,34 @@ func (m *Mem) GetSession(_ context.Context, tokenHash []byte, now time.Time) (st
 		return store.Session{}, store.User{}, store.ErrUnauthorized
 	}
 	user := m.users[rec.UserID]
-	if user.DisabledAt != nil {
+	if user.DisabledAt != nil || grantRevoked(m, rec.Session) {
 		return store.Session{}, store.User{}, store.ErrUnauthorized
 	}
-	return rec.Session, user, nil
+	return cloneSession(rec.Session), user, nil
+}
+
+func grantRevoked(m *Mem, sess store.Session) bool {
+	if sess.GrantID == nil {
+		return false
+	}
+	g, ok := m.oauthGrants[*sess.GrantID]
+	return !ok || g.RevokedAt != nil
+}
+
+func cloneSession(s store.Session) store.Session {
+	if s.GrantID != nil {
+		id := *s.GrantID
+		s.GrantID = &id
+	}
+	if s.CodeID != nil {
+		id := *s.CodeID
+		s.CodeID = &id
+	}
+	if s.RotatedAt != nil {
+		t := *s.RotatedAt
+		s.RotatedAt = &t
+	}
+	return s
 }
 
 func (m *Mem) DeleteSession(_ context.Context, id uuid.UUID) error {

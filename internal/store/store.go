@@ -22,6 +22,11 @@ var (
 	ErrState              = errors.New("invalid state")
 	// ErrInvalid is a rejected write, such as sharing a host with its owner.
 	ErrInvalid = errors.New("invalid")
+	// ErrReuse is a second redemption of an authorization code or a rotated refresh token.
+	// The store has already revoked the tokens the contract requires.
+	ErrReuse = errors.New("reuse")
+	// ErrTarget is a resource that does not match the code or the grant family.
+	ErrTarget = errors.New("invalid target")
 )
 
 // ValidShareLevel reports whether level is a host share level.
@@ -69,12 +74,17 @@ type GoogleSignIn struct {
 }
 
 type Session struct {
-	ID         uuid.UUID `json:"-"`
-	UserID     uuid.UUID `json:"-"`
-	Kind       string    `json:"-"`
-	CreatedAt  time.Time `json:"-"`
-	ExpiresAt  time.Time `json:"-"`
-	LastSeenAt time.Time `json:"-"`
+	ID         uuid.UUID  `json:"-"`
+	UserID     uuid.UUID  `json:"-"`
+	Kind       string     `json:"-"`
+	CreatedAt  time.Time  `json:"-"`
+	ExpiresAt  time.Time  `json:"-"`
+	LastSeenAt time.Time  `json:"-"`
+	Audience   string     `json:"-"`
+	GrantID    *uuid.UUID `json:"-"`
+	ClientID   string     `json:"-"`
+	CodeID     *uuid.UUID `json:"-"`
+	RotatedAt  *time.Time `json:"-"`
 }
 
 type Project struct {
@@ -475,4 +485,45 @@ type Store interface {
 	// ConsumeDevice marks an approved, unconsumed, unexpired device used and returns it.
 	// A lost race returns ErrConflict.
 	ConsumeDevice(ctx context.Context, hash []byte, at time.Time) (Device, error)
+
+	PutOAuthClient(ctx context.Context, c OAuthClient) error
+	GetOAuthClient(ctx context.Context, id string) (OAuthClient, error)
+	TouchOAuthClient(ctx context.Context, id string, at time.Time) error
+	DeleteStalePublicClients(ctx context.Context, before time.Time) error
+
+	InsertOAuthRequest(ctx context.Context, req OAuthRequest) error
+	GetOAuthRequest(ctx context.Context, id string) (OAuthRequest, error)
+	// ApproveOAuth reuses or creates the grant, stores the code, and marks the request allowed.
+	// An unknown, expired, or already decided request returns ErrNotFound.
+	ApproveOAuth(ctx context.Context, in ApproveCode) (OAuthGrant, error)
+	// DenyOAuth marks the request denied. An unknown, expired, or decided request returns ErrNotFound.
+	DenyOAuth(ctx context.Context, requestID string, userID uuid.UUID, at time.Time) (OAuthRequest, error)
+
+	FindLiveGrant(ctx context.Context, userID uuid.UUID, clientID, resource string) (OAuthGrant, error)
+	ListUserGrants(ctx context.Context, userID uuid.UUID) ([]OAuthGrant, error)
+	// RevokeUserGrant revokes the family when the grant is active and owned by userID.
+	// Anything else returns ErrNotFound.
+	RevokeUserGrant(ctx context.Context, userID, grantID uuid.UUID, at time.Time) error
+
+	PeekOAuthCode(ctx context.Context, hash []byte) (OAuthCode, error)
+	// RedeemOAuthCode consumes a code and inserts the access and refresh sessions.
+	// A second call revokes the sessions issued from the first redemption and returns ErrReuse.
+	// A resource mismatch returns ErrTarget and does not consume the code.
+	// A client or redirect mismatch returns ErrInvalid and does not consume the code.
+	// An expired code returns ErrExpired and does not consume the code.
+	RedeemOAuthCode(ctx context.Context, in RedeemCode) (access Session, refresh Session, err error)
+	// RotateRefresh revokes the presented refresh token and inserts a new pair.
+	// An already-rotated token revokes the family and returns ErrReuse.
+	// A resource mismatch returns ErrTarget and does not rotate.
+	RotateRefresh(ctx context.Context, in RotateRefresh) (access Session, refresh Session, err error)
+	// IssueDelegated checks the subject under a lock and inserts an api_delegated session.
+	// A subject that fails the oauth-v1 §4.3 rules returns ErrUnauthorized.
+	IssueDelegated(ctx context.Context, in IssueDelegated) (Session, error)
+	// IssueDeviceAccess opens a device grant family and inserts an mcp_access session.
+	IssueDeviceAccess(ctx context.Context, in IssueDevice) (Session, error)
+	// RevokeTokenFamily revokes the grant family of an mcp_access or mcp_refresh token.
+	// Unknown digests return Found false and a nil error.
+	RevokeTokenFamily(ctx context.Context, tokenHash []byte, at time.Time, allowClient string, confidential bool) (RevokeResult, error)
+
+	CreateBoundSession(ctx context.Context, in BoundSession) (Session, error)
 }

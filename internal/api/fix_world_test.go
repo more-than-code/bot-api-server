@@ -47,6 +47,7 @@ func newWorld(t *testing.T) *world {
 		OAuthRedirectURIs:     []string{"http://127.0.0.1/callback"},
 		DeviceVerificationURI: "http://127.0.0.1/device",
 		AgentWSURL:            "ws://127.0.0.1/agent/v1/ws",
+		MCPResource:           "http://127.0.0.1:8091",
 	}
 	hub := agentws.New(mem, audit.Writer{Store: mem, Log: log, Now: clk}, log, clk)
 	ws := httptest.NewServer(hub)

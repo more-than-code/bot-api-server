@@ -55,6 +55,13 @@ func run(args []string, getenv func(string) string, d deps) error {
 	if migrateOnly {
 		return d.migrate(ctx, cfg.MigrateDatabaseURL)
 	}
+	var mcpSecret string
+	if cfg.MCPResource != "" {
+		mcpSecret, err = config.ReadMCPClientSecret(cfg.MCPClientSecretFile)
+		if err != nil {
+			return err
+		}
+	}
 	pool, err := d.open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -64,9 +71,16 @@ func run(args []string, getenv func(string) string, d deps) error {
 	log := slog.Default()
 	aud := audit.Writer{Store: pool, Log: log, Now: now}
 	hub := agentws.New(pool, aud, log, now)
+	authn := auth.New(pool, cfg, now)
+	if mcpSecret != "" {
+		if err := authn.SetMCPClientSecret(ctx, mcpSecret); err != nil {
+			return err
+		}
+		log.Info("mcp oauth client ready")
+	}
 	srv := &api.Server{
 		Store:        pool,
-		Auth:         auth.New(pool, cfg, now),
+		Auth:         authn,
 		Hub:          hub,
 		Audit:        aud,
 		AgentWSURL:   cfg.AgentWSURL,
@@ -100,6 +114,9 @@ func housekeep(ctx context.Context, pool *db.DB, authn *auth.Service, now func()
 			}
 			if err := authn.PurgeDevices(ctx); err != nil {
 				slog.Error("device purge failed")
+			}
+			if err := authn.PurgeOAuthClients(ctx); err != nil {
+				slog.Error("oauth client purge failed")
 			}
 			if err := pool.DeleteOldBatches(ctx, now().Add(-48*time.Hour)); err != nil {
 				slog.Error("batch purge failed")

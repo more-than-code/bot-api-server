@@ -249,7 +249,7 @@ func (s *Server) handleDeviceToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeviceGet(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.require(w, r)
+	p, ok := s.consoleUser(w, r)
 	if !ok {
 		return
 	}
@@ -271,7 +271,7 @@ func (s *Server) handleDeviceGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeviceApprove(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.require(w, r)
+	p, ok := s.consoleUser(w, r)
 	if !ok {
 		return
 	}
@@ -283,7 +283,7 @@ func (s *Server) handleDeviceApprove(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeviceDeny(w http.ResponseWriter, r *http.Request) {
-	p, ok := s.require(w, r)
+	p, ok := s.consoleUser(w, r)
 	if !ok {
 		return
 	}
