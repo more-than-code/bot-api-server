@@ -160,3 +160,7 @@ Additional required vectors:
 | `ssh://git@host:22/repo` | unchanged |
 | `http://127.0.0.1:3031/health` | unchanged |
 | `a://u:p@h/x b://c:d@e/y` | `a://u:[REDACTED]@h/x b://c:[REDACTED]@e/y` |
+
+## v1.1 discovered owner (2026-10-14, additive)
+
+`Discovered` gains `"user": string | null`: the username of the uid that owns the listening socket. Read it from the `uid` column of `/proc/net/tcp{,6}` and resolve it via `/etc/passwd`; use the numeric uid as a string if the name is unknown. No privilege needed. It is sent for mapped and unmapped listeners alike. Servers that predate v1.1 ignore it. Servers that know v1.1 store it as `services.owner_user`.
