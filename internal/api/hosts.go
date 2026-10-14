@@ -156,7 +156,7 @@ func (s *Server) handleHostList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	cur, ok := s.cursor(w, r)
+	cur, ok := s.hostCursor(w, r)
 	if !ok {
 		return
 	}
@@ -176,10 +176,11 @@ func (s *Server) handleHostGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := authz.Authorize(r.Context(), p.User.ID, host.ProjectID, authz.CapRead); err != nil {
-		s.deny(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), nil, "", err)
+	rel, ok := s.gateHost(w, r, p, host, authz.CapHostView, nil, nil, "")
+	if !ok {
 		return
 	}
+	host = withRelation(host, rel)
 	host.Status = s.hostStatus(host)
 	writeOK(w, http.StatusOK, host)
 }
@@ -189,8 +190,7 @@ func (s *Server) handleHostRevoke(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := authz.Authorize(r.Context(), p.User.ID, host.ProjectID, authz.CapJoinToken); err != nil {
-		s.deny(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), nil, audit.ActionHostRevoke, err)
+	if _, ok := s.gateHost(w, r, p, host, authz.CapHostAdmin, nil, nil, audit.ActionHostRevoke); !ok {
 		return
 	}
 	if err := s.Store.RevokeHost(r.Context(), host.ID, s.now()); err != nil {

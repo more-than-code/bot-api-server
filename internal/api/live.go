@@ -19,8 +19,7 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := authz.Authorize(r.Context(), p.User.ID, host.ProjectID, authz.CapProbe); err != nil {
-		s.deny(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), nil, audit.ActionSnapshot, err)
+	if _, ok := s.gateHost(w, r, p, host, authz.CapHostView, nil, nil, audit.ActionSnapshot); !ok {
 		return
 	}
 	if s.Hub == nil {
@@ -38,8 +37,7 @@ func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := authz.Authorize(r.Context(), p.User.ID, host.ProjectID, authz.CapProbe); err != nil {
-		s.deny(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), idPtr(svc.ID), audit.ActionProbe, err)
+	if _, ok := s.gateHost(w, r, p, host, authz.CapServiceRead, &svc.ProjectID, idPtr(svc.ID), audit.ActionProbe); !ok {
 		return
 	}
 	var body struct {

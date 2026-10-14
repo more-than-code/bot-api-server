@@ -124,8 +124,31 @@ func (m *Mem) DeleteProject(_ context.Context, id uuid.UUID, at time.Time) ([]uu
 		}
 		m.revokeCredsLocked(hid, at)
 	}
+	m.cascadeProjectLocked(id)
 	sortUUIDs(ids)
 	return ids, nil
+}
+
+// cascadeProjectLocked moves this project's services on other hosts back to
+// those hosts' owners, and drops shares of this project and of its hosts.
+func (m *Mem) cascadeProjectLocked(projectID uuid.UUID) {
+	for id, svc := range m.services {
+		if svc.ProjectID != projectID {
+			continue
+		}
+		h, ok := m.hosts[svc.HostID]
+		if !ok || h.ProjectID == projectID {
+			continue
+		}
+		svc.ProjectID = h.ProjectID
+		m.services[id] = svc
+	}
+	for key, sh := range m.shares {
+		h, ok := m.hosts[sh.HostID]
+		if sh.ProjectID == projectID || (ok && h.ProjectID == projectID) {
+			delete(m.shares, key)
+		}
+	}
 }
 
 func (m *Mem) revokeCredsLocked(hostID uuid.UUID, at time.Time) {

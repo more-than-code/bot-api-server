@@ -15,11 +15,11 @@ func (s *Server) handleServiceList(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := authz.Authorize(r.Context(), p.User.ID, host.ProjectID, authz.CapRead); err != nil {
-		s.deny(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), nil, "", err)
+	rel, ok := s.gateHost(w, r, p, host, authz.CapHostServices, nil, nil, "")
+	if !ok {
 		return
 	}
-	items, err := s.Store.ListServices(r.Context(), host.ID, s.now())
+	items, err := s.Store.ListServices(r.Context(), host.ID, authz.ServiceProjectFilter(rel), s.now())
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -32,8 +32,7 @@ func (s *Server) handleServiceGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := authz.Authorize(r.Context(), p.User.ID, host.ProjectID, authz.CapRead); err != nil {
-		s.deny(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), idPtr(svc.ID), "", err)
+	if _, ok := s.gateHost(w, r, p, host, authz.CapServiceRead, &svc.ProjectID, idPtr(svc.ID), ""); !ok {
 		return
 	}
 	checks, err := s.Store.ListHealthChecks(r.Context(), svc.ID)
@@ -55,8 +54,7 @@ func (s *Server) handleHealthPut(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := authz.Authorize(r.Context(), p.User.ID, host.ProjectID, authz.CapHealthWrite); err != nil {
-		s.deny(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), idPtr(svc.ID), audit.ActionHealthChecks, err)
+	if _, ok := s.gateHost(w, r, p, host, authz.CapServiceWrite, &svc.ProjectID, idPtr(svc.ID), audit.ActionHealthChecks); !ok {
 		return
 	}
 	var body struct {

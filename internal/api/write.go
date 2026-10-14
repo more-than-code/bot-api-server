@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/more-than-code/bot-api-server/internal/store"
 )
 
@@ -129,11 +131,24 @@ type cursorWire struct {
 	ID string    `json:"id"`
 }
 
+type hostCursorWire struct {
+	RelRank *int   `json:"rel_rank"`
+	Name    string `json:"name"`
+	ID      string `json:"id"`
+}
+
 func encodeCursor(c *store.Cursor) *string {
 	if c == nil {
 		return nil
 	}
-	raw, err := json.Marshal(cursorWire{T: c.At.UTC(), ID: c.ID})
+	var raw []byte
+	var err error
+	if c.Rank != nil {
+		rank := *c.Rank
+		raw, err = json.Marshal(hostCursorWire{RelRank: &rank, Name: c.Name, ID: c.ID})
+	} else {
+		raw, err = json.Marshal(cursorWire{T: c.At.UTC(), ID: c.ID})
+	}
 	if err != nil {
 		return nil
 	}
@@ -166,12 +181,41 @@ func (s *Server) limit(w http.ResponseWriter, r *http.Request) (int, bool) {
 	return n, true
 }
 
+func decodeHostCursor(s string) (*store.Cursor, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	if err != nil {
+		return nil, errBadCursor
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var w hostCursorWire
+	if err := dec.Decode(&w); err != nil || dec.More() {
+		return nil, errBadCursor
+	}
+	if w.RelRank == nil || (*w.RelRank != 0 && *w.RelRank != 1) || w.Name == "" || w.ID == "" {
+		return nil, errBadCursor
+	}
+	if _, err := uuid.Parse(w.ID); err != nil {
+		return nil, errBadCursor
+	}
+	rank := *w.RelRank
+	return &store.Cursor{Rank: &rank, Name: w.Name, ID: w.ID}, nil
+}
+
 func (s *Server) cursor(w http.ResponseWriter, r *http.Request) (*store.Cursor, bool) {
+	return s.readCursor(w, r, decodeCursor)
+}
+
+func (s *Server) hostCursor(w http.ResponseWriter, r *http.Request) (*store.Cursor, bool) {
+	return s.readCursor(w, r, decodeHostCursor)
+}
+
+func (s *Server) readCursor(w http.ResponseWriter, r *http.Request, decode func(string) (*store.Cursor, error)) (*store.Cursor, bool) {
 	raw := r.URL.Query().Get("cursor")
 	if raw == "" {
 		return nil, true
 	}
-	c, err := decodeCursor(raw)
+	c, err := decode(raw)
 	if err != nil {
 		writeCode(w, "bad_request", "invalid cursor")
 		return nil, false

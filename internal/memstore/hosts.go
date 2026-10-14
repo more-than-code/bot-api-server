@@ -2,6 +2,7 @@ package memstore
 
 import (
 	"context"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -120,14 +121,92 @@ func (m *Mem) GetHost(_ context.Context, id uuid.UUID) (store.Host, error) {
 func (m *Mem) ListHosts(_ context.Context, projectID uuid.UUID, limit int, cursor *store.Cursor) ([]store.Host, *store.Cursor, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var items []store.Host
-	for _, h := range m.hosts {
-		if h.ProjectID == projectID {
+	all := m.visibleHostsLocked(projectID)
+	items := make([]store.Host, 0, len(all))
+	for _, h := range all {
+		if hostAfter(h, cursor) {
 			items = append(items, h)
 		}
 	}
-	out, next := pageBy(items, limit, cursor, func(h store.Host) time.Time { return h.EnrolledAt }, func(h store.Host) string { return h.ID.String() }, false)
-	return out, next, nil
+	if limit <= 0 {
+		limit = 50
+	}
+	var next *store.Cursor
+	if len(items) > limit {
+		items = items[:limit]
+		last := items[len(items)-1]
+		rank := 0
+		if last.Relation == "shared" {
+			rank = 1
+		}
+		next = &store.Cursor{Rank: &rank, Name: last.Name, ID: last.ID.String()}
+	}
+	if items == nil {
+		items = []store.Host{}
+	}
+	return items, next, nil
+}
+
+func (m *Mem) visibleHostsLocked(projectID uuid.UUID) []store.Host {
+	var items []store.Host
+	for _, h := range m.hosts {
+		if h.ProjectID != projectID {
+			continue
+		}
+		h.Relation = "owner"
+		h.ShareLevel = nil
+		items = append(items, h)
+	}
+	for _, sh := range m.shares {
+		if sh.ProjectID != projectID {
+			continue
+		}
+		h, ok := m.hosts[sh.HostID]
+		if !ok || h.ProjectID == projectID {
+			continue
+		}
+		h.Relation = "shared"
+		level := sh.Level
+		h.ShareLevel = &level
+		items = append(items, h)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		ri, rj := 0, 0
+		if items[i].Relation == "shared" {
+			ri = 1
+		}
+		if items[j].Relation == "shared" {
+			rj = 1
+		}
+		if ri != rj {
+			return ri < rj
+		}
+		if items[i].Name != items[j].Name {
+			return items[i].Name < items[j].Name
+		}
+		return items[i].ID.String() < items[j].ID.String()
+	})
+	return items
+}
+
+// hostAfter reports whether h is strictly after the host-list cursor.
+// A nil cursor, or one without a rank, starts at the beginning. The cursor
+// host does not have to still be in the list.
+func hostAfter(h store.Host, cursor *store.Cursor) bool {
+	if cursor == nil || cursor.Rank == nil {
+		return true
+	}
+	rank := 0
+	if h.Relation == "shared" {
+		rank = 1
+	}
+	if rank != *cursor.Rank {
+		return rank > *cursor.Rank
+	}
+	if h.Name != cursor.Name {
+		return h.Name > cursor.Name
+	}
+	return h.ID.String() > cursor.ID
 }
 
 func (m *Mem) RevokeHost(_ context.Context, hostID uuid.UUID, at time.Time) error {

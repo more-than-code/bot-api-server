@@ -9,12 +9,15 @@ import (
 	"github.com/more-than-code/bot-api-server/internal/store"
 )
 
-func (m *Mem) ListServices(_ context.Context, hostID uuid.UUID, now time.Time) ([]store.Service, error) {
+func (m *Mem) ListServices(_ context.Context, hostID uuid.UUID, projects []uuid.UUID, now time.Time) ([]store.Service, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	var items []store.Service
 	for _, s := range m.services {
 		if s.HostID != hostID {
+			continue
+		}
+		if !projectVisible(s.ProjectID, projects) {
 			continue
 		}
 		s.Health = store.DeriveHealth(m.latestHealthLocked(s.ID), now)
@@ -66,6 +69,7 @@ func (m *Mem) UpsertDiscovered(_ context.Context, hostID uuid.UUID, items []stor
 			m.services[id] = store.Service{
 				ID:            id,
 				HostID:        hostID,
+				ProjectID:     m.hosts[hostID].ProjectID,
 				Name:          item.Name,
 				Source:        "discovered",
 				Kind:          item.Kind,
@@ -182,6 +186,7 @@ func (m *Mem) PutDeclared(hostID uuid.UUID, name, kind string, ports []int, at t
 	s := store.Service{
 		ID:          uuid.New(),
 		HostID:      hostID,
+		ProjectID:   m.hosts[hostID].ProjectID,
 		Name:        name,
 		Source:      "declared",
 		Kind:        kind,
@@ -191,4 +196,17 @@ func (m *Mem) PutDeclared(hostID uuid.UUID, name, kind string, ports []int, at t
 	}
 	m.services[s.ID] = s
 	return s
+}
+
+// SetServiceProject assigns a service to a project. Tests use it to place a
+// service on a sharing project. It is not part of store.Store.
+func (m *Mem) SetServiceProject(id, projectID uuid.UUID) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.services[id]
+	if !ok {
+		return
+	}
+	s.ProjectID = projectID
+	m.services[id] = s
 }

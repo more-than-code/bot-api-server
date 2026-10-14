@@ -31,3 +31,13 @@ Phase 1 needs Go 1.27 and a Postgres 18 database with TimescaleDB. The server do
    It listens on `BOT_API_LISTEN`. `GET /health` returns `{"status":"ok"}`.
 
 `DEPLOYBOT_TEST_DATABASE_URL` is for integration tests only. Those tests refuse to run unless the connected database name is `deploybot_test`, and that database must already have had `roles.sql.example` applied. Leave the variable unset for `go test ./...`.
+
+## Shared hosts
+
+A host still belongs to one owning project. An owner admin can share it with another project at `metrics` or `deploy` (`PUT /v1/hosts/{id}/shares/{project_id}`). `GET /v1/projects/{id}/hosts` returns hosts that project owns and hosts shared with it. Owned hosts come first, then shared hosts, each ordered by name. The caller must be a member of the target project, and the owning project cannot be a share. Removing a share while that project still has services on the host returns 409 `conflict` unless `?reassign=owner` moves those services to the owner. Anyone who can see the host gets the full process list and may snapshot. Contract: `docs/contracts/api-v1.md` (v1.1.1). Behaviour: `docs/spec-shared-hosts.md`.
+
+`migrations/0003_shared_hosts.sql` is applied by `--migrate`. It backfills `services.project_id` from the host, then sets the column `NOT NULL`, and grants `deploybot_api` select, insert, update, and delete on `app.host_shares`. `migrations/0003_shared_hosts.down.sql` is not applied by `--migrate`. Run that file by hand as `deploybot_owner`, and only before phase 2 (until then `services.project_id` can be rebuilt from the host). Then delete the applied row so a later `--migrate` will run 0003 again:
+
+```sql
+DELETE FROM app.schema_migrations WHERE name = '0003_shared_hosts.sql';
+```

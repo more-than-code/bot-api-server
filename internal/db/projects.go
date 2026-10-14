@@ -171,6 +171,24 @@ WHERE c.host_id = h.id AND h.project_id = $1::uuid AND c.revoked_at IS NULL
 `, id.String(), at); err != nil {
 		return nil, mapErr(err)
 	}
+	// Services this project owns on someone else's host go back to that host's owner.
+	if err := exec(ctx, tx, `
+UPDATE app.services s
+SET project_id = h.project_id
+FROM app.hosts h
+WHERE s.host_id = h.id
+  AND s.project_id = $1::uuid
+  AND h.project_id <> $1::uuid
+`, id.String()); err != nil {
+		return nil, mapErr(err)
+	}
+	if err := exec(ctx, tx, `
+DELETE FROM app.host_shares
+WHERE project_id = $1::uuid
+   OR host_id IN (SELECT id FROM app.hosts WHERE project_id = $1::uuid)
+`, id.String()); err != nil {
+		return nil, mapErr(err)
+	}
 	rows, err := tx.Query(ctx, `
 SELECT id::text FROM app.hosts WHERE project_id = $1::uuid ORDER BY id::text
 `, id.String())

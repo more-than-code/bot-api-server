@@ -45,6 +45,9 @@ func TestRouteTable(t *testing.T) {
 		"GET /v1/projects/{id}/hosts",
 		"GET /v1/hosts/{id}",
 		"DELETE /v1/hosts/{id}/credential",
+		"GET /v1/hosts/{id}/shares",
+		"PUT /v1/hosts/{id}/shares/{project_id}",
+		"DELETE /v1/hosts/{id}/shares/{project_id}",
 		"GET /v1/hosts/{id}/services",
 		"GET /v1/services/{id}",
 		"PUT /v1/services/{id}/health-checks",
@@ -63,6 +66,7 @@ func TestRouteTable(t *testing.T) {
 	id := "11111111-1111-1111-1111-111111111111"
 	for _, pattern := range want {
 		method, path, _ := strings.Cut(pattern, " ")
+		path = strings.ReplaceAll(path, "{project_id}", id)
 		path = strings.ReplaceAll(path, "{id}", id)
 		path = strings.ReplaceAll(path, "{user_id}", id)
 		path = strings.ReplaceAll(path, "{token_id}", id)
@@ -154,7 +158,7 @@ func callsAuthorize(body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
-		if ok && sel.Sel.Name == "Authorize" {
+		if ok && (sel.Sel.Name == "Authorize" || sel.Sel.Name == "AuthorizeHost" || sel.Sel.Name == "AuthorizeUnshare" || sel.Sel.Name == "gateHost") {
 			found = true
 		}
 		return true

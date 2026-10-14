@@ -38,6 +38,7 @@ type Mem struct {
 	hosts      map[uuid.UUID]store.Host
 	creds      map[uuid.UUID]credRec
 	credByHash map[string]uuid.UUID
+	shares     map[string]store.HostShare
 
 	services map[uuid.UUID]store.Service
 	checks   map[uuid.UUID]store.HealthCheck
@@ -93,6 +94,7 @@ func New() *Mem {
 		hosts:         map[uuid.UUID]store.Host{},
 		creds:         map[uuid.UUID]credRec{},
 		credByHash:    map[string]uuid.UUID{},
+		shares:        map[string]store.HostShare{},
 		services:      map[uuid.UUID]store.Service{},
 		checks:        map[uuid.UUID]store.HealthCheck{},
 		batches:       map[string]time.Time{},

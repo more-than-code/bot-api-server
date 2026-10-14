@@ -159,3 +159,39 @@ Raised by the wave 1 workers and decided by the orchestrator. They take preceden
 1. **`install_command`** is now exactly `printf '%s' '<token>' | sudo -u bot-agent bot-agent init --server '<BOT_API_AGENT_WS_URL>' --join-token-stdin`. `printf` is a shell builtin, so the token never appears in any process argv.
 2. Agent `task_reject` `busy` → `unavailable` (503).
 3. Server-side redaction uses the agent-protocol v1.0.2 patterns.
+
+## v1.1 shared hosts (2026-10-14, approved spec `docs/spec-shared-hosts.md`)
+
+These take precedence over earlier sections. Permission matrix: spec §4.
+
+1. **Host** gains `"relation": "owner" | "shared"` and `"share_level": "metrics" | "deploy" | null` (null when `relation` = owner). `project_id` stays the owning project.
+2. **Service** gains `"project_id"` (the project the service belongs to; defaults to the host's owning project).
+3. **`GET /v1/projects/{id}/hosts`** returns hosts owned by project `id` **and** hosts shared with it. Owned hosts come first, then shared ones, each sorted by name.
+4. **Filtering:**
+   - Owner-project members see everything.
+   - A `metrics` share: host, status, and metrics are allowed; services, processes, snapshot, probe, and health history are `forbidden` (403).
+   - A `deploy` share: services and processes are filtered to the sharing project's own services (processes whose `service_id` belongs to those services); probe, health history, and (admin+) health-check edits apply only to its own services (`forbidden` otherwise); snapshot is `forbidden`.
+   - No relation: `not_found` (404).
+   - A user in both the owner and a sharing project gets the owner relation.
+5. **New endpoints:**
+   - `GET /v1/hosts/{id}/shares` (owner admin+) → `{"items":[{"project_id","project_name","level","created_by","created_at"}]}` (not paginated).
+   - `PUT /v1/hosts/{id}/shares/{project_id}` (owner admin+), body `{"level":"metrics"|"deploy"}`: creates or updates the share; 200 with the share object. The caller must also be a member (any role) of `project_id`, otherwise `not_found`. Sharing with the owning project itself → `bad_request`.
+   - `DELETE /v1/hosts/{id}/shares/{project_id}` (owner admin+, or admin+ of `project_id`) → 200 `null`. `conflict` (409) if that project still has services on the host, unless the query has `reassign=owner`, which moves those services to the owning project in the same transaction.
+6. **Audit actions:** `host.share`, `host.share_update`, `host.unshare` (with `detail` naming the project and level).
+7. **Project deletion** cascades its shares. Services of a deleted sharing project on others' hosts move to the owner. Deleting the owning project revokes its hosts' credentials (unchanged), and their shares go too.
+
+
+## v1.1.1 host-level visibility (2026-10-14, Joe: "processes per host should be visible to all members")
+
+Supersedes v1.1 item 4 for processes and snapshot only.
+
+1. **`GET /v1/hosts/{id}/processes`** returns the full, unfiltered latest sample to every user with any relation to the host: owner-project members (any role) and members of any sharing project (any share level, any role). No `service_id` filtering. No relation: `not_found` (404), unchanged.
+2. **`POST /v1/hosts/{id}/snapshot`** is allowed for the same set of users.
+3. Unchanged: services list, service get, probe, health history and health-check edits follow v1.1 item 4 (a `metrics` share gets 403; a `deploy` share is limited to its own project's services). `service_id` on a process row may name a service the caller cannot open; clients must treat a 403/404 on that service as normal.
+
+## v1.2 service names (2026-10-14, Joe: "service name is meaningless")
+
+1. **Service** gains `"display_name": string | null` (set by people; 1–64 printable characters, trimmed) and `"owner_user": string | null` (the account owning the listening socket, as reported by the agent).
+2. **`PATCH /v1/services/{id}`**, body `{"display_name": "<name>" | null}`, sets or clears the name; returns the updated Service. Permission = the *edit* capability of spec-shared-hosts §4 (owner admin+, or a `deploy`-share admin for its own services). Audit action `service.rename` (detail: old → new). `display_name` is unique per host, case-insensitive; a duplicate is `conflict`.
+3. The name survives rediscovery: services stay keyed by (host_id, discovered `name`), and `display_name` is never overwritten by the agent.
+4. Suggested label for clients: `display_name` → else the discovered `name` unless it is `port-<n>` → else `port <n> · <owner_user>` (or `port <n>` when `owner_user` is null).

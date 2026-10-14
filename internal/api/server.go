@@ -66,6 +66,9 @@ func contractRoutes() []route {
 		{"GET /v1/projects/{id}/hosts", false, (*Server).handleHostList},
 		{"GET /v1/hosts/{id}", false, (*Server).handleHostGet},
 		{"DELETE /v1/hosts/{id}/credential", false, (*Server).handleHostRevoke},
+		{"GET /v1/hosts/{id}/shares", false, (*Server).handleShareList},
+		{"PUT /v1/hosts/{id}/shares/{project_id}", false, (*Server).handleSharePut},
+		{"DELETE /v1/hosts/{id}/shares/{project_id}", false, (*Server).handleShareDelete},
 		{"GET /v1/hosts/{id}/services", false, (*Server).handleServiceList},
 		{"GET /v1/services/{id}", false, (*Server).handleServiceGet},
 		{"PUT /v1/services/{id}/health-checks", false, (*Server).handleHealthPut},
@@ -144,11 +147,24 @@ func (s *Server) route(mux *http.ServeMux, pattern string, public bool, fn func(
 				_ = s.Store.TouchSession(r.Context(), sess.ID, s.now())
 			}
 			ctx := authz.WithLookup(r.Context(), s.lookup)
+			ctx = authz.WithHostLookup(ctx, s.hostLookup)
 			ctx = withPrincipal(ctx, principal{User: user, Session: sess})
 			r = r.WithContext(ctx)
 		}
 		fn(s, sw, r)
 	})
+}
+
+func (s *Server) hostLookup(ctx context.Context, userID, hostID uuid.UUID) (authz.Relation, error) {
+	facts, err := s.Store.HostFacts(ctx, userID, hostID)
+	if err != nil {
+		return authz.Relation{}, err
+	}
+	shares := make([]authz.Share, len(facts.Shares))
+	for i, sh := range facts.Shares {
+		shares[i] = authz.Share{ProjectID: sh.ProjectID, Level: sh.Level, Role: sh.Role}
+	}
+	return authz.Relate(facts.OwnerRole, shares), nil
 }
 
 func (s *Server) lookup(ctx context.Context, userID, projectID uuid.UUID) (string, bool, error) {
@@ -266,6 +282,8 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		writeCode(w, "bad_request", "expired")
 	case errors.Is(err, store.ErrState):
 		writeCode(w, "conflict", "conflict")
+	case errors.Is(err, store.ErrInvalid):
+		writeCode(w, "bad_request", "bad request")
 	default:
 		s.logErr(err)
 		writeCode(w, "error", "internal error")

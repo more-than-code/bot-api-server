@@ -17,8 +17,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := authz.Authorize(r.Context(), p.User.ID, host.ProjectID, authz.CapRead); err != nil {
-		s.deny(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), nil, "", err)
+	if _, ok := s.gateHost(w, r, p, host, authz.CapHostView, nil, nil, ""); !ok {
 		return
 	}
 	q := r.URL.Query()
@@ -94,8 +93,7 @@ func (s *Server) handleProcesses(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := authz.Authorize(r.Context(), p.User.ID, host.ProjectID, authz.CapRead); err != nil {
-		s.deny(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), nil, "", err)
+	if _, ok := s.gateHost(w, r, p, host, authz.CapHostView, nil, nil, ""); !ok {
 		return
 	}
 	sortKey := r.URL.Query().Get("sort")
@@ -132,8 +130,7 @@ func (s *Server) handleHealthHistory(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := authz.Authorize(r.Context(), p.User.ID, host.ProjectID, authz.CapRead); err != nil {
-		s.deny(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), idPtr(svc.ID), "", err)
+	if _, ok := s.gateHost(w, r, p, host, authz.CapServiceRead, &svc.ProjectID, idPtr(svc.ID), ""); !ok {
 		return
 	}
 	from, to, ok := s.timeRange(w, r, 24*time.Hour)

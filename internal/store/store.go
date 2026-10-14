@@ -20,13 +20,24 @@ var (
 	ErrOwner              = errors.New("owner")
 	ErrExpired            = errors.New("expired")
 	ErrState              = errors.New("invalid state")
+	// ErrInvalid is a rejected write, such as sharing a host with its owner.
+	ErrInvalid = errors.New("invalid")
 )
 
+// ValidShareLevel reports whether level is a host share level.
+func ValidShareLevel(level string) bool {
+	return level == "metrics" || level == "deploy"
+}
+
 // Cursor is the position of the last item returned by a list.
-// ID is a UUID string, or the decimal audit id.
+// Time-ordered lists set At and ID. ID is a UUID string, or the decimal
+// audit id. Host lists set Rank, Name, and ID instead (rank 0 owned, rank 1
+// shared) and leave At zero. A nil Rank is not a host cursor.
 type Cursor struct {
-	At time.Time
-	ID string
+	At   time.Time
+	ID   string
+	Rank *int
+	Name string
 }
 
 type User struct {
@@ -109,6 +120,38 @@ type Host struct {
 	LastSeenAt   *time.Time `json:"last_seen_at"`
 	EnrolledAt   time.Time  `json:"enrolled_at"`
 	RevokedAt    *time.Time `json:"revoked_at"`
+	// Relation is "owner" or "shared" on host API responses. It is empty
+	// when the row was not loaded for a project list or a caller relation.
+	Relation string `json:"relation"`
+	// ShareLevel is set when Relation is "shared". JSON null when the host
+	// is owned by the project (or the caller) being described.
+	ShareLevel *string `json:"share_level"`
+}
+
+// HostShare is one project a host is shared with.
+type HostShare struct {
+	HostID      uuid.UUID `json:"-"`
+	ProjectID   uuid.UUID `json:"project_id"`
+	ProjectName string    `json:"project_name"`
+	Level       string    `json:"level"`
+	CreatedBy   uuid.UUID `json:"created_by"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// HostShareAccess is one share the caller is a member of on a host.
+type HostShareAccess struct {
+	ProjectID uuid.UUID
+	Level     string
+	Role      string
+}
+
+// HostFacts is the caller's membership in the host's owning project and
+// every share project they belong to. OwnerRole is empty when they are not
+// a member of the owning project. Shares is empty when they belong to none.
+// The authz package decides that an owner role wins and drops the shares.
+type HostFacts struct {
+	OwnerRole string
+	Shares    []HostShareAccess
 }
 
 // EnrollInput is the host facts from an enroll frame. Name is the requested
@@ -140,6 +183,7 @@ type Service struct {
 	SystemdScope  *string   `json:"systemd_scope"`
 	ContainerName *string   `json:"container_name"`
 	ProcessName   *string   `json:"process_name"`
+	ProjectID     uuid.UUID `json:"project_id"`
 	FirstSeenAt   time.Time `json:"first_seen_at"`
 	LastSeenAt    time.Time `json:"last_seen_at"`
 	Health        Health    `json:"health"`
@@ -308,6 +352,8 @@ type Store interface {
 	Role(ctx context.Context, projectID, userID uuid.UUID) (string, error)
 	RenameProject(ctx context.Context, id uuid.UUID, name string) (Project, error)
 	// DeleteProject soft-deletes the project, revokes every host credential, and returns the host ids.
+	// Shares of the project and of its hosts are removed. Services of the project that
+	// sit on another project's host move to that host's owner, in the same transaction.
 	DeleteProject(ctx context.Context, id uuid.UUID, at time.Time) ([]uuid.UUID, error)
 
 	ListMembers(ctx context.Context, projectID uuid.UUID, limit int, cursor *Cursor) ([]Member, *Cursor, error)
@@ -324,7 +370,24 @@ type Store interface {
 	ConsumeJoinToken(ctx context.Context, tokenHash []byte, in EnrollInput, credentialID uuid.UUID, credentialHash []byte, at time.Time) (Host, error)
 
 	GetHost(ctx context.Context, id uuid.UUID) (Host, error)
+	// ListHosts returns hosts owned by projectID, then hosts shared with it.
+	// Each group is ordered by name, then id. Relation and ShareLevel describe
+	// that project, not the caller. A cursor resumes by comparing
+	// (rank, name, id) with the cursor's values. It does not look the cursor
+	// host up, so a host that was unshared or renamed does not drop the rest.
 	ListHosts(ctx context.Context, projectID uuid.UUID, limit int, cursor *Cursor) ([]Host, *Cursor, error)
+	// HostFacts returns ErrNotFound when the host does not exist.
+	HostFacts(ctx context.Context, userID, hostID uuid.UUID) (HostFacts, error)
+	ListHostShares(ctx context.Context, hostID uuid.UUID) ([]HostShare, error)
+	// PutHostShare inserts or updates a share. created is true on insert.
+	// Sharing with the owning project returns ErrInvalid. A missing host or
+	// a missing or deleted project returns ErrNotFound.
+	PutHostShare(ctx context.Context, hostID, projectID uuid.UUID, level string, createdBy uuid.UUID, at time.Time) (HostShare, bool, error)
+	// DeleteHostShare removes the share. ErrConflict when that project still
+	// has services on the host, unless reassignOwner moves them to the host's
+	// owning project in the same transaction. The returned share is the row
+	// that was removed.
+	DeleteHostShare(ctx context.Context, hostID, projectID uuid.UUID, reassignOwner bool) (HostShare, error)
 	RevokeHost(ctx context.Context, hostID uuid.UUID, at time.Time) error
 	TouchHost(ctx context.Context, hostID uuid.UUID, at time.Time, version, osName, arch string) error
 
@@ -333,7 +396,10 @@ type Store interface {
 	// Unknown digests return ErrUnauthorized.
 	LookupCredential(ctx context.Context, hash []byte) (Credential, Host, error)
 
-	ListServices(ctx context.Context, hostID uuid.UUID, now time.Time) ([]Service, error)
+	// ListServices returns at most 500 services on the host, ordered by name.
+	// projects nil returns every service. A non-nil slice, including an empty
+	// one, returns services whose project_id is in that set.
+	ListServices(ctx context.Context, hostID uuid.UUID, projects []uuid.UUID, now time.Time) ([]Service, error)
 	GetService(ctx context.Context, id uuid.UUID, now time.Time) (Service, error)
 	UpsertDiscovered(ctx context.Context, hostID uuid.UUID, items []Discovered, at time.Time) error
 	ReplaceHealthChecks(ctx context.Context, serviceID uuid.UUID, checks []HealthCheckInput) ([]HealthCheck, error)
@@ -345,7 +411,8 @@ type Store interface {
 	// QueryChart returns at most 500 aggregated buckets per series. It does not return raw samples.
 	QueryChart(ctx context.Context, hostID uuid.UUID, measurement string, from, to time.Time, stepSec int) ([]ChartSeries, error)
 	LoadMetric(ctx context.Context, hostID uuid.UUID, measurement string, from, to time.Time) ([]Sample, error)
-	// LatestProcesses returns the newest sample group, sorted and limited in the store.
+	// LatestProcesses returns the newest sample group for the host, sorted and
+	// limited in the store. It is not filtered by service project.
 	LatestProcesses(ctx context.Context, hostID uuid.UUID, since time.Time, sortKey string, limit int) (*time.Time, []ProcessItem, error)
 	HealthHistory(ctx context.Context, serviceID uuid.UUID, from, to time.Time, limit int) ([]HealthPoint, error)
 	// DeleteExpiredDevices removes device codes with expires_at before the cutoff and returns their hashes.

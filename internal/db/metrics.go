@@ -598,7 +598,8 @@ func (d *DB) LatestProcesses(ctx context.Context, hostID uuid.UUID, since time.T
 	}
 	var maxT *time.Time
 	if err := d.pool.QueryRow(ctx, `
-SELECT max(time) FROM metrics.process_samples WHERE host_id = $1::uuid AND time >= $2
+SELECT max(time) FROM metrics.process_samples
+WHERE host_id = $1::uuid AND time >= $2
 `, hostID.String(), since).Scan(&maxT); err != nil {
 		return nil, nil, mapErr(err)
 	}

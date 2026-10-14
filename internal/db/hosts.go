@@ -213,31 +213,48 @@ WHERE id = $1::uuid
 
 func (d *DB) ListHosts(ctx context.Context, projectID uuid.UUID, limit int, cursor *store.Cursor) ([]store.Host, *store.Cursor, error) {
 	lim := pageLimit(limit)
-	var atArg any
-	var idArg any
-	if cursor != nil {
-		atArg = cursor.At
+	var rankArg, nameArg, idArg any
+	if cursor != nil && cursor.Rank != nil {
+		rankArg = *cursor.Rank
+		nameArg = cursor.Name
 		idArg = cursor.ID
 	}
+	// Owned hosts (rank 0) come before shares (rank 1). Each group is name, id.
+	// Resume compares (rel_rank, name, id) with the cursor values. A host that
+	// is no longer visible does not make the comparison fail.
 	rows, err := d.pool.Query(ctx, `
+WITH visible AS (
+    SELECT h.id, h.project_id, h.name, h.node_type, h.os, h.arch, h.always_on,
+           h.agent_version, h.last_seen_at, h.enrolled_at, h.revoked_at,
+           0 AS rel_rank, NULL::text AS share_level
+    FROM app.hosts h
+    WHERE h.project_id = $1::uuid
+    UNION ALL
+    SELECT h.id, h.project_id, h.name, h.node_type, h.os, h.arch, h.always_on,
+           h.agent_version, h.last_seen_at, h.enrolled_at, h.revoked_at,
+           1 AS rel_rank, s.level AS share_level
+    FROM app.host_shares s
+    JOIN app.hosts h ON h.id = s.host_id
+    WHERE s.project_id = $1::uuid
+      AND h.project_id <> $1::uuid
+)
 SELECT id::text, project_id::text, name, node_type, os, arch, always_on, agent_version,
-       last_seen_at, enrolled_at, revoked_at
-FROM app.hosts
-WHERE project_id = $1::uuid
-  AND (
-    CAST($2 AS timestamptz) IS NULL
-    OR (enrolled_at, id) > (CAST($2 AS timestamptz), CAST($3 AS uuid))
-  )
-ORDER BY enrolled_at ASC, id ASC
-LIMIT $4
-`, projectID.String(), atArg, idArg, lim+1)
+       last_seen_at, enrolled_at, revoked_at, rel_rank, share_level
+FROM visible v
+WHERE (
+    CAST($2 AS int) IS NULL
+    OR (v.rel_rank, v.name, v.id) > (CAST($2 AS int), CAST($3 AS text), CAST($4 AS uuid))
+)
+ORDER BY v.rel_rank ASC, v.name ASC, v.id ASC
+LIMIT $5
+`, projectID.String(), rankArg, nameArg, idArg, lim+1)
 	if err != nil {
 		return nil, nil, mapErr(err)
 	}
 	defer rows.Close()
 	items := []store.Host{}
 	for rows.Next() {
-		h, err := scanHost(rows)
+		h, err := scanListedHost(rows)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -246,7 +263,46 @@ LIMIT $4
 	if err := rows.Err(); err != nil {
 		return nil, nil, mapErr(err)
 	}
-	return cutPage(items, lim, func(h store.Host) time.Time { return h.EnrolledAt }, func(h store.Host) string { return h.ID.String() })
+	if len(items) > lim {
+		items = items[:lim]
+		last := items[len(items)-1]
+		rank := 1
+		if last.Relation == "owner" {
+			rank = 0
+		}
+		return items, &store.Cursor{Rank: &rank, Name: last.Name, ID: last.ID.String()}, nil
+	}
+	if items == nil {
+		items = []store.Host{}
+	}
+	return items, nil, nil
+}
+
+func scanListedHost(row pgx.Row) (store.Host, error) {
+	var h store.Host
+	var id, projectID string
+	var rank int
+	var level *string
+	if err := row.Scan(
+		&id, &projectID, &h.Name, &h.NodeType, &h.OS, &h.Arch, &h.AlwaysOn,
+		&h.AgentVersion, &h.LastSeenAt, &h.EnrolledAt, &h.RevokedAt, &rank, &level,
+	); err != nil {
+		return store.Host{}, mapErr(err)
+	}
+	var err error
+	if h.ID, err = parseID(id); err != nil {
+		return store.Host{}, err
+	}
+	if h.ProjectID, err = parseID(projectID); err != nil {
+		return store.Host{}, err
+	}
+	if rank == 0 {
+		h.Relation = "owner"
+		return h, nil
+	}
+	h.Relation = "shared"
+	h.ShareLevel = level
+	return h, nil
 }
 
 func (d *DB) RevokeHost(ctx context.Context, hostID uuid.UUID, at time.Time) error {

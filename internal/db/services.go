@@ -9,9 +9,24 @@ import (
 	"github.com/more-than-code/bot-api-server/internal/store"
 )
 
-func (d *DB) ListServices(ctx context.Context, hostID uuid.UUID, now time.Time) ([]store.Service, error) {
+// projectIDsArg is nil when every project is visible. Otherwise it is a
+// text[] of ids. pgx sends a Go string slice as text[], and text[] does not
+// cast to uuid[], so queries compare project_id::text = ANY($n::text[]).
+// An empty slice matches no rows.
+func projectIDsArg(ids []uuid.UUID) any {
+	if ids == nil {
+		return nil
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out
+}
+
+func (d *DB) ListServices(ctx context.Context, hostID uuid.UUID, projects []uuid.UUID, now time.Time) ([]store.Service, error) {
 	rows, err := d.pool.Query(ctx, `
-SELECT s.id::text, s.host_id::text, s.name, s.source, s.kind, s.ports,
+SELECT s.id::text, s.host_id::text, s.project_id::text, s.name, s.source, s.kind, s.ports,
        s.systemd_unit, s.systemd_scope, s.container_name, s.process_match,
        s.first_seen_at, s.last_seen_at,
        hr.time, hr.result, hr.latency_ms
@@ -24,9 +39,13 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) hr ON true
 WHERE s.host_id = $1::uuid
+  AND (
+    CAST($2 AS text[]) IS NULL
+    OR s.project_id::text = ANY(CAST($2 AS text[]))
+  )
 ORDER BY s.name ASC
 LIMIT 500
-`, hostID.String())
+`, hostID.String(), projectIDsArg(projects))
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -47,7 +66,7 @@ LIMIT 500
 
 func (d *DB) GetService(ctx context.Context, id uuid.UUID, now time.Time) (store.Service, error) {
 	return scanService(d.pool.QueryRow(ctx, `
-SELECT s.id::text, s.host_id::text, s.name, s.source, s.kind, s.ports,
+SELECT s.id::text, s.host_id::text, s.project_id::text, s.name, s.source, s.kind, s.ports,
        s.systemd_unit, s.systemd_scope, s.container_name, s.process_match,
        s.first_seen_at, s.last_seen_at,
        hr.time, hr.result, hr.latency_ms
@@ -81,12 +100,13 @@ func (d *DB) UpsertDiscovered(ctx context.Context, hostID uuid.UUID, items []sto
 INSERT INTO app.services (
     id, host_id, name, source, kind, ports,
     systemd_unit, systemd_scope, container_name, process_match,
-    first_seen_at, last_seen_at
-) VALUES (
-    $1::uuid, $2::uuid, $3, 'discovered', $4, $5::integer[],
-    $6, $7, $8, $9,
-    $10, $10
+    first_seen_at, last_seen_at, project_id
 )
+SELECT $1::uuid, h.id, $3, 'discovered', $4, $5::integer[],
+    $6, $7, $8, $9,
+    $10, $10, h.project_id
+FROM app.hosts h
+WHERE h.id = $2::uuid
 ON CONFLICT (host_id, name) DO UPDATE SET
     last_seen_at = EXCLUDED.last_seen_at,
     kind = CASE WHEN app.services.source = 'discovered' THEN EXCLUDED.kind ELSE app.services.kind END,
@@ -208,13 +228,13 @@ ORDER BY s.name ASC, c.id ASC
 
 func scanService(row pgx.Row, now time.Time) (store.Service, error) {
 	var s store.Service
-	var id, hostID string
+	var id, hostID, projectID string
 	var ports []int32
 	var checked *time.Time
 	var result *string
 	var latency *float64
 	if err := row.Scan(
-		&id, &hostID, &s.Name, &s.Source, &s.Kind, &ports,
+		&id, &hostID, &projectID, &s.Name, &s.Source, &s.Kind, &ports,
 		&s.SystemdUnit, &s.SystemdScope, &s.ContainerName, &s.ProcessName,
 		&s.FirstSeenAt, &s.LastSeenAt,
 		&checked, &result, &latency,
@@ -226,6 +246,9 @@ func scanService(row pgx.Row, now time.Time) (store.Service, error) {
 		return store.Service{}, err
 	}
 	if s.HostID, err = parseID(hostID); err != nil {
+		return store.Service{}, err
+	}
+	if s.ProjectID, err = parseID(projectID); err != nil {
 		return store.Service{}, err
 	}
 	s.Ports = intsFrom32(ports)

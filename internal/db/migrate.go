@@ -138,7 +138,8 @@ func migrationFiles() ([]string, error) {
 }
 
 func numberedSQL(name string) bool {
-	if !strings.HasSuffix(name, ".sql") || len(name) < 5 {
+	// *.down.sql is a hand-run rollback. --migrate must not apply it.
+	if strings.HasSuffix(name, ".down.sql") || !strings.HasSuffix(name, ".sql") || len(name) < 5 {
 		return false
 	}
 	i := 0
@@ -148,12 +149,24 @@ func numberedSQL(name string) bool {
 	return i > 0 && name[i] == '_'
 }
 
-// splitSQL splits a migration file on semicolons that are not inside quotes.
+// splitSQL splits a migration file on semicolons that are not inside
+// single quotes or dollar quotes. Dollar quotes keep a function body intact.
 func splitSQL(sql string) []string {
 	var stmts []string
 	var b strings.Builder
 	inSingle := false
+	var dollar string
 	for i := 0; i < len(sql); i++ {
+		if dollar != "" {
+			if strings.HasPrefix(sql[i:], dollar) {
+				b.WriteString(dollar)
+				i += len(dollar) - 1
+				dollar = ""
+				continue
+			}
+			b.WriteByte(sql[i])
+			continue
+		}
 		c := sql[i]
 		if c == '\'' {
 			if inSingle && i+1 < len(sql) && sql[i+1] == '\'' {
@@ -164,6 +177,14 @@ func splitSQL(sql string) []string {
 			inSingle = !inSingle
 			b.WriteByte(c)
 			continue
+		}
+		if !inSingle && c == '$' {
+			if tag, ok := dollarTag(sql[i:]); ok {
+				dollar = tag
+				b.WriteString(tag)
+				i += len(tag) - 1
+				continue
+			}
 		}
 		if c == ';' && !inSingle {
 			if s := strings.TrimSpace(b.String()); meaningfulSQL(s) {
@@ -178,6 +199,30 @@ func splitSQL(sql string) []string {
 		stmts = append(stmts, s)
 	}
 	return stmts
+}
+
+// dollarTag returns a dollar-quote delimiter such as $$ or $fn$.
+// $1 is a parameter, not a tag, and returns false.
+func dollarTag(s string) (string, bool) {
+	if len(s) < 2 || s[0] != '$' {
+		return "", false
+	}
+	j := 1
+	for j < len(s) {
+		c := s[j]
+		if c == '$' {
+			return s[:j+1], true
+		}
+		if !isDollarIdent(c) {
+			return "", false
+		}
+		j++
+	}
+	return "", false
+}
+
+func isDollarIdent(c byte) bool {
+	return c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
 }
 
 func meaningfulSQL(s string) bool {

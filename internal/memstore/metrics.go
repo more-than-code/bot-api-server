@@ -104,6 +104,18 @@ func (m *Mem) LatestProcesses(_ context.Context, hostID uuid.UUID, since time.Ti
 	return &t, items, nil
 }
 
+func projectVisible(projectID uuid.UUID, projects []uuid.UUID) bool {
+	if projects == nil {
+		return true
+	}
+	for _, id := range projects {
+		if projectID == id {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Mem) HealthHistory(_ context.Context, serviceID uuid.UUID, from, to time.Time, limit int) ([]store.HealthPoint, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 1000

@@ -69,7 +69,15 @@ func mapErr(err error) error {
 	if isFK(err) {
 		return store.ErrNotFound
 	}
+	if isOwnerShare(err) {
+		return store.ErrInvalid
+	}
 	return fmt.Errorf("database: %w", scrub(err))
+}
+
+func isOwnerShare(err error) bool {
+	var pe *pgconn.PgError
+	return errors.As(err, &pe) && pe.ConstraintName == "host_shares_not_owner"
 }
 
 func scrub(err error) error {
