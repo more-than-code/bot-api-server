@@ -6,7 +6,7 @@
 
 **Config names:**
 - `BOT_API_PUBLIC_ORIGIN`: the AS issuer, e.g. `http://localhost:8090` in dev.
-- `BOT_API_MCP_RESOURCE`: the RS resource, exactly the `resource` in bot-mcp-server's protected-resource document, e.g. `http://localhost:8091`.
+- `BOT_API_MCP_RESOURCE`: the RS resource, exactly the `resource` in bot-mcp-server's protected-resource document: the MCP endpoint URL `<mcp origin>/mcp`, e.g. `http://localhost:8091/mcp` (v1.4.1).
 - `BOT_API_CONSOLE_ORIGIN`: e.g. `http://localhost:5180`.
 - `BOT_API_MCP_CLIENT_SECRET_FILE` (AS side) and `BOT_MCP_CLIENT_SECRET_FILE` (RS side).
 
@@ -180,3 +180,4 @@ On every `/v1/*` route, a Bearer token whose session kind is `mcp_access` or `mc
 3. **RS issuer** (§1): bot-mcp-server advertises `authorization_servers` = the API origin (scheme, host, port) and refuses to start if its API URL has a path, query or fragment.
 4. **RS exchange bounds** (§7): bot-mcp-server caps concurrent in-flight exchanges (over the cap → 503) and remembers a subject token refused with `invalid_grant` for 60 s (keyed by its SHA-256, bounded, oldest evicted), answering 401 without another exchange.
 5. **Device approval** (§9): `GET /v1/auth/device/{user_code}` and its `approve` and `deny` routes need a `console` session; any other kind → 401.
+6. **Resource identifier** (§1, §2): the RS resource is the MCP endpoint URL `<mcp origin>/mcp`, the canonical server URI that MCP clients (Claude Code) send as `resource`. The bare origin is refused with `invalid_target`. Found in the first live Claude Code sign-in, 2026-10-15.
