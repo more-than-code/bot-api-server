@@ -89,7 +89,7 @@ TRUNCATE TABLE
 		t.Fatalf("migrations: %v", err)
 	}
 	rows.Close()
-	if !names["0001_app.sql"] || !names["0002_metrics.sql"] || !names["0003_shared_hosts.sql"] || names["0003_shared_hosts.down.sql"] {
+	if !names["0001_app.sql"] || !names["0002_metrics.sql"] || !names["0003_shared_hosts.sql"] || !names["0004_service_names.sql"] || names["0003_shared_hosts.down.sql"] || names["0004_service_names.down.sql"] {
 		t.Fatalf("schema_migrations = %v", names)
 	}
 
@@ -526,6 +526,7 @@ VALUES ($1::uuid, $2::uuid, 'guest-svc', 'declared', 'process', $3, $3, $4::uuid
 	assertShareAfterOwnerDelete(t, d, ctx, at)
 	assertMultiShareFacts(t, d, ctx, at)
 	assertHostCursorResume(t, d, ctx, at)
+	assertServiceNamesLive(t, d, ctx, at)
 }
 
 func assertServiceBackfill(t *testing.T, d *DB, ctx context.Context, host store.Host, serviceID uuid.UUID) {

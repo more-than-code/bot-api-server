@@ -142,6 +142,40 @@ func TestHostListCursorResumesWithoutLookup(t *testing.T) {
 	}
 }
 
+func TestListHostsNameByteOrder(t *testing.T) {
+	ctx := context.Background()
+	mem := New()
+	at := time.Date(2026, 10, 14, 0, 0, 0, 0, time.UTC)
+	owner := mustUser(t, mem, "byte@ex.com", at)
+	home, err := mem.CreateProject(ctx, owner.ID, "Byte", "byte", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := enrollMem(t, mem, home.ID, owner.ID, "a1", at)
+	hyphen := enrollMem(t, mem, home.ID, owner.ID, "a-1", at)
+	all, _, err := mem.ListHosts(ctx, home.ID, 50, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 || all[0].ID != hyphen.ID || all[0].Name != "a-1" || all[1].ID != plain.ID || all[1].Name != "a1" {
+		t.Fatalf("host byte order %+v", all)
+	}
+	first, next, err := mem.ListHosts(ctx, home.ID, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0].Name != "a-1" || next == nil || next.Name != "a-1" {
+		t.Fatalf("first page %+v cursor %+v", first, next)
+	}
+	second, next2, err := mem.ListHosts(ctx, home.ID, 1, next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 1 || second[0].Name != "a1" || next2 != nil {
+		t.Fatalf("second page %+v cursor %+v", second, next2)
+	}
+}
+
 func TestPutHostShareRequiresLiveOwner(t *testing.T) {
 	ctx := context.Background()
 	mem := New()

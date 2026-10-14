@@ -78,7 +78,7 @@ SELECT s.host_id::text, s.project_id::text, p.name, s.level, s.created_by::text,
 FROM app.host_shares s
 JOIN app.projects p ON p.id = s.project_id
 WHERE s.host_id = $1::uuid
-ORDER BY p.name ASC, s.project_id ASC
+ORDER BY p.name COLLATE "C" ASC, s.project_id ASC
 `, hostID.String())
 	if err != nil {
 		return nil, mapErr(err)

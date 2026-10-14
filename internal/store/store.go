@@ -184,9 +184,42 @@ type Service struct {
 	ContainerName *string   `json:"container_name"`
 	ProcessName   *string   `json:"process_name"`
 	ProjectID     uuid.UUID `json:"project_id"`
+	DisplayName   *string   `json:"display_name"`
+	OwnerUser     *string   `json:"owner_user"`
 	FirstSeenAt   time.Time `json:"first_seen_at"`
 	LastSeenAt    time.Time `json:"last_seen_at"`
 	Health        Health    `json:"health"`
+}
+
+// ProjectService is one row of GET /v1/projects/{id}/services.
+// HostStatus is filled by the API with the same rules as Host.status.
+// HostRevokedAt and HostAlwaysOn are not part of the JSON.
+type ProjectService struct {
+	Service
+	HostName      string     `json:"host_name"`
+	HostStatus    string     `json:"host_status"`
+	ProjectName   string     `json:"project_name"`
+	HostRevokedAt *time.Time `json:"-"`
+	HostAlwaysOn  bool       `json:"-"`
+}
+
+// ServiceListQuery is the server-side filter for a project services list.
+// Q is already trimmed. Sort is name, host, kind, status, or last_seen.
+// Dir is asc or desc. Offset is the number of matching rows to skip.
+type ServiceListQuery struct {
+	Q      string
+	HostID *uuid.UUID
+	Sort   string
+	Dir    string
+	Limit  int
+	Offset int
+}
+
+// ServicePage is one page of a project services list. Total counts every
+// matching row, including rows on other pages.
+type ServicePage struct {
+	Items []ProjectService
+	Total int
 }
 
 type Health struct {
@@ -203,6 +236,9 @@ type Discovered struct {
 	SystemdScope  *string
 	ContainerName *string
 	ProcessName   *string
+	// OwnerUser is the account that owns the listening socket.
+	// The store drops values that are not printable or are longer than 64 bytes.
+	OwnerUser *string
 }
 
 type HealthCheck struct {
@@ -401,6 +437,14 @@ type Store interface {
 	// one, returns services whose project_id is in that set.
 	ListServices(ctx context.Context, hostID uuid.UUID, projects []uuid.UUID, now time.Time) ([]Service, error)
 	GetService(ctx context.Context, id uuid.UUID, now time.Time) (Service, error)
+	// ListProjectServices returns the v1.3 rows for projectID.
+	// Filtering, search, sort, total, and paging happen in the store.
+	// A HostID those rows cannot reach returns ErrInvalid.
+	ListProjectServices(ctx context.Context, projectID uuid.UUID, q ServiceListQuery, now time.Time) (ServicePage, error)
+	// SetServiceDisplayName sets or clears display_name. name nil clears it.
+	// A case-insensitive duplicate on the same host returns ErrConflict.
+	// A missing service returns ErrNotFound. Rediscovery does not call this.
+	SetServiceDisplayName(ctx context.Context, id uuid.UUID, name *string, now time.Time) (Service, error)
 	UpsertDiscovered(ctx context.Context, hostID uuid.UUID, items []Discovered, at time.Time) error
 	ReplaceHealthChecks(ctx context.Context, serviceID uuid.UUID, checks []HealthCheckInput) ([]HealthCheck, error)
 	ListHealthChecks(ctx context.Context, serviceID uuid.UUID) ([]HealthCheck, error)

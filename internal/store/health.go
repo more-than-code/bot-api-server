@@ -29,3 +29,16 @@ func DeriveHealth(latest *HealthPoint, now time.Time) Health {
 func floatPtr(v float64) *float64 {
 	return &v
 }
+
+// HealthRank orders health.status for the project services list.
+// Ascending is up, then down, then unknown.
+func HealthRank(status string) int {
+	switch status {
+	case "up":
+		return 0
+	case "down":
+		return 1
+	default:
+		return 2
+	}
+}

@@ -26,6 +26,7 @@ const (
 	ActionHostShareUpdate = "host.share_update"
 	ActionHostUnshare     = "host.unshare"
 	ActionHealthChecks    = "health_checks.replace"
+	ActionServiceRename   = "service.rename"
 	ActionSnapshot        = "host.snapshot"
 	ActionProbe           = "service.probe"
 	ActionDeviceApprove   = "device.approve"

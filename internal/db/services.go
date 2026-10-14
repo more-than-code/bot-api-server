@@ -2,12 +2,32 @@ package db
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/more-than-code/bot-api-server/internal/store"
 )
+
+// serviceColumns is the Service scan list shared by host and project lists.
+// display_name and owner_user stay in this list so every Service JSON has them.
+const serviceColumns = `
+s.id::text, s.host_id::text, s.project_id::text, s.name, s.source, s.kind, s.ports,
+s.systemd_unit, s.systemd_scope, s.container_name, s.process_match,
+s.display_name, s.owner_user,
+s.first_seen_at, s.last_seen_at,
+hr.time, hr.result, hr.latency_ms`
+
+const serviceHealthJoin = `
+LEFT JOIN LATERAL (
+    SELECT time, result, latency_ms
+    FROM metrics.health_results
+    WHERE service_id = s.id
+    ORDER BY time DESC
+    LIMIT 1
+) hr ON true`
 
 // projectIDsArg is nil when every project is visible. Otherwise it is a
 // text[] of ids. pgx sends a Go string slice as text[], and text[] does not
@@ -26,24 +46,15 @@ func projectIDsArg(ids []uuid.UUID) any {
 
 func (d *DB) ListServices(ctx context.Context, hostID uuid.UUID, projects []uuid.UUID, now time.Time) ([]store.Service, error) {
 	rows, err := d.pool.Query(ctx, `
-SELECT s.id::text, s.host_id::text, s.project_id::text, s.name, s.source, s.kind, s.ports,
-       s.systemd_unit, s.systemd_scope, s.container_name, s.process_match,
-       s.first_seen_at, s.last_seen_at,
-       hr.time, hr.result, hr.latency_ms
+SELECT `+serviceColumns+`
 FROM app.services s
-LEFT JOIN LATERAL (
-    SELECT time, result, latency_ms
-    FROM metrics.health_results
-    WHERE service_id = s.id
-    ORDER BY time DESC
-    LIMIT 1
-) hr ON true
+`+serviceHealthJoin+`
 WHERE s.host_id = $1::uuid
   AND (
     CAST($2 AS text[]) IS NULL
     OR s.project_id::text = ANY(CAST($2 AS text[]))
   )
-ORDER BY s.name ASC
+ORDER BY s.name COLLATE "C" ASC
 LIMIT 500
 `, hostID.String(), projectIDsArg(projects))
 	if err != nil {
@@ -66,20 +77,199 @@ LIMIT 500
 
 func (d *DB) GetService(ctx context.Context, id uuid.UUID, now time.Time) (store.Service, error) {
 	return scanService(d.pool.QueryRow(ctx, `
-SELECT s.id::text, s.host_id::text, s.project_id::text, s.name, s.source, s.kind, s.ports,
-       s.systemd_unit, s.systemd_scope, s.container_name, s.process_match,
-       s.first_seen_at, s.last_seen_at,
-       hr.time, hr.result, hr.latency_ms
+SELECT `+serviceColumns+`
 FROM app.services s
-LEFT JOIN LATERAL (
-    SELECT time, result, latency_ms
-    FROM metrics.health_results
-    WHERE service_id = s.id
-    ORDER BY time DESC
-    LIMIT 1
-) hr ON true
+`+serviceHealthJoin+`
 WHERE s.id = $1::uuid
 `, id.String()), now)
+}
+
+func (d *DB) SetServiceDisplayName(ctx context.Context, id uuid.UUID, name *string, now time.Time) (store.Service, error) {
+	tag, err := d.pool.Exec(ctx, `
+UPDATE app.services SET display_name = $2 WHERE id = $1::uuid
+`, id.String(), optString(name))
+	if err != nil {
+		return store.Service{}, mapErr(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return store.Service{}, store.ErrNotFound
+	}
+	return d.GetService(ctx, id, now)
+}
+
+func (d *DB) ListProjectServices(ctx context.Context, projectID uuid.UUID, q store.ServiceListQuery, now time.Time) (store.ServicePage, error) {
+	if q.HostID != nil {
+		ok, err := d.projectHostReached(ctx, projectID, *q.HostID)
+		if err != nil {
+			return store.ServicePage{}, err
+		}
+		if !ok {
+			return store.ServicePage{}, store.ErrInvalid
+		}
+	}
+	where, args := projectServiceWhere(projectID, q)
+	var total int
+	if err := d.pool.QueryRow(ctx, `
+SELECT count(*)
+FROM app.services s
+JOIN app.hosts h ON h.id = s.host_id
+JOIN app.projects sp ON sp.id = s.project_id
+`+where, args...).Scan(&total); err != nil {
+		return store.ServicePage{}, mapErr(err)
+	}
+	limit := q.Limit
+	if limit < 1 {
+		limit = 50
+	}
+	offset := q.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	pageArgs := append(append([]any{}, args...), now.Add(-store.HealthStale), limit, offset)
+	cutoff := len(args) + 1
+	rows, err := d.pool.Query(ctx, fmt.Sprintf(`
+SELECT `+serviceColumns+`,
+       h.name, h.always_on, h.revoked_at, sp.name,
+       `+nameSortKey+` AS sort_name,
+       CASE
+         WHEN hr.time IS NOT NULL AND hr.time >= $%d AND hr.result = 'success' THEN 0
+         WHEN hr.time IS NOT NULL AND hr.time >= $%d THEN 1
+         ELSE 2
+       END AS health_rank
+FROM app.services s
+JOIN app.hosts h ON h.id = s.host_id
+JOIN app.projects sp ON sp.id = s.project_id
+`+serviceHealthJoin+`
+%s
+ORDER BY %s
+LIMIT $%d OFFSET $%d
+`, cutoff, cutoff, where, projectServiceOrder(q.Sort, q.Dir), cutoff+1, cutoff+2), pageArgs...)
+	if err != nil {
+		return store.ServicePage{}, mapErr(err)
+	}
+	defer rows.Close()
+	items := []store.ProjectService{}
+	for rows.Next() {
+		item, err := scanProjectService(rows, now)
+		if err != nil {
+			return store.ServicePage{}, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return store.ServicePage{}, mapErr(err)
+	}
+	return store.ServicePage{Items: items, Total: total}, nil
+}
+
+func (d *DB) projectHostReached(ctx context.Context, projectID, hostID uuid.UUID) (bool, error) {
+	var ok bool
+	err := d.pool.QueryRow(ctx, `
+SELECT
+    EXISTS (
+        SELECT 1 FROM app.hosts h
+        WHERE h.id = $1::uuid AND h.project_id = $2::uuid
+    )
+    OR EXISTS (
+        SELECT 1 FROM app.host_shares hs
+        WHERE hs.host_id = $1::uuid
+          AND hs.project_id = $2::uuid
+          AND hs.level = 'deploy'
+    )
+`, hostID.String(), projectID.String()).Scan(&ok)
+	if err != nil {
+		return false, mapErr(err)
+	}
+	return ok, nil
+}
+
+// projectServiceWhere is the v1.3 row rule plus optional host and search.
+// Search parameters are bound. % _ and \ in q match literally.
+func projectServiceWhere(projectID uuid.UUID, q store.ServiceListQuery) (string, []any) {
+	args := []any{projectID.String()}
+	hostPred := "TRUE"
+	if q.HostID != nil {
+		args = append(args, q.HostID.String())
+		hostPred = fmt.Sprintf("s.host_id = $%d::uuid", len(args))
+	}
+	where := `
+WHERE (
+    h.project_id = $1::uuid
+    OR (
+        s.project_id = $1::uuid
+        AND EXISTS (
+            SELECT 1 FROM app.host_shares hs
+            WHERE hs.host_id = h.id
+              AND hs.project_id = $1::uuid
+              AND hs.level = 'deploy'
+        )
+    )
+)
+AND ` + hostPred
+	if q.Q != "" {
+		args = append(args, likeContains(q.Q))
+		p := fmt.Sprintf("$%d", len(args))
+		where += fmt.Sprintf(`
+AND (
+    s.display_name ILIKE %s ESCAPE '\'
+    OR s.name ILIKE %s ESCAPE '\'
+    OR s.kind ILIKE %s ESCAPE '\'
+    OR h.name ILIKE %s ESCAPE '\'
+    OR s.owner_user ILIKE %s ESCAPE '\'
+    OR EXISTS (
+        SELECT 1 FROM unnest(s.ports) AS port_num(n)
+        WHERE port_num.n::text ILIKE %s ESCAPE '\'
+    )
+)`, p, p, p, p, p, p)
+	}
+	return where, args
+}
+
+// nameSortKey is the lowercased label in byte order. ORDER BY inlines it.
+// PostgreSQL treats only a bare output alias as an output column, so
+// "sort_name COLLATE ..." would look for an input column and fail.
+const nameSortKey = `lower(coalesce(s.display_name, s.name)) COLLATE "C"`
+
+// projectServiceOrder is a fixed fragment. sort and dir are allowlisted
+// by the caller; anything else sorts by name ascending.
+// Text keys use COLLATE "C" (byte order), the same order as Go's string
+// compare. last_seen is a timestamp and is not collated.
+func projectServiceOrder(sortKey, dir string) string {
+	direction := "ASC"
+	if dir == "desc" {
+		direction = "DESC"
+	}
+	text := func(expr string) string {
+		return expr + " " + direction + " NULLS LAST"
+	}
+	switch sortKey {
+	case "host":
+		return text(`h.name COLLATE "C"`) + ", s.id ASC"
+	case "kind":
+		return text(`s.kind COLLATE "C"`) + ", s.id ASC"
+	case "last_seen":
+		return text("s.last_seen_at") + ", s.id ASC"
+	case "status":
+		return text("health_rank") + ", " + text(nameSortKey) + ", s.id ASC"
+	default:
+		return text(nameSortKey) + ", s.id ASC"
+	}
+}
+
+// likeContains escapes LIKE wildcards so the bound pattern is a substring.
+func likeContains(q string) string {
+	var b strings.Builder
+	b.Grow(len(q) + 2)
+	b.WriteByte('%')
+	for i := 0; i < len(q); i++ {
+		switch q[i] {
+		case '\\', '%', '_':
+			b.WriteByte('\\')
+		}
+		b.WriteByte(q[i])
+	}
+	b.WriteByte('%')
+	return b.String()
 }
 
 func (d *DB) UpsertDiscovered(ctx context.Context, hostID uuid.UUID, items []store.Discovered, at time.Time) error {
@@ -100,15 +290,16 @@ func (d *DB) UpsertDiscovered(ctx context.Context, hostID uuid.UUID, items []sto
 INSERT INTO app.services (
     id, host_id, name, source, kind, ports,
     systemd_unit, systemd_scope, container_name, process_match,
-    first_seen_at, last_seen_at, project_id
+    first_seen_at, last_seen_at, project_id, owner_user
 )
 SELECT $1::uuid, h.id, $3, 'discovered', $4, $5::integer[],
     $6, $7, $8, $9,
-    $10, $10, h.project_id
+    $10, $10, h.project_id, $11
 FROM app.hosts h
 WHERE h.id = $2::uuid
 ON CONFLICT (host_id, name) DO UPDATE SET
     last_seen_at = EXCLUDED.last_seen_at,
+    owner_user = EXCLUDED.owner_user,
     kind = CASE WHEN app.services.source = 'discovered' THEN EXCLUDED.kind ELSE app.services.kind END,
     ports = CASE WHEN app.services.source = 'discovered' THEN EXCLUDED.ports ELSE app.services.ports END,
     systemd_unit = CASE WHEN app.services.source = 'discovered' THEN EXCLUDED.systemd_unit ELSE app.services.systemd_unit END,
@@ -117,7 +308,7 @@ ON CONFLICT (host_id, name) DO UPDATE SET
     process_match = CASE WHEN app.services.source = 'discovered' THEN EXCLUDED.process_match ELSE app.services.process_match END
 `, uuid.New().String(), hostID.String(), item.Name, item.Kind, intsTo32(item.Ports),
 			optString(item.SystemdUnit), optString(item.SystemdScope), optString(item.ContainerName), optString(item.ProcessName),
-			at); err != nil {
+			at, optString(store.NormalizeOwnerUser(item.OwnerUser))); err != nil {
 			return mapErr(err)
 		}
 	}
@@ -227,29 +418,61 @@ ORDER BY s.name ASC, c.id ASC
 }
 
 func scanService(row pgx.Row, now time.Time) (store.Service, error) {
+	s, err := scanServiceInto(row, now, nil)
+	if err != nil {
+		return store.Service{}, err
+	}
+	return s.Service, nil
+}
+
+func scanProjectService(row pgx.Row, now time.Time) (store.ProjectService, error) {
+	var extra projectServiceExtra
+	return scanServiceInto(row, now, &extra)
+}
+
+// projectServiceExtra is scanned after the shared service columns and the
+// sort expressions, which are discarded.
+type projectServiceExtra struct {
+	hostName    string
+	alwaysOn    bool
+	revokedAt   *time.Time
+	projectName string
+	sortName    string
+	healthRank  int
+}
+
+func scanServiceInto(row pgx.Row, now time.Time, extra *projectServiceExtra) (store.ProjectService, error) {
 	var s store.Service
 	var id, hostID, projectID string
 	var ports []int32
 	var checked *time.Time
 	var result *string
 	var latency *float64
-	if err := row.Scan(
+	dest := []any{
 		&id, &hostID, &projectID, &s.Name, &s.Source, &s.Kind, &ports,
 		&s.SystemdUnit, &s.SystemdScope, &s.ContainerName, &s.ProcessName,
+		&s.DisplayName, &s.OwnerUser,
 		&s.FirstSeenAt, &s.LastSeenAt,
 		&checked, &result, &latency,
-	); err != nil {
-		return store.Service{}, mapErr(err)
+	}
+	if extra != nil {
+		dest = append(dest,
+			&extra.hostName, &extra.alwaysOn, &extra.revokedAt, &extra.projectName,
+			&extra.sortName, &extra.healthRank,
+		)
+	}
+	if err := row.Scan(dest...); err != nil {
+		return store.ProjectService{}, mapErr(err)
 	}
 	var err error
 	if s.ID, err = parseID(id); err != nil {
-		return store.Service{}, err
+		return store.ProjectService{}, err
 	}
 	if s.HostID, err = parseID(hostID); err != nil {
-		return store.Service{}, err
+		return store.ProjectService{}, err
 	}
 	if s.ProjectID, err = parseID(projectID); err != nil {
-		return store.Service{}, err
+		return store.ProjectService{}, err
 	}
 	s.Ports = intsFrom32(ports)
 	var latest *store.HealthPoint
@@ -261,7 +484,14 @@ func scanService(row pgx.Row, now time.Time) (store.Service, error) {
 		latest = &p
 	}
 	s.Health = store.DeriveHealth(latest, now)
-	return s, nil
+	out := store.ProjectService{Service: s}
+	if extra != nil {
+		out.HostName = extra.hostName
+		out.HostAlwaysOn = extra.alwaysOn
+		out.HostRevokedAt = extra.revokedAt
+		out.ProjectName = extra.projectName
+	}
+	return out, nil
 }
 
 func scanCheck(row pgx.Row) (store.HealthCheck, error) {

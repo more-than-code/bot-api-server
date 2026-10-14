@@ -1,14 +1,20 @@
 package api
 
 import (
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/more-than-code/bot-api-server/internal/audit"
 	"github.com/more-than-code/bot-api-server/internal/authz"
 	"github.com/more-than-code/bot-api-server/internal/store"
 )
+
+const maxDisplayNameLen = 64
 
 func (s *Server) handleServiceList(w http.ResponseWriter, r *http.Request) {
 	p, host, ok := s.fetchHost(w, r)
@@ -47,6 +53,109 @@ func (s *Server) handleServiceGet(w http.ResponseWriter, r *http.Request) {
 		store.Service
 		HealthChecks []store.HealthCheck `json:"health_checks"`
 	}{Service: svc, HealthChecks: checks})
+}
+
+func (s *Server) handleServicePatch(w http.ResponseWriter, r *http.Request) {
+	p, svc, host, ok := s.fetchService(w, r)
+	if !ok {
+		return
+	}
+	requested, parseMsg := parseDisplayName(r)
+	detail := map[string]any{
+		"from": auditString(svc.DisplayName),
+		"to":   auditString(requested),
+	}
+	if parseMsg != "" {
+		detail["to"] = nil
+	}
+	rel, err := authz.HostRelation(r.Context(), p.User.ID, host.ID)
+	if err != nil {
+		s.finishRenameAuth(w, r, p, host, svc, detail, err)
+		return
+	}
+	if err := authz.AuthorizeHost(rel, authz.CapServiceWrite, svc.ProjectID); err != nil {
+		s.denyDetail(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), idPtr(svc.ID), audit.ActionServiceRename, detail, err)
+		return
+	}
+	if parseMsg != "" {
+		writeCode(w, "bad_request", parseMsg)
+		return
+	}
+	updated, err := s.Store.SetServiceDisplayName(r.Context(), svc.ID, requested, s.now())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.auditOK(r.Context(), p, store.AuditRow{
+		ProjectID: idPtr(host.ProjectID),
+		HostID:    idPtr(host.ID),
+		ServiceID: idPtr(svc.ID),
+		Action:    audit.ActionServiceRename,
+		Detail: map[string]any{
+			"from": auditString(svc.DisplayName),
+			"to":   auditString(requested),
+		},
+	})
+	writeOK(w, http.StatusOK, updated)
+}
+
+func (s *Server) finishRenameAuth(w http.ResponseWriter, r *http.Request, p principal, host store.Host, svc store.Service, detail map[string]any, err error) {
+	var denied *authz.Denied
+	if errors.As(err, &denied) {
+		s.denyDetail(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), idPtr(svc.ID), audit.ActionServiceRename, detail, err)
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		writeCode(w, "not_found", "not found")
+		return
+	}
+	s.fail(w, err)
+}
+
+// parseDisplayName reads {"display_name": string|null} and nothing else.
+// A nil pointer with an empty message clears the name.
+func parseDisplayName(r *http.Request) (*string, string) {
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	var obj map[string]json.RawMessage
+	if err := dec.Decode(&obj); err != nil {
+		return nil, "invalid json"
+	}
+	var extra struct{}
+	if err := dec.Decode(&extra); err != io.EOF {
+		return nil, "invalid json"
+	}
+	raw, ok := obj["display_name"]
+	if !ok || len(obj) != 1 {
+		return nil, "invalid json"
+	}
+	if string(raw) == "null" {
+		return nil, ""
+	}
+	var name string
+	if err := json.Unmarshal(raw, &name); err != nil {
+		return nil, "invalid display_name"
+	}
+	name = strings.TrimSpace(name)
+	if name == "" || utf8.RuneCountInString(name) > maxDisplayNameLen || !printableName(name) {
+		return nil, "invalid display_name"
+	}
+	return &name, ""
+}
+
+func printableName(name string) bool {
+	for _, r := range name {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func auditString(v *string) any {
+	if v == nil {
+		return nil
+	}
+	return *v
 }
 
 func (s *Server) handleHealthPut(w http.ResponseWriter, r *http.Request) {

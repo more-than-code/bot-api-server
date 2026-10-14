@@ -220,8 +220,10 @@ func (d *DB) ListHosts(ctx context.Context, projectID uuid.UUID, limit int, curs
 		idArg = cursor.ID
 	}
 	// Owned hosts (rank 0) come before shares (rank 1). Each group is name, id.
-	// Resume compares (rel_rank, name, id) with the cursor values. A host that
-	// is no longer visible does not make the comparison fail.
+	// Name uses COLLATE "C" (byte order), matching memstore. Resume is the
+	// same (rel_rank, name, id) comparison, with that collation on the name,
+	// written out so the cursor predicate cannot fall back to the database
+	// locale. A host that is no longer visible does not make it fail.
 	rows, err := d.pool.Query(ctx, `
 WITH visible AS (
     SELECT h.id, h.project_id, h.name, h.node_type, h.os, h.arch, h.always_on,
@@ -243,9 +245,18 @@ SELECT id::text, project_id::text, name, node_type, os, arch, always_on, agent_v
 FROM visible v
 WHERE (
     CAST($2 AS int) IS NULL
-    OR (v.rel_rank, v.name, v.id) > (CAST($2 AS int), CAST($3 AS text), CAST($4 AS uuid))
+    OR v.rel_rank > CAST($2 AS int)
+    OR (
+        v.rel_rank = CAST($2 AS int)
+        AND (v.name COLLATE "C") > (CAST($3 AS text) COLLATE "C")
+    )
+    OR (
+        v.rel_rank = CAST($2 AS int)
+        AND (v.name COLLATE "C") = (CAST($3 AS text) COLLATE "C")
+        AND v.id > CAST($4 AS uuid)
+    )
 )
-ORDER BY v.rel_rank ASC, v.name ASC, v.id ASC
+ORDER BY v.rel_rank ASC, v.name COLLATE "C" ASC, v.id ASC
 LIMIT $5
 `, projectID.String(), rankArg, nameArg, idArg, lim+1)
 	if err != nil {

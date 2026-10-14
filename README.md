@@ -41,3 +41,15 @@ A host still belongs to one owning project. An owner admin can share it with ano
 ```sql
 DELETE FROM app.schema_migrations WHERE name = '0003_shared_hosts.sql';
 ```
+
+## Service names
+
+A service keeps the discovered `name` the agent uses as its key. People set `display_name` with `PATCH /v1/services/{id}` and body `{"display_name": "<name>" | null}`. The name is trimmed, then it must be 1–64 printable characters. An empty string is `bad_request`. `null` clears it. The same name on one host, ignoring case, is `conflict`. The permission is the service edit capability from shared hosts: an owner admin, or a deploy-share admin renaming a service of its own project. The audit action is `service.rename`, including when the caller is denied. The agent stores the account that owns the listening socket in `owner_user` and never writes `display_name`. A later discovery batch updates `owner_user` and leaves the name.
+
+`GET /v1/projects/{id}/services` lists every service on hosts that project owns, plus that project's own services on hosts shared with it at `deploy`. A metrics share adds no rows. The caller must be a member of the project; anyone else gets 404. `q` is a case-insensitive substring over the display name, discovered name, kind, host name, owner, and ports. `%`, `_`, and `\` match literally. `sort` is `name` (the display name, or the discovered name when the display name is null), `host`, `kind`, `status`, or `last_seen`. Name order is the byte order of the lowercased label, not the database locale. `dir` defaults to `asc`, and to `desc` for `last_seen`. The payload is `items`, `next_cursor`, `prev_cursor`, and `total`. The cursor is bound to `q`, `host_id`, `sort`, and `dir`. `GET /v1/hosts/{id}/services` orders by name in byte order (`COLLATE "C"`), like every other name sort, so Postgres and memstore agree. That list is otherwise unchanged apart from `display_name` and `owner_user` on each row.
+
+`migrations/0004_service_names.sql` adds the two nullable columns and a unique index on `(host_id, lower(display_name))` where the name is not null. It does not change grants. `--migrate` does not apply `migrations/0004_service_names.down.sql`. That script drops the columns and the unique index. Names typed by people are lost. The project index from 0003 stays. After a hand run, delete the applied row before `--migrate` will apply 0004 again:
+
+```sql
+DELETE FROM app.schema_migrations WHERE name = '0004_service_names.sql';
+```

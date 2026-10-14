@@ -8,18 +8,18 @@ import (
 )
 
 func TestMigrationSkipsDownScript(t *testing.T) {
-	if numberedSQL("0003_shared_hosts.down.sql") {
+	if numberedSQL("0003_shared_hosts.down.sql") || numberedSQL("0004_service_names.down.sql") {
 		t.Fatal("down script is numbered SQL")
 	}
-	if !numberedSQL("0003_shared_hosts.sql") {
-		t.Fatal("0003 is not numbered SQL")
+	if !numberedSQL("0003_shared_hosts.sql") || !numberedSQL("0004_service_names.sql") {
+		t.Fatal("numbered migration was skipped")
 	}
 	names, err := migrationFiles()
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Join(names, ",")
-	for _, want := range []string{"0001_app.sql", "0002_metrics.sql", "0003_shared_hosts.sql"} {
+	for _, want := range []string{"0001_app.sql", "0002_metrics.sql", "0003_shared_hosts.sql", "0004_service_names.sql"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("migrations = %s", got)
 		}
@@ -56,6 +56,49 @@ func TestSplitSQLKeepsFunctionBody(t *testing.T) {
 
 func TestSharedHostsMigrationText(t *testing.T) {
 	assertSharedHostsMigration(t)
+}
+
+func TestServiceNamesMigrationText(t *testing.T) {
+	body, err := migrations.FS.ReadFile("0004_service_names.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		"ADD COLUMN display_name text NULL",
+		"ADD COLUMN owner_user text NULL",
+		"CREATE UNIQUE INDEX services_host_display_name_uidx",
+		"ON app.services (host_id, lower(display_name))",
+		"WHERE display_name IS NOT NULL",
+		"CREATE INDEX IF NOT EXISTS services_project_idx ON app.services (project_id)",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("0004 missing %s", want)
+		}
+	}
+	if strings.Contains(text, "GRANT") {
+		t.Fatal("0004 changes grants")
+	}
+	down, err := migrations.FS.ReadFile("0004_service_names.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	downText := string(down)
+	for _, want := range []string{
+		"--migrate does not apply",
+		"Names typed by people are lost",
+		"DELETE FROM app.schema_migrations WHERE name = '0004_service_names.sql'",
+		"DROP INDEX IF EXISTS app.services_host_display_name_uidx",
+		"DROP COLUMN IF EXISTS display_name",
+		"DROP COLUMN IF EXISTS owner_user",
+	} {
+		if !strings.Contains(downText, want) {
+			t.Fatalf("down script missing %s", want)
+		}
+	}
+	if strings.Contains(downText, "services_project_idx") {
+		t.Fatal("down script mentions the 0003 project index")
+	}
 }
 
 // assertSharedHostsMigration checks the embedded 0003 script. The column is

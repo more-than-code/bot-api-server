@@ -195,3 +195,24 @@ Supersedes v1.1 item 4 for processes and snapshot only.
 2. **`PATCH /v1/services/{id}`**, body `{"display_name": "<name>" | null}`, sets or clears the name; returns the updated Service. Permission = the *edit* capability of spec-shared-hosts §4 (owner admin+, or a `deploy`-share admin for its own services). Audit action `service.rename` (detail: old → new). `display_name` is unique per host, case-insensitive; a duplicate is `conflict`.
 3. The name survives rediscovery: services stay keyed by (host_id, discovered `name`), and `display_name` is never overwritten by the agent.
 4. Suggested label for clients: `display_name` → else the discovered `name` unless it is `port-<n>` → else `port <n> · <owner_user>` (or `port <n>` when `owner_user` is null).
+
+## v1.3 project services (2026-10-14, approved spec `docs/spec-project-services.md`)
+
+These take precedence over earlier sections for the routes they name. v1.2 is implemented in the same release.
+
+1. **`GET /v1/projects/{id}/services`**: the caller must be a member (any role) of project `id`; otherwise `not_found`.
+   - **Rows:** every service on hosts owned by `id` (whatever the service's `project_id`), plus services with `project_id = id` on hosts shared with `id` at level `deploy`. Services with `project_id = id` on a host shared with `id` at level `metrics` are not returned.
+   - **Row:** `Service` (with the v1.1 and v1.2 fields) plus `"host_name"`, `"host_status"`, and `"project_name"` (the name of the service's project).
+   - **Query:**
+     - `q`: case-insensitive substring over `display_name`, `name`, `kind`, `host_name`, `owner_user`, and ports as decimal text. Trimmed; empty means no filter; more than 100 characters → `bad_request`. `%`, `_` and `\` match literally.
+     - `host_id`: a UUID of a host that the row rules reach for this project; otherwise `bad_request`.
+     - `sort` ∈ `name` (by `lower(coalesce(display_name, name))`), `host` (host name), `kind`, `status` (`health.status`: up, down, unknown; then name), `last_seen` (`last_seen_at`). Default `name`.
+     - `dir` ∈ `asc`, `desc`. Default `asc`; for `sort=last_seen` the default is `desc`.
+     - `limit` 1–200, default 50.
+     - `cursor` (opaque).
+     - Any other value → `bad_request`.
+   - **Ordering:** ties are broken by `id` ascending. `NULL`s sort last in both directions.
+   - **Payload:** `{"items":[...], "next_cursor": "<opaque>"|null, "prev_cursor": "<opaque>"|null, "total": <int>}`. `total` counts every matching row and is recomputed per request.
+   - **Cursors:** a cursor is bound to the `q`, `host_id`, `sort`, and `dir` it was issued for. Reusing it with different values → `bad_request` "cursor does not match query". Cursors are offset-based: a row inserted or deleted between pages may be skipped or repeated.
+2. `GET /v1/hosts/{id}/services` is unchanged apart from the v1.2 fields on each row.
+3. Every row returned by (1) is a service the caller may read with `GET /v1/services/{id}`; (1) never widens access.

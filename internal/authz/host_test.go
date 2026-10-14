@@ -198,6 +198,30 @@ func TestAuthorizeHostSeveralShares(t *testing.T) {
 	if ServiceProjectFilter(Relation{Kind: RelOwner, OwnerRole: RoleViewer}) != nil {
 		t.Fatal("owner filter")
 	}
+	home := uuid.MustParse("00000000-0000-4000-8000-0000000000a1")
+	other := uuid.MustParse("00000000-0000-4000-8000-0000000000a2")
+	if !ProjectServiceVisible(true, "", other, home) {
+		t.Fatal("owning project hides a service")
+	}
+	if !ProjectServiceVisible(false, ShareDeploy, home, home) {
+		t.Fatal("deploy share hides its own service")
+	}
+	if ProjectServiceVisible(false, ShareDeploy, other, home) {
+		t.Fatal("deploy share shows another project's service")
+	}
+	if ProjectServiceVisible(false, ShareMetrics, home, home) {
+		t.Fatal("metrics share shows its own service")
+	}
+	if ProjectServiceVisible(false, "", home, home) || ProjectServiceVisible(true, ShareDeploy, home, uuid.Nil) {
+		t.Fatal("no relation or a nil project shows a service")
+	}
+	if !ProjectHostReached(true, "") || !ProjectHostReached(false, ShareDeploy) {
+		t.Fatal("owned host or deploy share is not reached")
+	}
+	if ProjectHostReached(false, ShareMetrics) || ProjectHostReached(false, "") {
+		t.Fatal("metrics share or no relation is reached")
+	}
+
 	if empty := ServiceProjectFilter(shareRel(ShareMetrics, RoleAdmin, metricsID)); len(empty) != 0 {
 		t.Fatalf("metrics filter %v", empty)
 	}

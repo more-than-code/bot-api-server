@@ -327,13 +327,14 @@ func (h *Hub) oneService(raw json.RawMessage) (store.Discovered, bool) {
 	}
 	_ = json.Unmarshal(raw, &peek)
 	var in struct {
-		Name          string  `json:"name"`
-		Kind          string  `json:"kind"`
-		Ports         []int   `json:"ports"`
-		SystemdUnit   *string `json:"systemd_unit"`
-		SystemdScope  *string `json:"systemd_scope"`
-		ContainerName *string `json:"container_name"`
-		ProcessName   *string `json:"process_name"`
+		Name          string          `json:"name"`
+		Kind          string          `json:"kind"`
+		Ports         []int           `json:"ports"`
+		SystemdUnit   *string         `json:"systemd_unit"`
+		SystemdScope  *string         `json:"systemd_scope"`
+		ContainerName *string         `json:"container_name"`
+		ProcessName   *string         `json:"process_name"`
+		User          json.RawMessage `json:"user"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil || !validService(in.Name, in.Kind, in.Ports, in.SystemdScope) {
 		h.log.Warn("skip service", "name", clipName(peek.Name))
@@ -351,7 +352,22 @@ func (h *Hub) oneService(raw json.RawMessage) (store.Discovered, bool) {
 		SystemdScope:  in.SystemdScope,
 		ContainerName: in.ContainerName,
 		ProcessName:   in.ProcessName,
+		OwnerUser:     ownerUser(in.User),
 	}, true
+}
+
+// ownerUser reads Discovered.user. A missing, null, or non-string value
+// becomes nil. The store drops strings that are not printable account names.
+// A bad user does not drop the service.
+func ownerUser(raw json.RawMessage) *string {
+	if strings.TrimSpace(string(raw)) == "" || string(raw) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return nil
+	}
+	return &s
 }
 
 func validService(name, kind string, ports []int, scope *string) bool {

@@ -64,6 +64,7 @@ func contractRoutes() []route {
 		{"GET /v1/projects/{id}/join-tokens", false, (*Server).handleJoinList},
 		{"DELETE /v1/projects/{id}/join-tokens/{token_id}", false, (*Server).handleJoinRevoke},
 		{"GET /v1/projects/{id}/hosts", false, (*Server).handleHostList},
+		{"GET /v1/projects/{id}/services", false, (*Server).handleProjectServices},
 		{"GET /v1/hosts/{id}", false, (*Server).handleHostGet},
 		{"DELETE /v1/hosts/{id}/credential", false, (*Server).handleHostRevoke},
 		{"GET /v1/hosts/{id}/shares", false, (*Server).handleShareList},
@@ -71,6 +72,7 @@ func contractRoutes() []route {
 		{"DELETE /v1/hosts/{id}/shares/{project_id}", false, (*Server).handleShareDelete},
 		{"GET /v1/hosts/{id}/services", false, (*Server).handleServiceList},
 		{"GET /v1/services/{id}", false, (*Server).handleServiceGet},
+		{"PATCH /v1/services/{id}", false, (*Server).handleServicePatch},
 		{"PUT /v1/services/{id}/health-checks", false, (*Server).handleHealthPut},
 		{"GET /v1/hosts/{id}/metrics", false, (*Server).handleMetrics},
 		{"GET /v1/hosts/{id}/processes", false, (*Server).handleProcesses},
@@ -246,6 +248,10 @@ func idPtr(id uuid.UUID) *uuid.UUID {
 }
 
 func (s *Server) deny(w http.ResponseWriter, r *http.Request, p principal, projectID, hostID, serviceID *uuid.UUID, action string, err error) {
+	s.denyDetail(w, r, p, projectID, hostID, serviceID, action, nil, err)
+}
+
+func (s *Server) denyDetail(w http.ResponseWriter, r *http.Request, p principal, projectID, hostID, serviceID *uuid.UUID, action string, detail map[string]any, err error) {
 	var denied *authz.Denied
 	if errors.As(err, &denied) {
 		if mutating(r.Method) && action != "" {
@@ -259,6 +265,7 @@ func (s *Server) deny(w http.ResponseWriter, r *http.Request, p principal, proje
 				Action:      action,
 				Decision:    audit.DecisionDenied,
 				ErrorCode:   &code,
+				Detail:      detail,
 			})
 		}
 		writeCode(w, denied.Code, phrase(denied.Code))

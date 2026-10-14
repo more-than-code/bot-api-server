@@ -3,9 +3,12 @@ package memstore
 import (
 	"context"
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/more-than-code/bot-api-server/internal/authz"
 	"github.com/more-than-code/bot-api-server/internal/store"
 )
 
@@ -78,12 +81,14 @@ func (m *Mem) UpsertDiscovered(_ context.Context, hostID uuid.UUID, items []stor
 				SystemdScope:  item.SystemdScope,
 				ContainerName: item.ContainerName,
 				ProcessName:   item.ProcessName,
+				OwnerUser:     store.NormalizeOwnerUser(item.OwnerUser),
 				FirstSeenAt:   at,
 				LastSeenAt:    at,
 			}
 			continue
 		}
 		existing.LastSeenAt = at
+		existing.OwnerUser = store.NormalizeOwnerUser(item.OwnerUser)
 		if existing.Source == "discovered" {
 			existing.Kind = item.Kind
 			existing.Ports = copyInts(item.Ports)
@@ -169,6 +174,177 @@ func (m *Mem) HealthChecksForHost(_ context.Context, hostID uuid.UUID) ([]store.
 		out = []store.AgentCheck{}
 	}
 	return out, nil
+}
+
+func (m *Mem) SetServiceDisplayName(_ context.Context, id uuid.UUID, name *string, now time.Time) (store.Service, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.services[id]
+	if !ok {
+		return store.Service{}, store.ErrNotFound
+	}
+	if name != nil {
+		want := strings.ToLower(*name)
+		for otherID, other := range m.services {
+			if otherID == id || other.HostID != s.HostID || other.DisplayName == nil {
+				continue
+			}
+			if strings.ToLower(*other.DisplayName) == want {
+				return store.Service{}, store.ErrConflict
+			}
+		}
+		copied := *name
+		s.DisplayName = &copied
+	} else {
+		s.DisplayName = nil
+	}
+	m.services[id] = s
+	return m.serviceCopyLocked(s, now), nil
+}
+
+func (m *Mem) ListProjectServices(_ context.Context, projectID uuid.UUID, q store.ServiceListQuery, now time.Time) (store.ServicePage, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if q.HostID != nil {
+		host, ok := m.hosts[*q.HostID]
+		level := ""
+		if ok {
+			level = m.shareLevelLocked(*q.HostID, projectID)
+		}
+		if !ok || !authz.ProjectHostReached(host.ProjectID == projectID, level) {
+			return store.ServicePage{}, store.ErrInvalid
+		}
+	}
+	var rows []store.ProjectService
+	for _, svc := range m.services {
+		host, ok := m.hosts[svc.HostID]
+		if !ok {
+			continue
+		}
+		level := m.shareLevelLocked(host.ID, projectID)
+		if !authz.ProjectServiceVisible(host.ProjectID == projectID, level, svc.ProjectID, projectID) {
+			continue
+		}
+		if q.HostID != nil && svc.HostID != *q.HostID {
+			continue
+		}
+		projectName := ""
+		if p, ok := m.projects[svc.ProjectID]; ok {
+			projectName = p.Name
+		}
+		row := m.projectRowLocked(svc, host, projectName, now)
+		if !serviceMatches(row, q.Q) {
+			continue
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		return store.ServiceBefore(serviceOrder(rows[i]), serviceOrder(rows[j]), q.Sort, q.Dir)
+	})
+	total := len(rows)
+	offset := q.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(rows) {
+		offset = len(rows)
+	}
+	rows = rows[offset:]
+	limit := q.Limit
+	if limit < 1 {
+		limit = 50
+	}
+	if len(rows) > limit {
+		rows = rows[:limit]
+	}
+	if rows == nil {
+		rows = []store.ProjectService{}
+	}
+	return store.ServicePage{Items: rows, Total: total}, nil
+}
+
+func (m *Mem) shareLevelLocked(hostID, projectID uuid.UUID) string {
+	sh, ok := m.shares[shareKey(hostID, projectID)]
+	if !ok {
+		return ""
+	}
+	return sh.Level
+}
+
+func (m *Mem) projectRowLocked(svc store.Service, host store.Host, projectName string, now time.Time) store.ProjectService {
+	copied := m.serviceCopyLocked(svc, now)
+	var revoked *time.Time
+	if host.RevokedAt != nil {
+		t := *host.RevokedAt
+		revoked = &t
+	}
+	return store.ProjectService{
+		Service:       copied,
+		HostName:      host.Name,
+		ProjectName:   projectName,
+		HostRevokedAt: revoked,
+		HostAlwaysOn:  host.AlwaysOn,
+	}
+}
+
+func (m *Mem) serviceCopyLocked(svc store.Service, now time.Time) store.Service {
+	svc.Health = store.DeriveHealth(m.latestHealthLocked(svc.ID), now)
+	svc.Ports = copyInts(svc.Ports)
+	svc.DisplayName = cloneString(svc.DisplayName)
+	svc.OwnerUser = cloneString(svc.OwnerUser)
+	svc.SystemdUnit = cloneString(svc.SystemdUnit)
+	svc.SystemdScope = cloneString(svc.SystemdScope)
+	svc.ContainerName = cloneString(svc.ContainerName)
+	svc.ProcessName = cloneString(svc.ProcessName)
+	return svc
+}
+
+func serviceOrder(row store.ProjectService) store.ServiceOrder {
+	name := row.Name
+	if row.DisplayName != nil {
+		name = *row.DisplayName
+	}
+	return store.ServiceOrder{
+		ID:         row.ID,
+		NameKey:    strings.ToLower(name),
+		Host:       row.HostName,
+		Kind:       row.Kind,
+		StatusRank: store.HealthRank(row.Health.Status),
+		LastSeen:   row.LastSeenAt,
+	}
+}
+
+func serviceMatches(row store.ProjectService, q string) bool {
+	if q == "" {
+		return true
+	}
+	needle := strings.ToLower(q)
+	fields := []string{row.Name, row.Kind, row.HostName}
+	if row.DisplayName != nil {
+		fields = append(fields, *row.DisplayName)
+	}
+	if row.OwnerUser != nil {
+		fields = append(fields, *row.OwnerUser)
+	}
+	for _, field := range fields {
+		if strings.Contains(strings.ToLower(field), needle) {
+			return true
+		}
+	}
+	for _, port := range row.Ports {
+		if strings.Contains(strconv.Itoa(port), needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func cloneString(in *string) *string {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
 }
 
 func copyInts(in []int) []int {

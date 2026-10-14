@@ -91,6 +91,29 @@ func Unique(base string, max int, taken func(string) bool) (string, error) {
 	return "", ErrConflict
 }
 
+// MaxOwnerUserBytes is the longest owner_user the agent may store.
+const MaxOwnerUserBytes = 64
+
+// NormalizeOwnerUser keeps a printable account name of at most 64 bytes.
+// Anything else, including empty, becomes nil so a bad agent value does
+// not drop the whole service.
+func NormalizeOwnerUser(in *string) *string {
+	if in == nil {
+		return nil
+	}
+	s := *in
+	if s == "" || len(s) > MaxOwnerUserBytes || !utf8.ValidString(s) {
+		return nil
+	}
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return nil
+		}
+	}
+	out := s
+	return &out
+}
+
 // ValidName reports whether name is 1–80 runes and contains no control
 // characters. Callers trim first.
 func ValidName(name string) bool {

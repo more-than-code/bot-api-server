@@ -22,6 +22,9 @@ const (
 	CapHostView     = "host_view"
 	CapHostServices = "host_services"
 	CapServiceRead  = "service_read"
+	// CapServiceWrite is the service edit capability in spec-shared-hosts §4:
+	// an owner admin+, or a deploy-share admin for that service's own project.
+	// Health-check replacement and PATCH display_name both use it.
 	CapServiceWrite = "service_write"
 	CapHostAdmin    = "host_admin"
 )
@@ -209,4 +212,25 @@ func hasLevel(rel Relation, level string) bool {
 
 func adminRole(role string) bool {
 	return role == RoleOwner || role == RoleAdmin
+}
+
+// ProjectServiceVisible is the v1.3 project-services row rule.
+// owned is true when projectID owns the host. shareLevel is that host's
+// share with projectID, or "" when there is no share. Owning the host
+// shows every service on it. A deploy share shows only services whose
+// project is projectID. A metrics share shows none.
+func ProjectServiceVisible(owned bool, shareLevel string, serviceProject, projectID uuid.UUID) bool {
+	if projectID == uuid.Nil {
+		return false
+	}
+	if owned {
+		return true
+	}
+	return shareLevel == ShareDeploy && serviceProject == projectID
+}
+
+// ProjectHostReached reports whether a project services list may filter
+// to this host. Metrics shares and hosts with no relation are not reached.
+func ProjectHostReached(owned bool, shareLevel string) bool {
+	return owned || shareLevel == ShareDeploy
 }
