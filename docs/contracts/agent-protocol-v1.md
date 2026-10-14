@@ -164,3 +164,11 @@ Additional required vectors:
 ## v1.1 discovered owner (2026-10-14, additive)
 
 `Discovered` gains `"user": string | null`: the username of the uid that owns the listening socket. Read it from the `uid` column of `/proc/net/tcp{,6}` and resolve it via `/etc/passwd`; use the numeric uid as a string if the name is unknown. No privilege needed. It is sent for mapped and unmapped listeners alike. Servers that predate v1.1 ignore it. Servers that know v1.1 store it as `services.owner_user`.
+
+## v1.2 periodic services (2026-10-14, approved by Joe)
+
+Supersedes the "whenever its discovered set changes (checked every 60 s)" sentence in the session section, additively.
+
+1. The agent sends `services` when its discovered set changes (checked every 60 s), **and also at least every 300 s while connected even if the set is unchanged**. A changed set is sent at once and restarts the 300 s timer.
+2. The server treats every `services` message as proof that the listed services are present at that time and updates their `last_seen_at`. A service missing from the message is not changed; its `last_seen_at` stays at the last time it was reported.
+3. No new fields. Servers that predate v1.2 already upsert `last_seen_at` on every message.
