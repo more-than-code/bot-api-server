@@ -31,8 +31,8 @@ func TestProjectServiceOrder(t *testing.T) {
 		{"kind", "desc", `s.kind COLLATE "C" DESC NULLS LAST, s.id ASC`},
 		{"last_seen", "asc", "s.last_seen_at ASC NULLS LAST, s.id ASC"},
 		{"last_seen", "desc", "s.last_seen_at DESC NULLS LAST, s.id ASC"},
-		{"status", "asc", `health_rank ASC NULLS LAST, lower(coalesce(s.display_name, s.name)) COLLATE "C" ASC NULLS LAST, s.id ASC`},
-		{"status", "desc", `health_rank DESC NULLS LAST, lower(coalesce(s.display_name, s.name)) COLLATE "C" DESC NULLS LAST, s.id ASC`},
+		{"status", "asc", `(s.gone_at IS NOT NULL) ASC, health_rank ASC NULLS LAST, lower(coalesce(s.display_name, s.name)) COLLATE "C" ASC NULLS LAST, s.id ASC`},
+		{"status", "desc", `(s.gone_at IS NOT NULL) ASC, health_rank DESC NULLS LAST, lower(coalesce(s.display_name, s.name)) COLLATE "C" DESC NULLS LAST, s.id ASC`},
 		{"nope", "asc", `lower(coalesce(s.display_name, s.name)) COLLATE "C" ASC NULLS LAST, s.id ASC`},
 		{"name", "sideways", `lower(coalesce(s.display_name, s.name)) COLLATE "C" ASC NULLS LAST, s.id ASC`},
 	}

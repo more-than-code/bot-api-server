@@ -93,6 +93,15 @@ func (s *Server) projectServiceQuery(w http.ResponseWriter, r *http.Request) (st
 		}
 		hostID = &id
 	}
+	view := r.URL.Query().Get("view")
+	switch view {
+	case "", "all":
+		view = "all"
+	case "deploybot", "deploybot_and_discovered":
+	default:
+		writeCode(w, "bad_request", "invalid view")
+		return store.ServiceListQuery{}, "", 0, false
+	}
 	limit, ok := s.limit(w, r)
 	if !ok {
 		return store.ServiceListQuery{}, "", 0, false
@@ -101,13 +110,13 @@ func (s *Server) projectServiceQuery(w http.ResponseWriter, r *http.Request) (st
 	if hostID != nil {
 		hostText = hostID.String()
 	}
-	hash := serviceQueryHash(q, hostText, sortKey, dir)
+	hash := serviceQueryHash(q, hostText, sortKey, dir, view)
 	offset, ok := s.serviceOffset(w, r, hash)
 	if !ok {
 		return store.ServiceListQuery{}, "", 0, false
 	}
 	return store.ServiceListQuery{
-		Q: q, HostID: hostID, Sort: sortKey, Dir: dir, Limit: limit, Offset: offset,
+		Q: q, HostID: hostID, Sort: sortKey, Dir: dir, View: view, Limit: limit, Offset: offset,
 	}, hash, offset, true
 }
 
@@ -116,8 +125,8 @@ type serviceCursorWire struct {
 	H string `json:"h"`
 }
 
-func serviceQueryHash(q, hostID, sortKey, dir string) string {
-	raw, _ := json.Marshal([]string{q, hostID, sortKey, dir})
+func serviceQueryHash(q, hostID, sortKey, dir, view string) string {
+	raw, _ := json.Marshal([]string{q, hostID, sortKey, dir, view})
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:8])
 }

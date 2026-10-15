@@ -188,7 +188,7 @@ func TestHostServiceListKeepsShape(t *testing.T) {
 	user := "www-data"
 	if err := fx.w.mem.UpsertDiscovered(context.Background(), fx.sc.host.ID, []store.Discovered{{
 		Name: "api", Kind: "process", Ports: []int{8080}, OwnerUser: &user,
-	}}, fx.w.now); err != nil {
+	}}, fx.w.now, true, true); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := fx.w.mem.SetServiceDisplayName(context.Background(), fx.ownerSvc.ID, strPtr("Alpha"), fx.w.now); err != nil {

@@ -536,24 +536,8 @@ func (fx *projectServiceFixture) list(t *testing.T, token, project string, q url
 
 func putProjectService(t *testing.T, w *world, hostID, projectID uuid.UUID, name, kind string, ports []int, owner, display *string, at time.Time) uuid.UUID {
 	t.Helper()
-	if err := w.mem.UpsertDiscovered(context.Background(), hostID, []store.Discovered{{
-		Name: name, Kind: kind, Ports: ports, OwnerUser: owner,
-	}}, at); err != nil {
-		t.Fatal(err)
-	}
-	items, err := w.mem.ListServices(context.Background(), hostID, nil, at)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var id uuid.UUID
-	for _, item := range items {
-		if item.Name == name {
-			id = item.ID
-		}
-	}
-	if id == uuid.Nil {
-		t.Fatalf("missing %s", name)
-	}
+	svc := w.mem.PutDiscovered(hostID, name, kind, ports, owner, at)
+	id := svc.ID
 	w.mem.SetServiceProject(id, projectID)
 	if display != nil {
 		if _, err := w.mem.SetServiceDisplayName(context.Background(), id, display, at); err != nil {

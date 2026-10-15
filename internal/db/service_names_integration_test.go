@@ -341,6 +341,7 @@ VALUES ($1, $2::uuid, $3::uuid, 'success', 1)
 				ID:         item.ID,
 				NameKey:    strings.ToLower(key),
 				StatusRank: store.HealthRank(status),
+				Gone:       item.GoneAt != nil,
 			},
 		})
 	}
@@ -518,7 +519,7 @@ func assertLiveRediscovery(t *testing.T, d *DB, ctx context.Context, hostID uuid
 	later := at.Add(time.Minute)
 	if err := d.UpsertDiscovered(ctx, hostID, []store.Discovered{{
 		Name: "keep-name", Kind: "container", Ports: []int{1}, OwnerUser: strp("alice"),
-	}}, later); err != nil {
+	}}, later, true, true); err != nil {
 		t.Fatal(err)
 	}
 	display, owner, kind, ports := readLiveService(t, d, ctx, ids["keep-name"])
@@ -527,7 +528,7 @@ func assertLiveRediscovery(t *testing.T, d *DB, ctx context.Context, hostID uuid
 	}
 	if err := d.UpsertDiscovered(ctx, hostID, []store.Discovered{{
 		Name: "keep-name", Kind: "container", Ports: []int{1}, OwnerUser: strp("a\nb"),
-	}}, later.Add(time.Minute)); err != nil {
+	}}, later.Add(time.Minute), true, true); err != nil {
 		t.Fatal(err)
 	}
 	display, owner, _, _ = readLiveService(t, d, ctx, ids["keep-name"])
@@ -536,7 +537,7 @@ func assertLiveRediscovery(t *testing.T, d *DB, ctx context.Context, hostID uuid
 	}
 	if err := d.UpsertDiscovered(ctx, hostID, []store.Discovered{{
 		Name: "declared-svc", Kind: "container", Ports: []int{1}, OwnerUser: strp("bob"),
-	}}, later); err != nil {
+	}}, later, true, true); err != nil {
 		t.Fatal(err)
 	}
 	display, owner, kind, ports = readLiveService(t, d, ctx, ids["declared-svc"])

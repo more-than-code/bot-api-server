@@ -341,3 +341,17 @@ The API does not check host paths or accounts; the host policy and helper do (ag
 2. **Environment that changes what runs is refused** (`bad_request`, "this variable changes what the program runs"): keys starting `LD_` or `DYLD_`, and `NODE_OPTIONS`, `NODE_PATH`, `BASH_ENV`, `ENV`, `IFS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PERL5OPT`, `PERL5LIB`, `RUBYOPT`, `RUBYLIB`. This applies to hoisted `KEY=value` words too.
 3. **Approvals show the environment:** `Approval` gains `"env":{KEY:value}` and `"exec","args"`, so the host owner sees everything that will run.
 4. **Idempotency is reserved before acting:** the server inserts the (user, key, request hash) row first; a second request with the same key while the first is still running → `conflict` ("request in progress"); after the outcome the stored response is filled in. A failed dispatch stores its error response too, so a retry with the same key replays it.
+
+## v1.7 service presence and views (2026-10-15, approved spec `docs/spec-services-view.md`; additive)
+
+1. **`Service` gains `"gone_at"`**: RFC 3339 time or `null`. `null` means the service was in its host's latest services report (`hello.services` or a `services` frame).
+2. **Ingest:** every services report from a host is that host's full set. In the same transaction as the upsert, the server sets `gone_at = <report time>` on that host's rows that are not in the report and still have `gone_at = null`, and sets `gone_at = null` on every reported row. Rows of other hosts are never touched. A host that sends no report changes nothing. `display_name`, health checks and ids are unaffected.
+3. **`GET /v1/projects/{id}/services`** gains the query parameter `view`:
+   - `all` (default): every row, as in v1.3.
+   - `deploybot`: rows with `source` in (`owned`, `declared`), gone or not.
+   - `deploybot_and_discovered`: the `deploybot` rows plus rows with `source = 'discovered'` and `gone_at IS NULL`.
+   - Any other value → `bad_request`.
+   - `q`, `host_id`, `sort`, `dir`, `limit`, `cursor` and `total` apply within the view. A cursor carries its view; using it with a different `view` → `bad_request`.
+   - `sort=status`: rows with `gone_at` set come after all rows with `gone_at = null`, for both values of `dir`; within each group the v1.3 order applies.
+4. Other routes are unchanged; `GET /v1/hosts/{id}/services` and `GET /v1/services/{id}` simply include `gone_at`.
+5. Migration `0008_service_gone.sql` backfills: for each host, rows whose `last_seen_at` is earlier than that host's greatest `last_seen_at` get `gone_at = last_seen_at`.

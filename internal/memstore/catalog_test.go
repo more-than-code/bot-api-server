@@ -204,7 +204,7 @@ func TestOwnedIngestMemstore(t *testing.T) {
 		Name: "other", Kind: "systemd", Ports: []int{9},
 		SystemdUnit: &unit, SystemdScope: &scope,
 		Owner: &store.DiscoveredOwner{Kind: "program", Project: "missing", Entry: "nope"},
-	}}, at); err != nil {
+	}}, at, true, true); err != nil {
 		t.Fatal(err)
 	}
 	items, err := m.ListServices(ctx, host.ID, nil, at)
@@ -224,7 +224,7 @@ func TestOwnedIngestMemstore(t *testing.T) {
 		Name: "reported", Kind: "systemd", Ports: []int{4},
 		SystemdUnit: &absent, SystemdScope: &scope,
 		Owner: &store.DiscoveredOwner{Kind: "program", Project: "ownedproj", Entry: "no-such"},
-	}}, at); err != nil {
+	}}, at, true, true); err != nil {
 		t.Fatal(err)
 	}
 	items, err = m.ListServices(ctx, host.ID, nil, at)
@@ -240,7 +240,7 @@ func TestOwnedIngestMemstore(t *testing.T) {
 		Name: "shortname", Kind: "systemd", Ports: []int{5},
 		SystemdUnit: &huge, SystemdScope: &scope,
 		Owner: &store.DiscoveredOwner{Kind: "program", Project: "missing", Entry: "nope"},
-	}}, at); err != nil {
+	}}, at, true, true); err != nil {
 		t.Fatal(err)
 	}
 	items, err = m.ListServices(ctx, host.ID, nil, at)

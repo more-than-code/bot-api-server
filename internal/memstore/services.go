@@ -49,15 +49,20 @@ func (m *Mem) GetService(_ context.Context, id uuid.UUID, now time.Time) (store.
 	return s, nil
 }
 
-func (m *Mem) UpsertDiscovered(_ context.Context, hostID uuid.UUID, items []store.Discovered, at time.Time) error {
+func (m *Mem) UpsertDiscovered(_ context.Context, hostID uuid.UUID, items []store.Discovered, at time.Time, complete bool, presence bool) error {
+	if !complete {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.hosts[hostID]; !ok {
 		return store.ErrNotFound
 	}
 	hostProject := m.hosts[hostID].ProjectID
+	reported := make(map[string]struct{}, len(items))
 	for _, item := range items {
 		name, source, projectID, catalogEntry := store.PlaceDiscovered(item, hostProject, m.lookupCatalogLocked)
+		reported[name] = struct{}{}
 		var found uuid.UUID
 		var existing store.Service
 		ok := false
@@ -91,6 +96,7 @@ func (m *Mem) UpsertDiscovered(_ context.Context, hostID uuid.UUID, items []stor
 			continue
 		}
 		existing.LastSeenAt = at
+		existing.GoneAt = nil
 		existing.OwnerUser = store.NormalizeOwnerUser(item.OwnerUser)
 		if existing.Source != "declared" && source == "owned" {
 			existing.Source = "owned"
@@ -106,6 +112,19 @@ func (m *Mem) UpsertDiscovered(_ context.Context, hostID uuid.UUID, items []stor
 			existing.ProcessName = cloneString(item.ProcessName)
 		}
 		m.services[found] = existing
+	}
+	if presence {
+		for id, s := range m.services {
+			if s.HostID != hostID || s.GoneAt != nil {
+				continue
+			}
+			if _, ok := reported[s.Name]; ok {
+				continue
+			}
+			gone := at
+			s.GoneAt = &gone
+			m.services[id] = s
+		}
 	}
 	return nil
 }
@@ -236,6 +255,9 @@ func (m *Mem) ListProjectServices(_ context.Context, projectID uuid.UUID, q stor
 		if q.HostID != nil && svc.HostID != *q.HostID {
 			continue
 		}
+		if !serviceInView(svc, q.View) {
+			continue
+		}
 		projectName := ""
 		if p, ok := m.projects[svc.ProjectID]; ok {
 			projectName = p.Name
@@ -305,6 +327,7 @@ func (m *Mem) serviceCopyLocked(svc store.Service, now time.Time) store.Service 
 	svc.ContainerName = cloneString(svc.ContainerName)
 	svc.ProcessName = cloneString(svc.ProcessName)
 	svc.CatalogEntry = cloneString(svc.CatalogEntry)
+	svc.GoneAt = cloneTime(svc.GoneAt)
 	return svc
 }
 
@@ -319,7 +342,22 @@ func serviceOrder(row store.ProjectService) store.ServiceOrder {
 		Host:       row.HostName,
 		Kind:       row.Kind,
 		StatusRank: store.HealthRank(row.Health.Status),
+		Gone:       row.GoneAt != nil,
 		LastSeen:   row.LastSeenAt,
+	}
+}
+
+func serviceInView(svc store.Service, view string) bool {
+	switch view {
+	case "deploybot":
+		return svc.Source == "owned" || svc.Source == "declared"
+	case "deploybot_and_discovered":
+		if svc.Source == "owned" || svc.Source == "declared" {
+			return true
+		}
+		return svc.Source == "discovered" && svc.GoneAt == nil
+	default:
+		return true
 	}
 }
 
@@ -356,6 +394,14 @@ func cloneString(in *string) *string {
 	return &v
 }
 
+func cloneTime(in *time.Time) *time.Time {
+	if in == nil {
+		return nil
+	}
+	v := *in
+	return &v
+}
+
 func copyInts(in []int) []int {
 	if len(in) == 0 {
 		return []int{}
@@ -376,6 +422,28 @@ func (m *Mem) PutDeclared(hostID uuid.UUID, name, kind string, ports []int, at t
 		Source:      "declared",
 		Kind:        kind,
 		Ports:       copyInts(ports),
+		FirstSeenAt: at,
+		LastSeenAt:  at,
+	}
+	m.services[s.ID] = s
+	return s
+}
+
+// PutDiscovered seeds one discovered row and does not change presence on
+// other rows. Tests use it to build a list without a full services report.
+// It is not part of store.Store.
+func (m *Mem) PutDiscovered(hostID uuid.UUID, name, kind string, ports []int, owner *string, at time.Time) store.Service {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s := store.Service{
+		ID:          uuid.New(),
+		HostID:      hostID,
+		ProjectID:   m.hosts[hostID].ProjectID,
+		Name:        name,
+		Source:      "discovered",
+		Kind:        kind,
+		Ports:       copyInts(ports),
+		OwnerUser:   store.NormalizeOwnerUser(owner),
 		FirstSeenAt: at,
 		LastSeenAt:  at,
 	}

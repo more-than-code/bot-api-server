@@ -263,7 +263,7 @@ func TestRediscoveryKeepsDisplayName(t *testing.T) {
 	next := strp("www-data")
 	if err := mem.UpsertDiscovered(ctx, host.ID, []store.Discovered{{
 		Name: "api", Kind: "container", Ports: []int{9}, OwnerUser: next,
-	}}, at.Add(time.Minute)); err != nil {
+	}}, at.Add(time.Minute), true, true); err != nil {
 		t.Fatal(err)
 	}
 	got, err = mem.GetService(ctx, svc.ID, at)
@@ -279,7 +279,7 @@ func TestRediscoveryKeepsDisplayName(t *testing.T) {
 	bad := "a\nb"
 	if err := mem.UpsertDiscovered(ctx, host.ID, []store.Discovered{{
 		Name: "api", Kind: "container", Ports: []int{9}, OwnerUser: &bad,
-	}}, at.Add(2*time.Minute)); err != nil {
+	}}, at.Add(2*time.Minute), true, true); err != nil {
 		t.Fatal(err)
 	}
 	got, err = mem.GetService(ctx, svc.ID, at)
@@ -293,7 +293,7 @@ func TestRediscoveryKeepsDisplayName(t *testing.T) {
 	}
 	if err := mem.UpsertDiscovered(ctx, host.ID, []store.Discovered{{
 		Name: "web", Kind: "container", Ports: []int{1}, OwnerUser: strp("alice"),
-	}}, at.Add(time.Minute)); err != nil {
+	}}, at.Add(time.Minute), true, true); err != nil {
 		t.Fatal(err)
 	}
 	got, err = mem.GetService(ctx, declared.ID, at)
@@ -510,22 +510,7 @@ func makeProject(t *testing.T, mem *Mem, owner uuid.UUID, name, slug string, at 
 
 func discoverService(t *testing.T, mem *Mem, hostID uuid.UUID, name, kind string, ports []int, owner *string, at time.Time) store.Service {
 	t.Helper()
-	if err := mem.UpsertDiscovered(context.Background(), hostID, []store.Discovered{{
-		Name: name, Kind: kind, Ports: ports, OwnerUser: owner,
-	}}, at); err != nil {
-		t.Fatal(err)
-	}
-	items, err := mem.ListServices(context.Background(), hostID, nil, at)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, item := range items {
-		if item.Name == name {
-			return item
-		}
-	}
-	t.Fatalf("missing %s", name)
-	return store.Service{}
+	return mem.PutDiscovered(hostID, name, kind, ports, owner, at)
 }
 
 func putHealth(t *testing.T, mem *Mem, hostID uuid.UUID, service, result string, at time.Time) {

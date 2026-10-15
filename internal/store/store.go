@@ -239,7 +239,10 @@ type Service struct {
 	CatalogEntry  *string   `json:"catalog_entry"`
 	FirstSeenAt   time.Time `json:"first_seen_at"`
 	LastSeenAt    time.Time `json:"last_seen_at"`
-	Health        Health    `json:"health"`
+	// GoneAt is when the service was missing from its host's latest
+	// complete services report. Null means that report included it.
+	GoneAt *time.Time `json:"gone_at"`
+	Health Health     `json:"health"`
 }
 
 // ProjectService is one row of GET /v1/projects/{id}/services.
@@ -257,6 +260,8 @@ type ProjectService struct {
 // ServiceListQuery is the server-side filter for a project services list.
 // Q is already trimmed. Sort is name, host, kind, status, or last_seen.
 // Dir is asc or desc. Offset is the number of matching rows to skip.
+// View is all, deploybot, or deploybot_and_discovered. Empty means all.
+// The HTTP handler rejects any other value before it reaches the store.
 type ServiceListQuery struct {
 	Q      string
 	HostID *uuid.UUID
@@ -264,6 +269,7 @@ type ServiceListQuery struct {
 	Dir    string
 	Limit  int
 	Offset int
+	View   string
 }
 
 // ServicePage is one page of a project services list. Total counts every
@@ -503,7 +509,7 @@ type Store interface {
 	// one, returns services whose project_id is in that set.
 	ListServices(ctx context.Context, hostID uuid.UUID, projects []uuid.UUID, now time.Time) ([]Service, error)
 	GetService(ctx context.Context, id uuid.UUID, now time.Time) (Service, error)
-	// ListProjectServices returns the v1.3 rows for projectID.
+	// ListProjectServices returns the v1.3 rows for projectID, inside View.
 	// Filtering, search, sort, total, and paging happen in the store.
 	// A HostID those rows cannot reach returns ErrInvalid.
 	ListProjectServices(ctx context.Context, projectID uuid.UUID, q ServiceListQuery, now time.Time) (ServicePage, error)
@@ -511,7 +517,14 @@ type Store interface {
 	// A case-insensitive duplicate on the same host returns ErrConflict.
 	// A missing service returns ErrNotFound. Rediscovery does not call this.
 	SetServiceDisplayName(ctx context.Context, id uuid.UUID, name *string, now time.Time) (Service, error)
-	UpsertDiscovered(ctx context.Context, hostID uuid.UUID, items []Discovered, at time.Time) error
+	// UpsertDiscovered stores one services report for hostID.
+	// complete false writes nothing and does not read the host; presence
+	// is ignored. complete true upserts items and clears gone_at on those
+	// rows. presence true also sets gone_at to at on this host's other
+	// rows that are still present. A row that is already gone keeps its
+	// time. Other hosts are not modified. Ids, display_name, and health
+	// checks are not modified.
+	UpsertDiscovered(ctx context.Context, hostID uuid.UUID, items []Discovered, at time.Time, complete bool, presence bool) error
 	ReplaceHealthChecks(ctx context.Context, serviceID uuid.UUID, checks []HealthCheckInput) ([]HealthCheck, error)
 	ListHealthChecks(ctx context.Context, serviceID uuid.UUID) ([]HealthCheck, error)
 	HealthChecksForHost(ctx context.Context, hostID uuid.UUID) ([]AgentCheck, error)

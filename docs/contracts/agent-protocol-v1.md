@@ -248,3 +248,8 @@ bot-agent ALL=(root) NOPASSWD: /usr/local/libexec/bot-agent-runner
 3. **Environment denylist:** the agent and the helper both refuse the api-v1 v1.6.1 item 2 keys (`bad_spec` in the agent, `policy_denied` in the helper).
 4. **Program unit hardening adds** `PrivateDevices=yes`, `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`, `ProtectControlGroups=yes`.
 5. **start/restart truth:** a non-zero `systemctl` exit is a failure (`start_failed`), and success needs the unit's `ActiveEnterTimestampMonotonic` to be newer than before the call.
+
+### v1.3.2 note (2026-10-15, approved spec `docs/spec-services-view.md`)
+
+1. A `services` frame (and `hello.services`) is sent only from a complete discovery: the process scan succeeded and, when the program policy is enabled, the owned-program lookup through the helper succeeded. If either fails, the agent sends no `services` frame for that cycle and keeps its previous canonical set and send time, so the next successful cycle compares against the last set actually sent. The server treats every received set as the full set (api-v1 v1.7 item 2).
+2. At start, `hello.services` comes from the first discovery; if that discovery is incomplete, `hello.services` is an empty list **and** the server must not apply presence to it. To make that explicit, `hello` gains `"services_complete": bool` (absent = `true` for older agents). The server applies api-v1 v1.7 item 2 to `hello.services` only when it is `true`.

@@ -235,7 +235,7 @@ func (h *Hub) hello(ac *agentConn, token string, f frame) bool {
 		return false
 	}
 	h.storePrograms(ac, f.Programs)
-	h.upsertServices(ac, f.Services)
+	h.upsertServices(ac, f.Services, servicesComplete(f.ServicesComplete))
 	cfg, err := h.agentConfig(ac.parent, host.ID)
 	if err != nil {
 		h.log.Error("health checks failed", "host_id", host.ID.String())
@@ -266,7 +266,7 @@ func (h *Hub) dispatch(ac *agentConn, f frame) error {
 	case "ping":
 		return h.onPing(ac)
 	case "services":
-		h.upsertServices(ac, f.Services)
+		h.upsertServices(ac, f.Services, true)
 		return nil
 	case "metrics":
 		return h.onMetrics(ac, f)
@@ -323,33 +323,63 @@ func parsePrograms(raw json.RawMessage) (*store.HostPrograms, bool) {
 	return &p, true
 }
 
-func (h *Hub) upsertServices(ac *agentConn, raw json.RawMessage) {
-	items := h.discovered(raw)
-	if len(items) == 0 {
+// servicesComplete is true when hello omits services_complete or sends true.
+// JSON null is incomplete. A non-bool never reaches here: parseFrame rejects it.
+func servicesComplete(raw json.RawMessage) bool {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return true
+	}
+	var v bool
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return false
+	}
+	return v
+}
+
+func (h *Hub) upsertServices(ac *agentConn, raw json.RawMessage, complete bool) {
+	if !complete {
 		return
 	}
-	if err := h.st.UpsertDiscovered(ac.parent, ac.hostID, items, h.now()); err != nil {
+	items, presence, report := h.discoveredReport(raw)
+	if !report {
+		return
+	}
+	if err := h.st.UpsertDiscovered(ac.parent, ac.hostID, items, h.now(), true, presence); err != nil {
 		h.log.Error("services upsert failed", "host_id", ac.hostID.String())
 	}
 }
 
-func (h *Hub) discovered(raw json.RawMessage) []store.Discovered {
+// discoveredReport parses a services array. An absent, blank, or null payload
+// is not a report. An empty array is a complete empty set. A non-empty array
+// whose every element fails validation is not a report. Valid elements of a
+// mixed array are upserted, and presence is applied only when every element
+// was valid.
+func (h *Hub) discoveredReport(raw json.RawMessage) ([]store.Discovered, bool, bool) {
 	if len(strings.TrimSpace(string(raw))) == 0 || string(raw) == "null" {
-		return nil
+		return nil, false, false
 	}
 	var items []json.RawMessage
 	if err := json.Unmarshal(raw, &items); err != nil {
 		h.log.Warn("skip service", "name", "")
-		return nil
+		return nil, false, false
+	}
+	if len(items) == 0 {
+		return []store.Discovered{}, true, true
 	}
 	out := make([]store.Discovered, 0, len(items))
+	dropped := false
 	for _, item := range items {
 		d, ok := h.oneService(item)
-		if ok {
-			out = append(out, d)
+		if !ok {
+			dropped = true
+			continue
 		}
+		out = append(out, d)
 	}
-	return out
+	if len(out) == 0 {
+		return nil, false, false
+	}
+	return out, !dropped, true
 }
 
 func (h *Hub) oneService(raw json.RawMessage) (store.Discovered, bool) {

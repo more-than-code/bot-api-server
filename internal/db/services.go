@@ -17,7 +17,7 @@ const serviceColumns = `
 s.id::text, s.host_id::text, s.project_id::text, s.name, s.source, s.kind, s.ports,
 s.systemd_unit, s.systemd_scope, s.container_name, s.process_match,
 s.display_name, s.owner_user, s.catalog_entry,
-s.first_seen_at, s.last_seen_at,
+s.first_seen_at, s.last_seen_at, s.gone_at,
 hr.time, hr.result, hr.latency_ms`
 
 const serviceHealthJoin = `
@@ -222,7 +222,23 @@ AND (
     )
 )`, p, p, p, p, p, p)
 	}
+	if pred := serviceViewSQL(q.View); pred != "" {
+		where += "\nAND " + pred
+	}
 	return where, args
+}
+
+// serviceViewSQL is a fixed fragment. view is allowlisted by the HTTP
+// handler. Anything else, including empty, is the v1.3 row set (all).
+func serviceViewSQL(view string) string {
+	switch view {
+	case "deploybot":
+		return "s.source IN ('owned', 'declared')"
+	case "deploybot_and_discovered":
+		return "(s.source IN ('owned', 'declared') OR (s.source = 'discovered' AND s.gone_at IS NULL))"
+	default:
+		return ""
+	}
 }
 
 // nameSortKey is the lowercased label in byte order. ORDER BY inlines it.
@@ -250,7 +266,9 @@ func projectServiceOrder(sortKey, dir string) string {
 	case "last_seen":
 		return text("s.last_seen_at") + ", s.id ASC"
 	case "status":
-		return text("health_rank") + ", " + text(nameSortKey) + ", s.id ASC"
+		// Present rows stay ahead of gone rows in both directions.
+		// dir reverses health_rank and the name only.
+		return "(s.gone_at IS NOT NULL) ASC, " + text("health_rank") + ", " + text(nameSortKey) + ", s.id ASC"
 	default:
 		return text(nameSortKey) + ", s.id ASC"
 	}
@@ -272,7 +290,10 @@ func likeContains(q string) string {
 	return b.String()
 }
 
-func (d *DB) UpsertDiscovered(ctx context.Context, hostID uuid.UUID, items []store.Discovered, at time.Time) error {
+func (d *DB) UpsertDiscovered(ctx context.Context, hostID uuid.UUID, items []store.Discovered, at time.Time, complete bool, presence bool) error {
+	if !complete {
+		return nil
+	}
 	var exists bool
 	if err := d.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM app.hosts WHERE id = $1::uuid)`, hostID.String()).Scan(&exists); err != nil {
 		return mapErr(err)
@@ -293,10 +314,12 @@ func (d *DB) UpsertDiscovered(ctx context.Context, hostID uuid.UUID, items []sto
 	if err != nil {
 		return err
 	}
+	names := make([]string, 0, len(items))
 	for _, item := range items {
 		name, source, projectID, catalogEntry := store.PlaceDiscovered(item, ownerProject, func(slug, entry string) (uuid.UUID, bool) {
 			return d.catalogLookup(ctx, tx, slug, entry)
 		})
+		names = append(names, name)
 		if err := exec(ctx, tx, `
 INSERT INTO app.services (
     id, host_id, name, source, kind, ports,
@@ -309,6 +332,7 @@ INSERT INTO app.services (
 )
 ON CONFLICT (host_id, name) DO UPDATE SET
     last_seen_at = EXCLUDED.last_seen_at,
+    gone_at = NULL,
     owner_user = EXCLUDED.owner_user,
     source = CASE
         WHEN app.services.source = 'declared' THEN app.services.source
@@ -332,6 +356,17 @@ ON CONFLICT (host_id, name) DO UPDATE SET
 `, uuid.New().String(), hostID.String(), name, source, item.Kind, intsTo32(item.Ports),
 			optString(item.SystemdUnit), optString(item.SystemdScope), optString(item.ContainerName), optString(item.ProcessName),
 			at, projectID.String(), optString(store.NormalizeOwnerUser(item.OwnerUser)), optString(catalogEntry)); err != nil {
+			return mapErr(err)
+		}
+	}
+	if presence {
+		if err := exec(ctx, tx, `
+UPDATE app.services
+SET gone_at = $2
+WHERE host_id = $1::uuid
+  AND gone_at IS NULL
+  AND NOT (name = ANY(CAST($3 AS text[])))
+`, hostID.String(), at, names); err != nil {
 			return mapErr(err)
 		}
 	}
@@ -475,7 +510,7 @@ func scanServiceInto(row pgx.Row, now time.Time, extra *projectServiceExtra) (st
 		&id, &hostID, &projectID, &s.Name, &s.Source, &s.Kind, &ports,
 		&s.SystemdUnit, &s.SystemdScope, &s.ContainerName, &s.ProcessName,
 		&s.DisplayName, &s.OwnerUser, &s.CatalogEntry,
-		&s.FirstSeenAt, &s.LastSeenAt,
+		&s.FirstSeenAt, &s.LastSeenAt, &s.GoneAt,
 		&checked, &result, &latency,
 	}
 	if extra != nil {

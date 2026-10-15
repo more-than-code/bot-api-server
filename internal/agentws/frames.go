@@ -3,6 +3,7 @@ package agentws
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -10,24 +11,25 @@ import (
 var errClosed = errors.New("closed")
 
 type frame struct {
-	V            int             `json:"v"`
-	Type         string          `json:"type"`
-	JoinToken    string          `json:"join_token"`
-	Hostname     string          `json:"hostname"`
-	AgentVersion string          `json:"agent_version"`
-	OS           string          `json:"os"`
-	Arch         string          `json:"arch"`
-	AlwaysOn     bool            `json:"always_on"`
-	HostID       string          `json:"host_id"`
-	CredentialID string          `json:"credential_id"`
-	Services     json.RawMessage `json:"services"`
-	Programs     json.RawMessage `json:"programs"`
-	BatchID      string          `json:"batch_id"`
-	Samples      json.RawMessage `json:"samples"`
-	TaskID       string          `json:"task_id"`
-	State        string          `json:"state"`
-	ErrorCode    json.RawMessage `json:"error_code"`
-	Payload      json.RawMessage `json:"payload"`
+	V                int             `json:"v"`
+	Type             string          `json:"type"`
+	JoinToken        string          `json:"join_token"`
+	Hostname         string          `json:"hostname"`
+	AgentVersion     string          `json:"agent_version"`
+	OS               string          `json:"os"`
+	Arch             string          `json:"arch"`
+	AlwaysOn         bool            `json:"always_on"`
+	HostID           string          `json:"host_id"`
+	CredentialID     string          `json:"credential_id"`
+	Services         json.RawMessage `json:"services"`
+	ServicesComplete json.RawMessage `json:"services_complete"`
+	Programs         json.RawMessage `json:"programs"`
+	BatchID          string          `json:"batch_id"`
+	Samples          json.RawMessage `json:"samples"`
+	TaskID           string          `json:"task_id"`
+	State            string          `json:"state"`
+	ErrorCode        json.RawMessage `json:"error_code"`
+	Payload          json.RawMessage `json:"payload"`
 }
 
 type errorFrame struct {
@@ -94,7 +96,21 @@ func parseFrame(b []byte) (frame, error) {
 	if err := json.Unmarshal(b, &f); err != nil {
 		return frame{}, err
 	}
+	if err := validServicesComplete(f.ServicesComplete); err != nil {
+		return frame{}, err
+	}
 	return f, nil
+}
+
+// validServicesComplete accepts an absent field and JSON null.
+// Any other non-bool fails the frame.
+func validServicesComplete(raw json.RawMessage) error {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return nil
+	}
+	var v bool
+	return json.Unmarshal(raw, &v)
 }
 
 func jsonString(raw json.RawMessage) string {

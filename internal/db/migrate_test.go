@@ -8,10 +8,10 @@ import (
 )
 
 func TestMigrationSkipsDownScript(t *testing.T) {
-	if numberedSQL("0003_shared_hosts.down.sql") || numberedSQL("0004_service_names.down.sql") || numberedSQL("0005_mcp_oauth.down.sql") || numberedSQL("0006_invites.down.sql") || numberedSQL("0007_catalog.down.sql") {
+	if numberedSQL("0003_shared_hosts.down.sql") || numberedSQL("0004_service_names.down.sql") || numberedSQL("0005_mcp_oauth.down.sql") || numberedSQL("0006_invites.down.sql") || numberedSQL("0007_catalog.down.sql") || numberedSQL("0008_service_gone.down.sql") {
 		t.Fatal("down script is numbered SQL")
 	}
-	if !numberedSQL("0003_shared_hosts.sql") || !numberedSQL("0004_service_names.sql") || !numberedSQL("0005_mcp_oauth.sql") || !numberedSQL("0006_invites.sql") || !numberedSQL("0007_catalog.sql") {
+	if !numberedSQL("0003_shared_hosts.sql") || !numberedSQL("0004_service_names.sql") || !numberedSQL("0005_mcp_oauth.sql") || !numberedSQL("0006_invites.sql") || !numberedSQL("0007_catalog.sql") || !numberedSQL("0008_service_gone.sql") {
 		t.Fatal("numbered migration was skipped")
 	}
 	names, err := migrationFiles()
@@ -19,7 +19,7 @@ func TestMigrationSkipsDownScript(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(names, ",")
-	for _, want := range []string{"0001_app.sql", "0002_metrics.sql", "0003_shared_hosts.sql", "0004_service_names.sql", "0005_mcp_oauth.sql", "0006_invites.sql", "0007_catalog.sql"} {
+	for _, want := range []string{"0001_app.sql", "0002_metrics.sql", "0003_shared_hosts.sql", "0004_service_names.sql", "0005_mcp_oauth.sql", "0006_invites.sql", "0007_catalog.sql", "0008_service_gone.sql"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("migrations = %s", got)
 		}
@@ -98,6 +98,45 @@ func TestServiceNamesMigrationText(t *testing.T) {
 	}
 	if strings.Contains(downText, "services_project_idx") {
 		t.Fatal("down script mentions the 0003 project index")
+	}
+}
+
+func TestServiceGoneMigrationText(t *testing.T) {
+	body, err := migrations.FS.ReadFile("0008_service_gone.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, want := range []string{
+		"ADD COLUMN gone_at timestamptz NULL",
+		"SET gone_at = s.last_seen_at",
+		"peer.host_id = s.host_id",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("0008 missing %s", want)
+		}
+	}
+	if strings.Contains(text, "GRANT") {
+		t.Fatal("0008 changes grants")
+	}
+	alterAt := strings.Index(text, "ADD COLUMN gone_at")
+	updateAt := strings.Index(text, "UPDATE app.services AS s")
+	if alterAt < 0 || updateAt < 0 || alterAt > updateAt {
+		t.Fatal("backfill UPDATE must run after gone_at is added")
+	}
+	down, err := migrations.FS.ReadFile("0008_service_gone.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	downText := string(down)
+	for _, want := range []string{
+		"--migrate does not apply",
+		"DELETE FROM app.schema_migrations WHERE name = '0008_service_gone.sql'",
+		"DROP COLUMN IF EXISTS gone_at",
+	} {
+		if !strings.Contains(downText, want) {
+			t.Fatalf("down script missing %s", want)
+		}
 	}
 }
 

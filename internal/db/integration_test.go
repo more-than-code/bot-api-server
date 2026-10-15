@@ -108,7 +108,7 @@ TRUNCATE TABLE
 		t.Fatalf("migrations: %v", err)
 	}
 	rows.Close()
-	if !names["0001_app.sql"] || !names["0002_metrics.sql"] || !names["0003_shared_hosts.sql"] || !names["0004_service_names.sql"] || !names["0005_mcp_oauth.sql"] || !names["0006_invites.sql"] || !names["0007_catalog.sql"] || names["0003_shared_hosts.down.sql"] || names["0004_service_names.down.sql"] || names["0005_mcp_oauth.down.sql"] || names["0006_invites.down.sql"] || names["0007_catalog.down.sql"] {
+	if !names["0001_app.sql"] || !names["0002_metrics.sql"] || !names["0003_shared_hosts.sql"] || !names["0004_service_names.sql"] || !names["0005_mcp_oauth.sql"] || !names["0006_invites.sql"] || !names["0007_catalog.sql"] || !names["0008_service_gone.sql"] || names["0003_shared_hosts.down.sql"] || names["0004_service_names.down.sql"] || names["0005_mcp_oauth.down.sql"] || names["0006_invites.down.sql"] || names["0007_catalog.down.sql"] || names["0008_service_gone.down.sql"] {
 		t.Fatalf("schema_migrations = %v", names)
 	}
 
@@ -220,7 +220,7 @@ VALUES ($1::uuid, $2::uuid, 'web', 'declared', 'process', $3::integer[], $4, $4,
 		Name:  "web",
 		Kind:  "container",
 		Ports: []int{9},
-	}}, later); err != nil {
+	}}, later, true, true); err != nil {
 		t.Fatalf("upsert discovered: %v", err)
 	}
 	var source string
@@ -326,7 +326,7 @@ SELECT has_function_privilege('deploybot_api', 'app.host_shares_not_owner()', 'E
 		t.Fatalf("project C: %v", err)
 	}
 
-	if err := d.UpsertDiscovered(ctx, host.ID, []store.Discovered{{Name: "finder", Kind: "process"}}, at); err != nil {
+	if err := d.UpsertDiscovered(ctx, host.ID, []store.Discovered{{Name: "finder", Kind: "process"}}, at, true, true); err != nil {
 		t.Fatalf("discover: %v", err)
 	}
 	var finderProject string
@@ -343,7 +343,7 @@ UPDATE app.services SET project_id = $2::uuid WHERE host_id = $1::uuid AND name 
 `, host.ID.String(), projectB.ID.String()); err != nil {
 		t.Fatalf("move finder: %v", err)
 	}
-	if err := d.UpsertDiscovered(ctx, host.ID, []store.Discovered{{Name: "finder", Kind: "process", Ports: []int{9}}}, at); err != nil {
+	if err := d.UpsertDiscovered(ctx, host.ID, []store.Discovered{{Name: "finder", Kind: "process", Ports: []int{9}}}, at, true, true); err != nil {
 		t.Fatalf("rediscover: %v", err)
 	}
 	if err := d.pool.QueryRow(ctx, `

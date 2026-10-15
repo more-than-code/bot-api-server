@@ -92,7 +92,7 @@ func TestDiscoveredDoesNotDowngradeDeclared(t *testing.T) {
 	unit := "api.service"
 	if err := m.UpsertDiscovered(ctx, host.ID, []store.Discovered{{
 		Name: "api", Kind: "systemd", Ports: []int{9}, SystemdUnit: &unit,
-	}}, later); err != nil {
+	}}, later, true, true); err != nil {
 		t.Fatal(err)
 	}
 	got, err := m.GetService(ctx, declared.ID, later)

@@ -62,6 +62,23 @@ func TestServiceBefore(t *testing.T) {
 	assertOrder(up, down, "status", "asc", true)
 	assertOrder(up, down, "status", "desc", false)
 
+	goneLow := base
+	goneLow.Gone = true
+	goneLow.StatusRank = HealthRank("up")
+	presentHigh := other
+	presentHigh.StatusRank = HealthRank("down")
+	assertOrder(goneLow, presentHigh, "status", "asc", false)
+	assertOrder(goneLow, presentHigh, "status", "desc", false)
+	assertOrder(goneLow, presentHigh, "name", "asc", true)
+
+	goneDown := presentHigh
+	goneDown.Gone = true
+	goneDown.StatusRank = HealthRank("down")
+	goneUp := goneLow
+	goneUp.StatusRank = HealthRank("up")
+	assertOrder(goneUp, goneDown, "status", "asc", true)
+	assertOrder(goneUp, goneDown, "status", "desc", false)
+
 	unknownLow := base
 	unknownLow.StatusRank = HealthRank("unknown")
 	unknownLow.NameKey = "a"

@@ -20,8 +20,8 @@ func TestDiscoveredUser(t *testing.T) {
 		{"name":"noisy","kind":"process","user":"a\nb"},
 		{"name":"typed","kind":"process","user":1}
 	]`)
-	items := h.discovered(raw)
-	if len(items) != 5 {
+	items, presence, report := h.discoveredReport(raw)
+	if !report || !presence || len(items) != 5 {
 		t.Fatalf("discovered %d services", len(items))
 	}
 	got := map[string]*string{}

@@ -194,7 +194,7 @@ func assertCatalog(t *testing.T, d *DB, ctx context.Context, at time.Time) {
 		Name: "not-the-entry", Kind: "systemd", Ports: []int{3031},
 		SystemdUnit: &unit, SystemdScope: &scope,
 		Owner: &store.DiscoveredOwner{Kind: "program", Project: "catproj", Entry: "webapp"},
-	}}, at); err != nil {
+	}}, at, true, true); err != nil {
 		t.Fatal(err)
 	}
 	owned := catalogService(t, d, ctx, host.ID, "webapp", at)
@@ -205,7 +205,7 @@ func assertCatalog(t *testing.T, d *DB, ctx context.Context, at time.Time) {
 		Name: "other", Kind: "systemd", Ports: []int{9},
 		SystemdUnit: &unit, SystemdScope: &scope,
 		Owner: &store.DiscoveredOwner{Kind: "program", Project: "missing", Entry: "nope"},
-	}}, at); err != nil {
+	}}, at, true, true); err != nil {
 		t.Fatal(err)
 	}
 	miss := catalogService(t, d, ctx, host.ID, unit, at)
@@ -217,7 +217,7 @@ func assertCatalog(t *testing.T, d *DB, ctx context.Context, at time.Time) {
 		Name: "reported", Kind: "systemd", Ports: []int{4},
 		SystemdUnit: &absent, SystemdScope: &scope,
 		Owner: &store.DiscoveredOwner{Kind: "program", Project: "catproj", Entry: "no-such"},
-	}}, at); err != nil {
+	}}, at, true, true); err != nil {
 		t.Fatal(err)
 	}
 	wrong := catalogService(t, d, ctx, host.ID, absent, at)

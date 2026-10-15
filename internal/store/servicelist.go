@@ -11,6 +11,8 @@ import (
 // ServiceOrder is the sort key for one project-services row.
 // NameKey is lower(coalesce(display_name, name)). A true *Null flag
 // sorts after every non-null value in both directions.
+// Gone is true when gone_at is set. status sort places a gone row
+// after every present row, in both directions.
 type ServiceOrder struct {
 	ID         uuid.UUID
 	NameKey    string
@@ -20,6 +22,7 @@ type ServiceOrder struct {
 	Kind       string
 	KindNull   bool
 	StatusRank int
+	Gone       bool
 	LastSeen   time.Time
 	LastNull   bool
 }
@@ -30,9 +33,14 @@ type ServiceOrder struct {
 // strings.ToLower of the label. Host and Kind are the stored text, not
 // lowercased. status breaks remaining ties by name in the same direction.
 // Equal keys break ties by id ascending in both directions.
+// For status, a gone row sorts after every present row. dir does not
+// reverse that split; it only reverses the order inside each group.
 func ServiceBefore(a, b ServiceOrder, sortKey, dir string) bool {
 	if dir != "desc" {
 		dir = "asc"
+	}
+	if sortKey == "status" && a.Gone != b.Gone {
+		return !a.Gone
 	}
 	cmp := compareServiceKey(a, b, sortKey, dir)
 	if cmp == 0 && sortKey == "status" {
