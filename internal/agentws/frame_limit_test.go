@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,10 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/google/uuid"
+	"github.com/more-than-code/bot-api-server/internal/audit"
+	"github.com/more-than-code/bot-api-server/internal/memstore"
+	"github.com/more-than-code/bot-api-server/internal/store"
 )
 
 func TestMarshalFrameLimit(t *testing.T) {
@@ -71,8 +76,73 @@ func TestServerRefusesOversizeOutbound(t *testing.T) {
 		if !errors.Is(err, errFrameTooLarge) {
 			t.Fatalf("err %v", err)
 		}
-		assertNoMarker(t, c, logs(), marker)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := ac.writeJSON(ctx, map[string]any{"v": 1, "type": "config_update"}); err != nil {
+			t.Fatal(err)
+		}
+		_, msg, err := c.Read(ctx)
+		if err != nil || bytes.Contains(msg, []byte(marker)) || !bytes.Contains(msg, []byte(`"config_update"`)) {
+			t.Fatalf("socket after oversize close: %v %s", err, msg)
+		}
+		if !strings.Contains(logs(), "outbound frame too large") || strings.Contains(logs(), marker) {
+			t.Fatalf("log %q", logs())
+		}
 	})
+}
+
+func TestLiveOversizeDoesNotClose(t *testing.T) {
+	ac, c, _ := holdAgentConn(t)
+	h := New(memstore.New(), audit.Writer{}, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Now)
+	id := uuid.New()
+	ac.lastPing = time.Now()
+	h.mu.Lock()
+	h.conns[id] = ac
+	h.mu.Unlock()
+	host := store.Host{ID: id}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	blob := map[string]any{"blob": strings.Repeat("<", maxFrame)}
+	_, err := h.Program(ctx, host, "program_start", blob)
+	var call *CallError
+	if !errors.As(err, &call) || call.Code != "bad_request" || call.Msg != "bad request" {
+		t.Fatalf("program %v", err)
+	}
+	_, err = h.Image(ctx, host, "image_deploy", blob, 60)
+	call = nil
+	if !errors.As(err, &call) || call.Code != "bad_request" || call.Msg != EnvFrameTooLarge {
+		t.Fatalf("image %v", err)
+	}
+	if err := ac.writeJSON(ctx, map[string]any{"v": 1, "type": "config_update"}); err != nil {
+		t.Fatal(err)
+	}
+	_, msg, err := c.Read(ctx)
+	if err != nil || !bytes.Contains(msg, []byte(`"config_update"`)) {
+		t.Fatalf("socket closed: %v %s", err, msg)
+	}
+}
+
+func TestWriteJSONBoundsWriteWait(t *testing.T) {
+	ac, _, _ := holdAgentConn(t)
+	payload := map[string]string{"blob": strings.Repeat("a", 512<<10)}
+	parent, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	var blocked error
+	for i := 0; i < 32; i++ {
+		err := ac.writeJSON(parent, payload)
+		if err != nil {
+			blocked = err
+			break
+		}
+	}
+	elapsed := time.Since(start)
+	if blocked == nil {
+		t.Fatal("socket accepted every write")
+	}
+	if elapsed < 8*time.Second || elapsed > 15*time.Second {
+		t.Fatalf("write returned in %s (%v), want about writeWait", elapsed, blocked)
+	}
 }
 
 func assertNoMarker(t *testing.T, c *websocket.Conn, logs, marker string) {

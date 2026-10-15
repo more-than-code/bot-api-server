@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"regexp"
 	"time"
 
@@ -24,6 +25,8 @@ type HostPrograms struct {
 	RunAs      []string `json:"run_as"`
 	AllowShell bool     `json:"allow_shell"`
 	PolicyHash string   `json:"policy_hash"`
+	Images     bool     `json:"images"`
+	Docker     bool     `json:"docker"`
 }
 
 // ProgramSpec is the stored program document. Env and Args are never nil
@@ -42,27 +45,62 @@ type ProgramSpec struct {
 // CatalogEntry is one program the project may run. MyActions is filled by
 // the API for the caller; the store leaves it nil.
 type CatalogEntry struct {
-	ID             uuid.UUID   `json:"id"`
-	ProjectID      uuid.UUID   `json:"project_id"`
-	Name           string      `json:"name"`
-	Kind           string      `json:"kind"`
-	Spec           ProgramSpec `json:"spec"`
-	SpecHash       string      `json:"spec_hash"`
-	CommandDisplay string      `json:"command_display"`
-	CreatedBy      uuid.UUID   `json:"created_by"`
-	CreatedAt      time.Time   `json:"created_at"`
-	UpdatedAt      time.Time   `json:"updated_at"`
-	MyActions      []string    `json:"my_actions"`
+	ID             uuid.UUID       `json:"id"`
+	ProjectID      uuid.UUID       `json:"project_id"`
+	Name           string          `json:"name"`
+	Kind           string          `json:"kind"`
+	Spec           ProgramSpec     `json:"spec"`
+	ImageRaw       json.RawMessage `json:"-"`
+	SpecHash       string          `json:"spec_hash"`
+	CommandDisplay string          `json:"command_display"`
+	CreatedBy      uuid.UUID       `json:"created_by"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+	MyActions      []string        `json:"my_actions"`
 }
 
-// CatalogWrite is a new or replaced program entry.
+// CatalogWrite is a new or replaced catalog entry.
+// Kind is program or image. Empty means program.
+// ImageRaw is the ImageSpec JSON when Kind is image.
 type CatalogWrite struct {
 	Name           string
+	Kind           string
 	Spec           ProgramSpec
+	ImageRaw       json.RawMessage
 	SpecHash       string
 	CommandDisplay string
 	Actor          uuid.UUID
 	At             time.Time
+}
+
+// MarshalJSON keeps a program entry on the v1.6 shape. An image entry
+// returns its stored ImageSpec instead of the program spec.
+func (e CatalogEntry) MarshalJSON() ([]byte, error) {
+	if e.Kind != "image" {
+		type alias CatalogEntry
+		return json.Marshal(alias(e))
+	}
+	spec := e.ImageRaw
+	if len(spec) == 0 {
+		spec = json.RawMessage("null")
+	}
+	return json.Marshal(struct {
+		ID             uuid.UUID       `json:"id"`
+		ProjectID      uuid.UUID       `json:"project_id"`
+		Name           string          `json:"name"`
+		Kind           string          `json:"kind"`
+		Spec           json.RawMessage `json:"spec"`
+		SpecHash       string          `json:"spec_hash"`
+		CommandDisplay string          `json:"command_display"`
+		CreatedBy      uuid.UUID       `json:"created_by"`
+		CreatedAt      time.Time       `json:"created_at"`
+		UpdatedAt      time.Time       `json:"updated_at"`
+		MyActions      []string        `json:"my_actions"`
+	}{
+		ID: e.ID, ProjectID: e.ProjectID, Name: e.Name, Kind: e.Kind, Spec: spec,
+		SpecHash: e.SpecHash, CommandDisplay: e.CommandDisplay, CreatedBy: e.CreatedBy,
+		CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, MyActions: e.MyActions,
+	})
 }
 
 // CatalogGrant is one subject allowed to act on an entry.
@@ -108,6 +146,10 @@ type CatalogConfirmation struct {
 	CreatedAt      time.Time
 	ExpiresAt      time.Time
 	UsedAt         *time.Time
+	// ImageDigest and ImageForce rebuild a confirmed rollback or deploy.
+	// They are nil for program actions. They are not secrets.
+	ImageDigest *string
+	ImageForce  *bool
 }
 
 // IdempotencyRecord is one stored run, stop, or restart response.
@@ -129,16 +171,22 @@ type DiscoveredOwner struct {
 
 // PlaceDiscovered decides the service row for one reported item.
 // lookup reports the project id when that slug has a live catalog entry
-// of the given name. A matching program owner is stored as source owned.
-// Anything else with an owner object is stored as discovered under the
-// unit name. A report with no owner keeps the reported name.
-func PlaceDiscovered(item Discovered, hostProject uuid.UUID, lookup func(slug, entry string) (uuid.UUID, bool)) (name, source string, projectID uuid.UUID, catalog *string) {
-	if item.Owner == nil || item.Owner.Kind != "program" || item.Owner.Project == "" || item.Owner.Entry == "" {
+// of the given name and kind. A matching owner is stored as source owned.
+// A program owner that misses falls back to the unit name. An image owner
+// that misses keeps the reported container name.
+func PlaceDiscovered(item Discovered, hostProject uuid.UUID, lookup func(slug, entry, kind string) (uuid.UUID, bool)) (name, source string, projectID uuid.UUID, catalog *string) {
+	if item.Owner == nil || item.Owner.Project == "" || item.Owner.Entry == "" {
 		return item.Name, "discovered", hostProject, nil
 	}
-	if id, ok := lookup(item.Owner.Project, item.Owner.Entry); ok {
+	if item.Owner.Kind != "program" && item.Owner.Kind != "image" {
+		return item.Name, "discovered", hostProject, nil
+	}
+	if id, ok := lookup(item.Owner.Project, item.Owner.Entry, item.Owner.Kind); ok {
 		ce := item.Owner.Entry
 		return item.Owner.Entry, "owned", id, &ce
+	}
+	if item.Owner.Kind == "image" {
+		return item.Name, "discovered", hostProject, nil
 	}
 	name = item.Name
 	if item.SystemdUnit != nil && serviceNameRe.MatchString(*item.SystemdUnit) {

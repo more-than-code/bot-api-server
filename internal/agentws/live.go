@@ -3,6 +3,7 @@ package agentws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/coder/websocket"
@@ -34,12 +35,22 @@ type LiveResult struct {
 
 // Snapshot asks a live host for a host_snapshot.
 func (h *Hub) Snapshot(ctx context.Context, host store.Host) (LiveResult, error) {
-	return h.live(ctx, host, "host_snapshot", nil, map[string]any{})
+	return h.live(ctx, host, "host_snapshot", nil, map[string]any{}, taskTimeoutSec)
 }
 
 // Program asks a live host to run a v1.3 program task. service is null.
+// Program frames stay at taskTimeoutSec and taskTTL.
 func (h *Hub) Program(ctx context.Context, host store.Host, kind string, spec map[string]any) (LiveResult, error) {
-	return h.live(ctx, host, kind, nil, spec)
+	return h.live(ctx, host, kind, nil, spec, taskTimeoutSec)
+}
+
+// Image asks a live host to run a v1.4 image task. service is null.
+// timeoutSec is the task frame timeout. Above 60s it is also the frame TTL.
+func (h *Hub) Image(ctx context.Context, host store.Host, kind string, spec map[string]any, timeoutSec int) (LiveResult, error) {
+	if timeoutSec < 1 {
+		timeoutSec = taskTimeoutSec
+	}
+	return h.live(ctx, host, kind, nil, spec, timeoutSec)
 }
 
 // Probe asks a live host to run probe_health for svc.
@@ -48,10 +59,10 @@ func (h *Hub) Probe(ctx context.Context, host store.Host, svc store.Service, spe
 	if spec == nil {
 		spec = map[string]any{}
 	}
-	return h.live(ctx, host, "probe_health", &name, spec)
+	return h.live(ctx, host, "probe_health", &name, spec, taskTimeoutSec)
 }
 
-func (h *Hub) live(ctx context.Context, host store.Host, kind string, service *string, spec map[string]any) (LiveResult, error) {
+func (h *Hub) live(ctx context.Context, host store.Host, kind string, service *string, spec map[string]any, timeoutSec int) (LiveResult, error) {
 	if host.RevokedAt != nil || h.Status(host, h.now()) != "online" {
 		return LiveResult{}, &CallError{Code: "unavailable", Msg: "host unavailable"}
 	}
@@ -60,6 +71,10 @@ func (h *Hub) live(ctx context.Context, host store.Host, kind string, service *s
 	}
 	taskID := uuid.New()
 	now := h.now()
+	ttl := taskTTL
+	if timeoutSec > int(taskTTL/time.Second) {
+		ttl = time.Duration(timeoutSec) * time.Second
+	}
 	frame := taskFrame{
 		V:          1,
 		Type:       "task",
@@ -67,8 +82,8 @@ func (h *Hub) live(ctx context.Context, host store.Host, kind string, service *s
 		HostID:     host.ID,
 		Kind:       kind,
 		Service:    service,
-		ExpiresAt:  now.Add(taskTTL).UTC().Format(time.RFC3339),
-		TimeoutSec: taskTimeoutSec,
+		ExpiresAt:  now.Add(ttl).UTC().Format(time.RFC3339),
+		TimeoutSec: timeoutSec,
 		Spec:       spec,
 	}
 	ch := make(chan taskOut, 1)
@@ -84,6 +99,14 @@ func (h *Hub) live(ctx context.Context, host store.Host, kind string, service *s
 
 	if err := ac.writeJSON(ctx, frame); err != nil {
 		h.dropWaiter(taskID)
+		// The API built this frame. A size refusal writes nothing and must not drop the socket.
+		if errors.Is(err, errFrameTooLarge) {
+			msg := "bad request"
+			if kind == "image_deploy" || kind == "image_rollback" {
+				msg = EnvFrameTooLarge
+			}
+			return LiveResult{}, &CallError{Code: "bad_request", Msg: msg}
+		}
 		go ac.close(websocket.StatusInternalError, "")
 		return LiveResult{}, &CallError{Code: "unavailable", Msg: "host unavailable"}
 	}

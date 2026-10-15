@@ -9,7 +9,7 @@ import (
 
 func TestPlaceDiscoveredUnitName(t *testing.T) {
 	hostProject := uuid.New()
-	lookup := func(string, string) (uuid.UUID, bool) { return uuid.Nil, false }
+	lookup := func(string, string, string) (uuid.UUID, bool) { return uuid.Nil, false }
 	huge := strings.Repeat("a", 80)
 	item := Discovered{
 		Name: "kept", Kind: "systemd", SystemdUnit: &huge,
@@ -28,8 +28,8 @@ func TestPlaceDiscoveredUnitName(t *testing.T) {
 	home := uuid.New()
 	item.Owner.Project = "app"
 	item.Owner.Entry = "web"
-	name, source, project, catalog = PlaceDiscovered(item, hostProject, func(slug, entry string) (uuid.UUID, bool) {
-		if slug == "app" && entry == "web" {
+	name, source, project, catalog = PlaceDiscovered(item, hostProject, func(slug, entry, kind string) (uuid.UUID, bool) {
+		if slug == "app" && entry == "web" && kind == "program" {
 			return home, true
 		}
 		return uuid.Nil, false
@@ -38,8 +38,8 @@ func TestPlaceDiscoveredUnitName(t *testing.T) {
 		t.Fatalf("owned %s %s %s %v", name, source, project, catalog)
 	}
 	item.Owner.Entry = "absent"
-	name, source, _, catalog = PlaceDiscovered(item, hostProject, func(slug, entry string) (uuid.UUID, bool) {
-		return home, slug == "app" && entry == "web"
+	name, source, _, catalog = PlaceDiscovered(item, hostProject, func(slug, entry, kind string) (uuid.UUID, bool) {
+		return home, slug == "app" && entry == "web" && kind == "program"
 	})
 	if name != good || source != "discovered" || catalog != nil {
 		t.Fatalf("wrong entry %s %s %v", name, source, catalog)

@@ -25,6 +25,7 @@ type catalogBody struct {
 	Env     map[string]string `json:"env"`
 	Port    *int              `json:"port"`
 	Restart string            `json:"restart"`
+	Spec    json.RawMessage   `json:"spec"`
 }
 
 type catalogReplaceBody struct {
@@ -36,6 +37,7 @@ type catalogReplaceBody struct {
 	Env     map[string]string `json:"env"`
 	Port    *int              `json:"port"`
 	Restart string            `json:"restart"`
+	Spec    json.RawMessage   `json:"spec"`
 }
 
 func (s *Server) handleCatalogList(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +66,7 @@ func (s *Server) handleCatalogList(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err)
 			return
 		}
-		held := heldActions(role, p.User.ID, grants)
+		held := heldActions(entry.Kind, role, p.User.ID, grants)
 		if len(held) == 0 {
 			continue
 		}
@@ -123,6 +125,18 @@ func (s *Server) handleCatalogCreate(w http.ResponseWriter, r *http.Request) {
 	if !decodeRaw(w, raw, &body) {
 		return
 	}
+	if body.Kind == "image" {
+		if programFieldsSet(body.Command, body.Dir, body.RunAs, body.Restart, body.Shell, body.Env, body.Port) {
+			writeCode(w, "bad_request", "invalid json")
+			return
+		}
+		s.writeImage(w, r, p, id, body.Name, body.Spec, false)
+		return
+	}
+	if specPresent(body.Spec) {
+		writeCode(w, "bad_request", "invalid json")
+		return
+	}
 	if body.Kind != "program" {
 		writeCode(w, "bad_request", "kind must be program")
 		return
@@ -147,7 +161,7 @@ func (s *Server) handleCatalogCreate(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	entry.MyActions = myActions(heldActions(authz.RoleOwner, p.User.ID, nil))
+	entry.MyActions = myActions(heldActions(entry.Kind, authz.RoleOwner, p.User.ID, nil))
 	s.auditOK(r.Context(), p, store.AuditRow{
 		ProjectID: idPtr(id),
 		Action:    audit.ActionCatalogCreate,
@@ -197,8 +211,25 @@ func (s *Server) handleCatalogPut(w http.ResponseWriter, r *http.Request) {
 	if !decodeRaw(w, raw, &body) {
 		return
 	}
-	if body.Kind != "program" {
-		writeCode(w, "bad_request", "kind must be program")
+	existing, err := s.Store.GetCatalogEntry(r.Context(), id, name)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if body.Kind != existing.Kind {
+		writeCode(w, "bad_request", "kind must be "+existing.Kind)
+		return
+	}
+	if existing.Kind == "image" {
+		if programFieldsSet(body.Command, body.Dir, body.RunAs, body.Restart, body.Shell, body.Env, body.Port) {
+			writeCode(w, "bad_request", "invalid json")
+			return
+		}
+		s.writeImage(w, r, p, id, name, body.Spec, true)
+		return
+	}
+	if specPresent(body.Spec) {
+		writeCode(w, "bad_request", "invalid json")
 		return
 	}
 	prog, ok := s.buildProgram(w, body.Command, body.Shell, body.Dir, body.RunAs, body.Env, body.Port, body.Restart)
@@ -216,7 +247,7 @@ func (s *Server) handleCatalogPut(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	entry.MyActions = myActions(heldActions(authz.RoleOwner, p.User.ID, nil))
+	entry.MyActions = myActions(heldActions(entry.Kind, authz.RoleOwner, p.User.ID, nil))
 	s.auditOK(r.Context(), p, store.AuditRow{
 		ProjectID: idPtr(id),
 		Action:    audit.ActionCatalogUpdate,
@@ -505,7 +536,7 @@ func (s *Server) visibleEntry(w http.ResponseWriter, r *http.Request, p principa
 		s.fail(w, err)
 		return store.CatalogEntry{}, "", false
 	}
-	held := heldActions(role, p.User.ID, grants)
+	held := heldActions(entry.Kind, role, p.User.ID, grants)
 	if len(held) == 0 {
 		writeCode(w, "forbidden", "forbidden")
 		return store.CatalogEntry{}, "", false
@@ -579,7 +610,11 @@ func peekUnimplemented(raw []byte) error {
 }
 
 func readLimited(w http.ResponseWriter, r *http.Request) ([]byte, bool) {
-	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	return readLimitedN(w, r, 1<<20)
+}
+
+func readLimitedN(w http.ResponseWriter, r *http.Request, n int64) ([]byte, bool) {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, n))
 	if err != nil {
 		writeCode(w, "bad_request", "invalid json")
 		return nil, false
@@ -617,12 +652,13 @@ func specOf(p catalog.Program) store.ProgramSpec {
 	}
 }
 
-var grantActionOrder = []string{"run", "stop", "restart", "logs"}
+var grantActionOrder = []string{"run", "stop", "restart", "logs", "deploy"}
 
-func heldActions(role string, userID uuid.UUID, grants []store.CatalogGrant) map[string]bool {
+func heldActions(kind, role string, userID uuid.UUID, grants []store.CatalogGrant) map[string]bool {
 	held := map[string]bool{}
 	if role == authz.RoleOwner {
-		for _, action := range grantActionOrder {
+		admin, _ := store.DefaultGrantActions(kind)
+		for _, action := range admin {
 			held[action] = true
 		}
 		return held
@@ -712,7 +748,7 @@ func (s *Server) grantSubject(r *http.Request, projectID uuid.UUID, subject stri
 }
 
 func canonicalActions(in []string) ([]string, string) {
-	if len(in) == 0 || len(in) > 4 {
+	if len(in) == 0 || len(in) > 5 {
 		return nil, "invalid actions"
 	}
 	have := map[string]bool{}
@@ -721,7 +757,7 @@ func canonicalActions(in []string) ([]string, string) {
 			return nil, "invalid actions"
 		}
 		switch action {
-		case "run", "stop", "restart", "logs":
+		case "run", "stop", "restart", "logs", "deploy":
 			have[action] = true
 		default:
 			return nil, "invalid actions"
@@ -734,6 +770,15 @@ func canonicalActions(in []string) ([]string, string) {
 		}
 	}
 	return out, ""
+}
+
+func programFieldsSet(command, dir, runAs, restart string, shell bool, env map[string]string, port *int) bool {
+	return command != "" || dir != "" || runAs != "" || restart != "" || shell || port != nil || len(env) > 0
+}
+
+func specPresent(raw json.RawMessage) bool {
+	s := bytes.TrimSpace(raw)
+	return len(s) > 0 && string(s) != "null"
 }
 
 func programAction(action string) string {

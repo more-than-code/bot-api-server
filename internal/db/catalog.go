@@ -12,7 +12,11 @@ import (
 )
 
 func (d *DB) CreateCatalogEntry(ctx context.Context, projectID uuid.UUID, in store.CatalogWrite) (store.CatalogEntry, error) {
-	spec, err := marshalSpec(in.Spec)
+	kind := in.Kind
+	if kind == "" {
+		kind = "program"
+	}
+	spec, err := marshalWrite(in)
 	if err != nil {
 		return store.CatalogEntry{}, err
 	}
@@ -26,16 +30,16 @@ func (d *DB) CreateCatalogEntry(ctx context.Context, projectID uuid.UUID, in sto
 INSERT INTO app.catalog_entries (
     id, project_id, name, kind, spec, spec_hash, command_display, created_by, created_at, updated_at
 )
-SELECT $1::uuid, p.id, $2, 'program', $3::jsonb, $4, $5, $6::uuid, $7, $7
+SELECT $1::uuid, p.id, $2, $3, $4::jsonb, $5, $6, $7::uuid, $8, $8
 FROM app.projects p
-WHERE p.id = $8::uuid AND p.deleted_at IS NULL
+WHERE p.id = $9::uuid AND p.deleted_at IS NULL
 RETURNING id::text, project_id::text, name, kind, spec, spec_hash, command_display,
           created_by::text, created_at, updated_at
-`, id.String(), in.Name, spec, in.SpecHash, in.CommandDisplay, in.Actor.String(), in.At, projectID.String()))
+`, id.String(), in.Name, kind, spec, in.SpecHash, in.CommandDisplay, in.Actor.String(), in.At, projectID.String()))
 	if err != nil {
 		return store.CatalogEntry{}, err
 	}
-	if err := insertDefaultGrants(ctx, tx, entry.ID); err != nil {
+	if err := insertDefaultGrants(ctx, tx, entry.ID, kind); err != nil {
 		return store.CatalogEntry{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -44,18 +48,19 @@ RETURNING id::text, project_id::text, name, kind, spec, spec_hash, command_displ
 	return entry, nil
 }
 
-func insertDefaultGrants(ctx context.Context, tx pgx.Tx, entryID uuid.UUID) error {
+func insertDefaultGrants(ctx context.Context, tx pgx.Tx, entryID uuid.UUID, kind string) error {
+	admin, viewer := store.DefaultGrantActions(kind)
 	if err := exec(ctx, tx, `
 INSERT INTO app.catalog_grants (entry_id, subject, actions)
 VALUES ($1::uuid, 'role:admin', $2::text[]), ($1::uuid, 'role:viewer', $3::text[])
-`, entryID.String(), []string{"run", "stop", "restart", "logs"}, []string{"logs"}); err != nil {
+`, entryID.String(), admin, viewer); err != nil {
 		return mapErr(err)
 	}
 	return nil
 }
 
 func (d *DB) ReplaceCatalogEntry(ctx context.Context, projectID uuid.UUID, name string, in store.CatalogWrite) (string, store.CatalogEntry, error) {
-	spec, err := marshalSpec(in.Spec)
+	spec, err := marshalWrite(in)
 	if err != nil {
 		return "", store.CatalogEntry{}, err
 	}
@@ -320,10 +325,10 @@ func (d *DB) PutConfirmation(ctx context.Context, hash []byte, c store.CatalogCo
 	err := exec(ctx, d.pool, `
 INSERT INTO app.catalog_confirmations (
     token_hash, user_id, project_id, entry_id, entry_name, host_id, action, spec_hash,
-    idempotency_key, request_hash, created_at, expires_at
-) VALUES ($1, $2::uuid, $3::uuid, $4::uuid, $5, $6::uuid, $7, $8, $9, $10, $11, $12)
+    idempotency_key, request_hash, created_at, expires_at, image_digest, image_force
+) VALUES ($1, $2::uuid, $3::uuid, $4::uuid, $5, $6::uuid, $7, $8, $9, $10, $11, $12, $13, $14)
 `, hash, c.UserID.String(), c.ProjectID.String(), c.EntryID.String(), c.EntryName, c.HostID.String(),
-		c.Action, c.SpecHash, c.IdempotencyKey, c.RequestHash, c.CreatedAt, c.ExpiresAt)
+		c.Action, c.SpecHash, c.IdempotencyKey, c.RequestHash, c.CreatedAt, c.ExpiresAt, c.ImageDigest, c.ImageForce)
 	return mapErr(err)
 }
 
@@ -332,11 +337,11 @@ func (d *DB) GetConfirmation(ctx context.Context, hash []byte) (store.CatalogCon
 	var userID, projectID, entryID, hostID string
 	err := d.pool.QueryRow(ctx, `
 SELECT user_id::text, project_id::text, entry_id::text, entry_name, host_id::text, action, spec_hash,
-       idempotency_key, request_hash, created_at, expires_at, used_at
+       idempotency_key, request_hash, created_at, expires_at, used_at, image_digest, image_force
 FROM app.catalog_confirmations
 WHERE token_hash = $1
 `, hash).Scan(&userID, &projectID, &entryID, &c.EntryName, &hostID, &c.Action, &c.SpecHash,
-		&c.IdempotencyKey, &c.RequestHash, &c.CreatedAt, &c.ExpiresAt, &c.UsedAt)
+		&c.IdempotencyKey, &c.RequestHash, &c.CreatedAt, &c.ExpiresAt, &c.UsedAt, &c.ImageDigest, &c.ImageForce)
 	if err != nil {
 		return store.CatalogConfirmation{}, mapErr(err)
 	}
@@ -518,6 +523,10 @@ func scanCatalog(row pgx.Row) (store.CatalogEntry, error) {
 	if e.CreatedBy, err = parseID(createdBy); err != nil {
 		return store.CatalogEntry{}, err
 	}
+	if e.Kind == "image" {
+		e.ImageRaw = append([]byte(nil), spec...)
+		return e, nil
+	}
 	if err := json.Unmarshal(spec, &e.Spec); err != nil {
 		return store.CatalogEntry{}, err
 	}
@@ -594,6 +603,16 @@ func marshalSpec(spec store.ProgramSpec) ([]byte, error) {
 	return json.Marshal(spec)
 }
 
+func marshalWrite(in store.CatalogWrite) ([]byte, error) {
+	if in.Kind == "image" || len(in.ImageRaw) > 0 {
+		if len(in.ImageRaw) == 0 {
+			return []byte(`{}`), nil
+		}
+		return in.ImageRaw, nil
+	}
+	return marshalSpec(in.Spec)
+}
+
 func normSpec(spec *store.ProgramSpec) {
 	if spec.Args == nil {
 		spec.Args = []string{}
@@ -642,14 +661,14 @@ func decodePrograms(raw []byte) (*store.HostPrograms, error) {
 }
 
 // catalogLookup finds a live project slug that has a catalog entry of that name.
-func (d *DB) catalogLookup(ctx context.Context, q queryer, slug, entry string) (uuid.UUID, bool) {
+func (d *DB) catalogLookup(ctx context.Context, q queryer, slug, entry, kind string) (uuid.UUID, bool) {
 	var id string
 	err := q.QueryRow(ctx, `
 SELECT p.id::text
 FROM app.projects p
-JOIN app.catalog_entries e ON e.project_id = p.id AND e.name = $2
+JOIN app.catalog_entries e ON e.project_id = p.id AND e.name = $2 AND e.kind = $3
 WHERE p.slug = $1 AND p.deleted_at IS NULL
-`, slug, entry).Scan(&id)
+`, slug, entry, kind).Scan(&id)
 	if err != nil {
 		return uuid.Nil, false
 	}

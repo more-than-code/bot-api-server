@@ -8,10 +8,10 @@ import (
 )
 
 func TestMigrationSkipsDownScript(t *testing.T) {
-	if numberedSQL("0003_shared_hosts.down.sql") || numberedSQL("0004_service_names.down.sql") || numberedSQL("0005_mcp_oauth.down.sql") || numberedSQL("0006_invites.down.sql") || numberedSQL("0007_catalog.down.sql") || numberedSQL("0008_service_gone.down.sql") {
+	if numberedSQL("0003_shared_hosts.down.sql") || numberedSQL("0004_service_names.down.sql") || numberedSQL("0005_mcp_oauth.down.sql") || numberedSQL("0006_invites.down.sql") || numberedSQL("0007_catalog.down.sql") || numberedSQL("0008_service_gone.down.sql") || numberedSQL("0009_catalog_images.down.sql") {
 		t.Fatal("down script is numbered SQL")
 	}
-	if !numberedSQL("0003_shared_hosts.sql") || !numberedSQL("0004_service_names.sql") || !numberedSQL("0005_mcp_oauth.sql") || !numberedSQL("0006_invites.sql") || !numberedSQL("0007_catalog.sql") || !numberedSQL("0008_service_gone.sql") {
+	if !numberedSQL("0003_shared_hosts.sql") || !numberedSQL("0004_service_names.sql") || !numberedSQL("0005_mcp_oauth.sql") || !numberedSQL("0006_invites.sql") || !numberedSQL("0007_catalog.sql") || !numberedSQL("0008_service_gone.sql") || !numberedSQL("0009_catalog_images.sql") {
 		t.Fatal("numbered migration was skipped")
 	}
 	names, err := migrationFiles()
@@ -19,13 +19,48 @@ func TestMigrationSkipsDownScript(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(names, ",")
-	for _, want := range []string{"0001_app.sql", "0002_metrics.sql", "0003_shared_hosts.sql", "0004_service_names.sql", "0005_mcp_oauth.sql", "0006_invites.sql", "0007_catalog.sql", "0008_service_gone.sql"} {
+	for _, want := range []string{"0001_app.sql", "0002_metrics.sql", "0003_shared_hosts.sql", "0004_service_names.sql", "0005_mcp_oauth.sql", "0006_invites.sql", "0007_catalog.sql", "0008_service_gone.sql", "0009_catalog_images.sql"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("migrations = %s", got)
 		}
 	}
 	if strings.Contains(got, ".down.sql") {
 		t.Fatalf("down script would be applied: %s", got)
+	}
+}
+
+func TestCatalogImagesMigrationSplits(t *testing.T) {
+	body, err := migrations.FS.ReadFile("0009_catalog_images.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, line := range strings.Split(text, "\n") {
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "--") && strings.Contains(trim, ";") {
+			t.Fatalf("comment contains a semicolon: %s", trim)
+		}
+	}
+	for _, stmt := range splitSQL(text) {
+		if !meaningfulSQL(stmt) {
+			t.Fatalf("comment-only statement: %q", stmt)
+		}
+	}
+	entries, err := migrations.FS.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		raw, err := migrations.FS.ReadFile(entry.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "chr(0)") {
+			t.Fatalf("%s uses chr(0)", entry.Name())
+		}
 	}
 }
 

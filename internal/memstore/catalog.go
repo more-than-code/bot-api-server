@@ -54,6 +54,9 @@ func cloneEntry(e store.CatalogEntry) store.CatalogEntry {
 	if e.MyActions != nil {
 		e.MyActions = append([]string(nil), e.MyActions...)
 	}
+	if e.ImageRaw != nil {
+		e.ImageRaw = append([]byte(nil), e.ImageRaw...)
+	}
 	return e
 }
 
@@ -96,12 +99,17 @@ func (m *Mem) CreateCatalogEntry(_ context.Context, projectID uuid.UUID, in stor
 	if _, exists := m.entryByName[entryKey(projectID, in.Name)]; exists {
 		return store.CatalogEntry{}, store.ErrConflict
 	}
+	kind := in.Kind
+	if kind == "" {
+		kind = "program"
+	}
 	e := store.CatalogEntry{
 		ID:             uuid.New(),
 		ProjectID:      projectID,
 		Name:           in.Name,
-		Kind:           "program",
+		Kind:           kind,
 		Spec:           normWrite(in.Spec),
+		ImageRaw:       append([]byte(nil), in.ImageRaw...),
 		SpecHash:       in.SpecHash,
 		CommandDisplay: in.CommandDisplay,
 		CreatedBy:      in.Actor,
@@ -110,9 +118,10 @@ func (m *Mem) CreateCatalogEntry(_ context.Context, projectID uuid.UUID, in stor
 	}
 	m.entries[e.ID] = e
 	m.entryByName[entryKey(projectID, in.Name)] = e.ID
+	admin, viewer := store.DefaultGrantActions(kind)
 	m.grants[e.ID] = []store.CatalogGrant{
-		{Subject: "role:admin", Actions: []string{"run", "stop", "restart", "logs"}},
-		{Subject: "role:viewer", Actions: []string{"logs"}},
+		{Subject: "role:admin", Actions: admin},
+		{Subject: "role:viewer", Actions: viewer},
 	}
 	return cloneEntry(e), nil
 }
@@ -129,7 +138,11 @@ func (m *Mem) ReplaceCatalogEntry(_ context.Context, projectID uuid.UUID, name s
 	if old != in.SpecHash {
 		m.deleteApprovalsLocked(id)
 	}
-	e.Spec = normWrite(in.Spec)
+	if e.Kind == "image" {
+		e.ImageRaw = append([]byte(nil), in.ImageRaw...)
+	} else {
+		e.Spec = normWrite(in.Spec)
+	}
 	e.SpecHash = in.SpecHash
 	e.CommandDisplay = in.CommandDisplay
 	e.UpdatedAt = in.At
@@ -483,7 +496,7 @@ func (m *Mem) SetHostPrograms(_ context.Context, hostID uuid.UUID, programs *sto
 	return nil
 }
 
-func (m *Mem) lookupCatalogLocked(slug, entry string) (uuid.UUID, bool) {
+func (m *Mem) lookupCatalogLocked(slug, entry, kind string) (uuid.UUID, bool) {
 	id, ok := m.bySlug[slug]
 	if !ok {
 		return uuid.Nil, false
@@ -492,7 +505,11 @@ func (m *Mem) lookupCatalogLocked(slug, entry string) (uuid.UUID, bool) {
 	if !ok || p.DeletedAt != nil {
 		return uuid.Nil, false
 	}
-	if _, ok := m.entryByName[entryKey(id, entry)]; !ok {
+	eid, ok := m.entryByName[entryKey(id, entry)]
+	if !ok {
+		return uuid.Nil, false
+	}
+	if m.entries[eid].Kind != kind {
 		return uuid.Nil, false
 	}
 	return id, true
@@ -519,6 +536,7 @@ func (m *Mem) deleteEntryLocked(id uuid.UUID) {
 	delete(m.entryByName, entryKey(e.ProjectID, e.Name))
 	delete(m.grants, id)
 	m.deleteApprovalsLocked(id)
+	m.deleteDeploysLocked(id)
 	for key, rec := range m.confirmations {
 		if rec.row.EntryID == id {
 			delete(m.confirmations, key)

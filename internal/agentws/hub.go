@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -76,6 +77,10 @@ type agentConn struct {
 // The frame is not written.
 var errFrameTooLarge = errors.New("outbound frame too large")
 
+// EnvFrameTooLarge is the image deploy and rollback error when the task the
+// API built exceeds maxFrame. No bytes are written and the socket stays up.
+const EnvFrameTooLarge = "the resolved environment is too large for one task"
+
 var _ http.Handler = (*Hub)(nil)
 
 // New builds a hub. now may be nil, in which case time is UTC wall time.
@@ -96,6 +101,20 @@ func New(st store.Store, aud audit.Writer, log *slog.Logger, now func() time.Tim
 	}
 	h.seen = ingest.NewSeen(h.now)
 	return h
+}
+
+// SetLog replaces the hub logger and the logger on live connections.
+// Tests point it at the same buffer as the API log.
+func (h *Hub) SetLog(log *slog.Logger) {
+	if log == nil {
+		log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.log = log
+	for _, ac := range h.conns {
+		ac.log = log
+	}
 }
 
 // Status reports revoked, online, asleep, or offline.
@@ -300,19 +319,22 @@ func (ac *agentConn) marshalFrame(v any) ([]byte, error) {
 	return body, nil
 }
 
+// writeJSON bounds every socket write by writeWait, including when ctx is the
+// longer task timeout. A cancelled parent still fails the write immediately.
 func (ac *agentConn) writeJSON(ctx context.Context, v any) error {
 	body, err := ac.marshalFrame(v)
 	if err != nil {
 		return err
 	}
-	if ctx == nil {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(context.Background(), writeWait)
-		defer cancel()
+	parent := ctx
+	if parent == nil {
+		parent = context.Background()
 	}
+	wctx, cancel := context.WithTimeout(parent, writeWait)
+	defer cancel()
 	ac.writeMu.Lock()
 	defer ac.writeMu.Unlock()
-	return ac.ws.Write(ctx, websocket.MessageText, body)
+	return ac.ws.Write(wctx, websocket.MessageText, body)
 }
 
 func (ac *agentConn) write(v any) error {
@@ -354,6 +376,10 @@ func (ac *agentConn) close(status websocket.StatusCode, reason string) {
 }
 
 func (ac *agentConn) writeThenClose(v any, status websocket.StatusCode, reason string) error {
+	body, err := ac.marshalFrame(v)
+	if errors.Is(err, errFrameTooLarge) {
+		return err
+	}
 	ac.writeMu.Lock()
 	defer ac.writeMu.Unlock()
 	if ac.done {
@@ -362,7 +388,6 @@ func (ac *agentConn) writeThenClose(v any, status websocket.StatusCode, reason s
 	ac.done = true
 	ctx, cancel := context.WithTimeout(context.Background(), writeWait)
 	defer cancel()
-	body, err := ac.marshalFrame(v)
 	if err != nil {
 		_ = ac.ws.Close(websocket.StatusInternalError, "")
 		return err

@@ -23,6 +23,9 @@ type Config struct {
 	MCPResource           string
 	ConsoleOrigin         string
 	MCPClientSecretFile   string
+	// SecretsKeyFile is optional. Empty means env-set and registry writes
+	// that need the key are unavailable. The file contents are not stored here.
+	SecretsKeyFile string
 }
 
 const defaultIssuer = "https://accounts.google.com"
@@ -44,6 +47,7 @@ func FromEnv(getenv func(string) string, migrateOnly bool) (Config, error) {
 		MCPResource:           strings.TrimSpace(getenv("BOT_API_MCP_RESOURCE")),
 		ConsoleOrigin:         strings.TrimSpace(getenv("BOT_API_CONSOLE_ORIGIN")),
 		MCPClientSecretFile:   strings.TrimSpace(getenv("BOT_API_MCP_CLIENT_SECRET_FILE")),
+		SecretsKeyFile:        strings.TrimSpace(getenv("BOT_SECRETS_KEY_FILE")),
 	}
 	if cfg.GoogleIssuer == "" {
 		cfg.GoogleIssuer = defaultIssuer

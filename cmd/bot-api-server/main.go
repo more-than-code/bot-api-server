@@ -17,6 +17,7 @@ import (
 	"github.com/more-than-code/bot-api-server/internal/auth"
 	"github.com/more-than-code/bot-api-server/internal/config"
 	"github.com/more-than-code/bot-api-server/internal/db"
+	"github.com/more-than-code/bot-api-server/internal/seal"
 )
 
 type deps struct {
@@ -62,6 +63,17 @@ func run(args []string, getenv func(string) string, d deps) error {
 			return err
 		}
 	}
+	key, err := config.ReadSecretsKey(cfg.SecretsKeyFile)
+	if err != nil {
+		return err
+	}
+	var secrets *seal.Box
+	if key != nil {
+		secrets, err = seal.New(key)
+		if err != nil {
+			return err
+		}
+	}
 	pool, err := d.open(ctx, cfg.DatabaseURL)
 	if err != nil {
 		return err
@@ -88,6 +100,7 @@ func run(args []string, getenv func(string) string, d deps) error {
 		TrustedProxy:  cfg.TrustedProxy,
 		Log:           log,
 		Now:           now,
+		Secrets:       secrets,
 	}
 	root := http.NewServeMux()
 	root.Handle("GET /agent/v1/ws", hub)

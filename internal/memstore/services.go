@@ -87,6 +87,7 @@ func (m *Mem) UpsertDiscovered(_ context.Context, hostID uuid.UUID, items []stor
 				SystemdUnit:   cloneString(item.SystemdUnit),
 				SystemdScope:  cloneString(item.SystemdScope),
 				ContainerName: cloneString(item.ContainerName),
+				ImageDigest:   cloneString(item.ImageDigest),
 				ProcessName:   cloneString(item.ProcessName),
 				OwnerUser:     store.NormalizeOwnerUser(item.OwnerUser),
 				CatalogEntry:  cloneString(catalogEntry),
@@ -109,6 +110,7 @@ func (m *Mem) UpsertDiscovered(_ context.Context, hostID uuid.UUID, items []stor
 			existing.SystemdUnit = cloneString(item.SystemdUnit)
 			existing.SystemdScope = cloneString(item.SystemdScope)
 			existing.ContainerName = cloneString(item.ContainerName)
+			existing.ImageDigest = cloneString(item.ImageDigest)
 			existing.ProcessName = cloneString(item.ProcessName)
 		}
 		m.services[found] = existing
@@ -325,6 +327,7 @@ func (m *Mem) serviceCopyLocked(svc store.Service, now time.Time) store.Service 
 	svc.SystemdUnit = cloneString(svc.SystemdUnit)
 	svc.SystemdScope = cloneString(svc.SystemdScope)
 	svc.ContainerName = cloneString(svc.ContainerName)
+	svc.ImageDigest = cloneString(svc.ImageDigest)
 	svc.ProcessName = cloneString(svc.ProcessName)
 	svc.CatalogEntry = cloneString(svc.CatalogEntry)
 	svc.GoneAt = cloneTime(svc.GoneAt)

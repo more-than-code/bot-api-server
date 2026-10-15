@@ -253,3 +253,82 @@ bot-agent ALL=(root) NOPASSWD: /usr/local/libexec/bot-agent-runner
 
 1. A `services` frame (and `hello.services`) is sent only from a complete discovery: the process scan succeeded and, when the program policy is enabled, the owned-program lookup through the helper succeeded. If either fails, the agent sends no `services` frame for that cycle and keeps its previous canonical set and send time, so the next successful cycle compares against the last set actually sent. The server treats every received set as the full set (api-v1 v1.7 item 2).
 2. At start, `hello.services` comes from the first discovery; if that discovery is incomplete, `hello.services` is an empty list **and** the server must not apply presence to it. To make that explicit, `hello` gains `"services_complete": bool` (absent = `true` for older agents). The server applies api-v1 v1.7 item 2 to `hello.services` only when it is `true`.
+
+## v1.4 images (2026-10-15, approved spec `docs/spec-catalog-images.md` rev 3, wave 2a; additive)
+
+### Host policy additions
+
+```toml
+images = ["ghcr.io/joe-and-his-friends/*"]  # reference patterns; empty or absent = no image entries
+projects = ["mohiguide"]                     # project slugs this host may run containers for
+max_containers = 20                          # 1..200, default 20
+allow_public_ports = false
+```
+
+- Pattern match: the reference is parsed and normalised (registry host lowercase, `docker.io` and `library/` made explicit). A pattern is `<host>/<path>` where `*` matches exactly one path component; the host is matched literally; there is no other wildcard.
+- `projects` entries: `^[a-z0-9][a-z0-9-]{0,63}$`. Invalid key or value → the whole policy is invalid (as v1.3).
+
+### Hello
+
+`hello.programs` gains `"images": bool` (policy valid, `enabled`, `images` and `projects` non-empty) and `"docker": bool` (the helper answered `container_list` at start-up). Patterns and project lists are not sent.
+
+### Task kinds
+
+`image_deploy`, `image_rollback`, `image_remove`, `image_start`, `image_stop`, `image_restart`, `image_status`, `image_logs`. `service` is null. Specs (closed key sets):
+
+- `image_deploy`: `{"project","entry","spec":ImageSpec (api-v1 v1.8, as stored: inline env as written, env_sets and secret_env as references — v1.4.1),"env":{KEY:value} (the resolved, merged environment; the only place resolved values travel),"registry_auth":{"host","username","token"}|null,"force":bool,"spec_hash"}`
+- `image_rollback`: as `image_deploy`, plus `"digest":"sha256:<64 hex>"` (the image is pulled by that digest).
+- `image_remove`, `image_start`, `image_stop`, `image_restart`, `image_status`: `{"project","entry"}`
+- `image_logs`: `{"project","entry","lines":1..2000}`
+
+`env` values and `registry_auth.token` are secrets: the agent never logs them, never stores them beyond the task, and adds every value (raw, base64 std/url, and JSON-escaped forms, for values ≥ 6 bytes) to the redaction set for that task's logs and results, in addition to the v1.0.1 regex. Task records keep `env` key names only.
+
+Agent checks after v1.0 checks 1–4: policy valid and `images` (`policy_denied`); `project` in `projects` (`policy_denied`); ImageSpec field rules as api-v1 v1.8 (`bad_spec`); image matches a pattern (`policy_denied`).
+
+### Sequences and results
+
+`task_result.payload` = `{"outcome":Outcome,"digest":string|null,"exit_code":int|null,"status":ImageStatus,"lines":[string]}` for deploy/rollback (lines = last ≤ 50 redacted log lines), `{"status":ImageStatus}` for start/stop/restart/status/remove, `{"container","lines","truncated"}` for logs (same caps as program logs). `status` = `succeeded` for outcomes `succeeded|unchanged`, `failed` otherwise with `error_code` = the outcome.
+
+**Service deploy:** `image_pull` → if the current container (labels match) runs this digest with this `spec_hash` and not `force` → `unchanged` → else `container_deploy` → wait healthy (the service's configured health checks, else state `running` with `restart_count` 0 for `healthy_after_sec`, polled every 2 s) → `succeeded`; unhealthy → `container_rollback` → `rolled_back` (or `rollback_failed`).
+**Job deploy:** `image_pull` → `container_remove` of the job container if present → `container_deploy` (restart `no`) → poll `container_status` every 2 s until `exited` or `timeout_sec` → exit 0 `succeeded`, else `failed` with `exit_code`; timeout → `container_stop` → `timeout`.
+**Rollback:** the service sequence with `ref = <repo>@<digest>`.
+
+### Discovery
+
+Each discovery cycle calls `container_list`. A container with all four `dev.deploybot.*` labels whose `host` equals this host and `project` is in `projects` → `Discovered {"name":<entry>,"kind":"container","container_name","ports","image_digest","owner":{"kind":"image","project","entry"}}`. Every other container → `Discovered {"name":<container name without leading "/">,"kind":"container","container_name","ports","image_digest":null,"owner":null}`; its published host ports are not also reported as unmapped listeners. `kind` gains the value `container`. If `container_list` fails while `images` is true, discovery is incomplete (v1.3.2).
+
+### Local helper: image verbs (same socket and framing as v1.3.1)
+
+`RuntimeMaxSec` of `bot-agent-runner@.service` becomes **900**; `ReadWritePaths=` gains `/var/run/docker.sock`. Program verbs keep the helper-wide flock; image verbs take `flock` on `/run/bot-agent/image-<project>-<entry>.lock` for the whole verb. The helper talks to Docker Engine API `/v1.47` over `/var/run/docker.sock` with its own client; **nothing from the request is forwarded as raw HTTP**.
+
+Request validation in the helper, before any Docker call (refusal = `{"error":"policy_denied"|"bad_spec"|"conflict"|"docker_unavailable"}`): `project` ∈ `projects`; `entry` `^[a-z0-9][a-z0-9-]{0,47}$`, not ending `-` or `-prev`; volume names `^[a-z0-9][a-z0-9-]{0,47}$`; every ImageSpec rule of api-v1 v1.8; `registry_auth` fields without CR/LF/NUL; Engine URL path segments built with path escaping; containers addressed by the full id from the helper's own lookup.
+
+| Verb | Request | Response |
+|---|---|---|
+| `image_pull` | `{"project","ref","registry_auth"?}` | `{"digest","image_id"}` |
+| `container_deploy` | `{"project","entry","spec","env","digest","spec_hash"}` | `{"container_id"}` |
+| `container_rollback` | `{"project","entry"}` | `{"container_id"}` |
+| `container_remove`, `container_start`, `container_stop`, `container_restart` | `{"project","entry"}` | `{"status":ImageStatus}` |
+| `container_status` | `{"project","entry"}` | `{"status":ImageStatus,"spec_hash"}` |
+| `container_logs` | `{"project","entry","lines"}` | `{"container","lines","truncated"}` |
+| `container_list` | `{}` | `{"items":[{"id","name","state","ports":[{"host_ip","host_port","container_port"}],"digest","labels":{dev.deploybot.* only}}]}` |
+
+Rules (normative; spec rev 3 §4.1 and §12 in full):
+1. **Pull:** parse `ref`; must match `images`; Engine call `POST /images/create` with exactly `fromImage=<name>&tag=<non-empty tag>` or `fromImage=<name>@sha256:<digest>`; header `X-Registry-Auth` (base64url JSON `{"username","password","serveraddress"}`) only when `registry_auth.host` equals the parsed registry host. Response digest = the repo digest for that registry.
+2. **Labels:** the helper sets `dev.deploybot.owner=bot-agent`, `dev.deploybot.host=<first 16 hex of sha256(/etc/machine-id)>` (the helper does not read the agent's credential file), `dev.deploybot.project`, `dev.deploybot.entry`, and `dev.deploybot.spec_hash`. Any verb that mutates or reads logs/status of `<project>-<entry>` or `<project>-<entry>-prev` first resolves each name; a container under either name whose owner/host/project/entry labels differ → `conflict`, nothing touched.
+3. **Create body** contains exactly: `Image` (`<repo>@sha256:<64 hex>`, repo re-matched against `images`), `Cmd`, `Entrypoint`, `Env`, `Labels`, `ExposedPorts`, `User` (if set, rules as api-v1 v1.8 item 10), `HostConfig.{PortBindings (HostIp "127.0.0.1", or "0.0.0.0" only when allow_public_ports and the port is public), Mounts, RestartPolicy, NetworkMode "deploybot-<project>", CgroupnsMode "private", PidsLimit 1024, Memory and MemorySwap (= memory_mb MiB) when set}`, `NetworkingConfig.EndpointsConfig{"deploybot-<project>":{"Aliases":[<entry>]}}`. Nothing else, including no empty values of other fields.
+4. **Volumes:** `Mounts[i] = {"Type":"volume","Source":"<project>-<name>","Target","ReadOnly"}` only. Before create: inspect each; missing → `POST /volumes/create` with driver `local`, no options, labels owner/host/project; then (whether created or existing) require driver `local`, empty options and label `project=<project>` → else `bad_spec`/`conflict`.
+5. **Network:** inspect `deploybot-<project>`; missing → create with driver `bridge`, no options, default IPAM, labels owner/host/project; then require driver `bridge` and those labels → else `conflict`.
+6. **Deploy order (service):** under the entry lock: check labels (rule 2) → remove `-prev` (stop if running, `DELETE ?v=1`) → stop current, rename to `-prev` → ensure network and volumes → create → start. **Rollback:** remove the current (`v=1`), rename `-prev` back, start. **Job:** remove the existing job container, create, start. `max_containers` counts deploybot-labelled containers on the host (including `-prev` and jobs); a create beyond it → `policy_denied`.
+7. **Projections:** responses never contain env, command, entrypoint, mounts, host config, graph-driver data, log config or labels other than `dev.deploybot.*`. There is no image-inspect or container-inspect verb.
+8. Logs: `GET /containers/{id}/logs?stdout=1&stderr=1&tail=<lines>&timestamps=0` (never `follow`), demultiplexed, each line redacted (v1.0.1 regex) and cut to 2048 chars, total ≤ 64 KiB.
+
+### v1.4.1 amendment (2026-10-16, Joe approved; from the wave 2a round-2 security review)
+
+1. In `image_deploy` and `image_rollback`, `spec` is the entry's ImageSpec **as stored**: inline `env` as the owner wrote it, `env_sets` and `secret_env` as references (`<set>.<KEY>`). Resolved values travel **only** in the top-level `env`, so each secret value appears once per frame. The helper refuses resolved values in `spec.secret_env` (`bad_spec`).
+2. The API computes the marshalled task frame size before sending. A frame over the agent frame limit is never sent: the request fails with `bad_request` "the resolved environment is too large for one task", and the agent connection stays open. Neither side closes a connection because of an oversized frame the API built.
+
+### v1.4.2 amendment (2026-10-16, Joe approved; from the wave 2a agent security reviews)
+
+1. `container_logs` request: `{"project","entry","lines","redact"?:[string]}`. `redact` is optional, ≤ 64 values, each 6–4096 bytes, no NUL. The helper removes every value in raw, base64 std, base64 url (padded and raw) and JSON-escaped form from each raw log line **before** the v1.0.1 regex and the 2048-char cut, and never logs or returns the list.
+2. The agent sends the task's exact set (env values and the registry token) in `redact` for the log tail it puts in `image_deploy` / `image_rollback` results. `image_logs` tasks carry no values, so their `container_logs` call has no `redact`.

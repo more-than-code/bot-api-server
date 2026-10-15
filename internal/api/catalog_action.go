@@ -54,15 +54,19 @@ func (s *Server) catalogAct(w http.ResponseWriter, r *http.Request, p principal,
 		s.fail(w, err)
 		return
 	}
-	held := heldActions(role, p.User.ID, grants)
+	held := heldActions(entry.Kind, role, p.User.ID, grants)
 	if !allowsAction(held, action) {
+		if entry.Kind == "image" {
+			writeCode(w, "forbidden", "forbidden")
+			return
+		}
 		s.programDeny(w, r, p, projectID, hostID, entry.Name, action, "forbidden", "forbidden")
 		return
 	}
-	if !actionInputOK(w, action, key, lines) {
+	if !actionInputOK(w, action, key, lines, entry.Kind) {
 		return
 	}
-	host, rel, ok := s.programHost(w, r, p, projectID, hostID, entry, action)
+	host, rel, ok := s.programHost(w, r, p, projectID, hostID, entry, action, entry.Kind == "image")
 	if !ok {
 		return
 	}
@@ -77,9 +81,17 @@ func (s *Server) catalogAct(w http.ResponseWriter, r *http.Request, p principal,
 				s.fail(w, err)
 				return
 			}
+			if entry.Kind == "image" {
+				writeCode(w, "forbidden", reasonWaiting)
+				return
+			}
 			s.programDeny(w, r, p, projectID, host.ID, entry.Name, action, "forbidden", reasonWaiting)
 			return
 		}
+	}
+	if entry.Kind == "image" {
+		s.finishImageShort(w, r, p, projectID, host, entry, action, key, lines)
+		return
 	}
 	if msg := policyReason(host, entry.Spec.RunAs, entry.Spec.Exec, entry.Spec.Shell); msg != "" {
 		s.programDeny(w, r, p, projectID, host.ID, entry.Name, action, "forbidden", msg)
@@ -95,7 +107,7 @@ func (s *Server) catalogAct(w http.ResponseWriter, r *http.Request, p principal,
 			return
 		}
 		if p.Session.Kind == store.KindDelegated {
-			s.issueConfirmation(w, r, p, projectID, host, entry, action, key, hash)
+			s.issueConfirmation(w, r, p, projectID, host, entry, action, key, hash, "", nil)
 			return
 		}
 	}
@@ -160,11 +172,19 @@ func (s *Server) handleConfirmation(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	if entry.ID != c.EntryID || !allowsAction(heldActions(role, p.User.ID, grants), c.Action) {
+	if entry.ID != c.EntryID || !allowsAction(heldActions(entry.Kind, role, p.User.ID, grants), c.Action) {
+		if entry.Kind == "image" {
+			s.imageDeny(w, r, p, c.ProjectID, c.HostID, "", entry.Name, c.Action, "forbidden", "forbidden")
+			return
+		}
 		s.programDeny(w, r, p, c.ProjectID, c.HostID, entry.Name, c.Action, "forbidden", "forbidden")
 		return
 	}
-	host, rel, ok := s.programHost(w, r, p, c.ProjectID, c.HostID, entry, c.Action)
+	if entry.Kind == "image" {
+		s.confirmImage(w, r, p, c, entry)
+		return
+	}
+	host, rel, ok := s.programHost(w, r, p, c.ProjectID, c.HostID, entry, c.Action, false)
 	if !ok {
 		return
 	}
@@ -253,10 +273,14 @@ func (s *Server) catalogBody(w http.ResponseWriter, r *http.Request, action stri
 	}
 }
 
-func actionInputOK(w http.ResponseWriter, action, key string, lines int) bool {
+func actionInputOK(w http.ResponseWriter, action, key string, lines int, kind string) bool {
 	switch action {
 	case "logs":
-		if lines < 1 || lines > 1000 {
+		maxLines := 1000
+		if kind == "image" {
+			maxLines = 2000
+		}
+		if lines < 1 || lines > maxLines {
 			writeCode(w, "bad_request", "invalid lines")
 			return false
 		}
@@ -279,7 +303,7 @@ func parseHostID(w http.ResponseWriter, raw string) (uuid.UUID, bool) {
 	return id, true
 }
 
-func (s *Server) programHost(w http.ResponseWriter, r *http.Request, p principal, projectID, hostID uuid.UUID, entry store.CatalogEntry, action string) (store.Host, string, bool) {
+func (s *Server) programHost(w http.ResponseWriter, r *http.Request, p principal, projectID, hostID uuid.UUID, entry store.CatalogEntry, action string, image bool) (store.Host, string, bool) {
 	rel, err := s.Store.HostProjectRelation(r.Context(), projectID, hostID)
 	if err != nil {
 		s.fail(w, err)
@@ -290,6 +314,10 @@ func (s *Server) programHost(w http.ResponseWriter, r *http.Request, p principal
 		return store.Host{}, "", false
 	}
 	if rel == "metrics" {
+		if image {
+			s.imageDeny(w, r, p, projectID, hostID, "", entry.Name, action, "forbidden", "forbidden")
+			return store.Host{}, "", false
+		}
 		s.programDeny(w, r, p, projectID, hostID, entry.Name, action, "forbidden", "forbidden")
 		return store.Host{}, "", false
 	}
@@ -373,7 +401,7 @@ func (s *Server) claimOrReplay(w http.ResponseWriter, r *http.Request, userID uu
 	return true
 }
 
-func (s *Server) issueConfirmation(w http.ResponseWriter, r *http.Request, p principal, projectID uuid.UUID, host store.Host, entry store.CatalogEntry, action, key string, hash []byte) {
+func (s *Server) issueConfirmation(w http.ResponseWriter, r *http.Request, p principal, projectID uuid.UUID, host store.Host, entry store.CatalogEntry, action, key string, hash []byte, imageDigest string, imageForce *bool) {
 	plain, tokenHash, err := secret.NewToken()
 	if err != nil {
 		s.failClaimed(w, r, p.User.ID, key, err)
@@ -393,13 +421,23 @@ func (s *Server) issueConfirmation(w http.ResponseWriter, r *http.Request, p pri
 		RequestHash:    hash,
 		CreatedAt:      now,
 		ExpiresAt:      expires,
+		ImageDigest:    confirmationDigest(imageDigest),
+		ImageForce:     imageForce,
 	}); err != nil {
 		s.failClaimed(w, r, p.User.ID, key, err)
 		return
 	}
+	plan := programPlan(action, entry.Name, entry.CommandDisplay, entry.Spec.RunAs, host.Name)
+	if entry.Kind == "image" {
+		shown := entry.CommandDisplay
+		if action == "rollback" && imageDigest != "" {
+			shown = imageDigest
+		}
+		plan = imagePlan(action, entry.Name, shown, host.Name)
+	}
 	payload := map[string]any{
 		"confirmation_id": plain,
-		"plan":            programPlan(action, entry.Name, entry.CommandDisplay, entry.Spec.RunAs, host.Name),
+		"plan":            plan,
 		"expires_at":      expires.Format(time.RFC3339),
 	}
 	body := envelopeRaw("ok", "ok", payload)
@@ -550,6 +588,24 @@ func (s *Server) programDeny(w http.ResponseWriter, r *http.Request, p principal
 
 func programPlan(action, entry, display, runAs, host string) string {
 	return fmt.Sprintf("will %s program %s (%s, as %s) on %s", action, entry, display, runAs, host)
+}
+
+func imagePlan(action, entry, shown, host string) string {
+	switch action {
+	case "remove":
+		return fmt.Sprintf("will remove %s on %s", entry, host)
+	case "deploy", "rollback":
+		return fmt.Sprintf("will deploy %s (%s) on %s", entry, shown, host)
+	default:
+		return fmt.Sprintf("will %s %s on %s", action, entry, host)
+	}
+}
+
+func confirmationDigest(digest string) *string {
+	if digest == "" {
+		return nil
+	}
+	return &digest
 }
 
 func programRequestHash(action string, projectID, hostID uuid.UUID, entry string) []byte {

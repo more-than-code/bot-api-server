@@ -232,6 +232,7 @@ type Service struct {
 	SystemdUnit   *string   `json:"systemd_unit"`
 	SystemdScope  *string   `json:"systemd_scope"`
 	ContainerName *string   `json:"container_name"`
+	ImageDigest   *string   `json:"image_digest"`
 	ProcessName   *string   `json:"process_name"`
 	ProjectID     uuid.UUID `json:"project_id"`
 	DisplayName   *string   `json:"display_name"`
@@ -292,6 +293,7 @@ type Discovered struct {
 	SystemdUnit   *string
 	SystemdScope  *string
 	ContainerName *string
+	ImageDigest   *string
 	ProcessName   *string
 	// OwnerUser is the account that owns the listening socket.
 	// The store drops values that are not printable or are longer than 64 bytes.
@@ -637,4 +639,39 @@ type Store interface {
 	PutIdempotency(ctx context.Context, userID uuid.UUID, key string, rec IdempotencyRecord) error
 	ReplaceIdempotencyResponse(ctx context.Context, userID uuid.UUID, key string, status int, body []byte) error
 	SetHostPrograms(ctx context.Context, hostID uuid.UUID, programs *HostPrograms) error
+
+	// BeginImageOp inserts one in-flight deploy for (host, entry).
+	// until is the deadline stored on the row. A second in-flight row whose
+	// deadline is still after at returns ErrConflict. A row whose deadline
+	// is missing or not after at is marked outcome timeout in the same
+	// transaction, and the new row proceeds.
+	BeginImageOp(ctx context.Context, entryID, hostID uuid.UUID, specHash string, by uuid.UUID, via string, at, until time.Time) (ImageDeploy, error)
+	// FinishImageDeploy records the outcome and clears in-flight.
+	FinishImageDeploy(ctx context.Context, id uuid.UUID, outcome string, digest *string, exitCode *int, at time.Time) (ImageDeploy, error)
+	// ReleaseImageOp deletes an in-flight row. A finished row is left as it is.
+	ReleaseImageOp(ctx context.Context, id uuid.UUID) error
+	// ListImageDeploys returns finished rows, newest first, at most 50.
+	ListImageDeploys(ctx context.Context, entryID, hostID uuid.UUID) ([]ImageDeploy, error)
+	// RollbackDigests returns up to three newest distinct succeeded or unchanged digests.
+	RollbackDigests(ctx context.Context, entryID, hostID uuid.UUID) ([]string, error)
+
+	// ListEnvKeyNames returns key names only, including sets that have none.
+	ListEnvKeyNames(ctx context.Context, projectID uuid.UUID) (map[string][]string, error)
+	ListEnvSets(ctx context.Context, projectID uuid.UUID) ([]EnvSet, error)
+	GetEnvSet(ctx context.Context, projectID uuid.UUID, name string) (EnvSet, error)
+	// PutEnvSet replaces the set. Every key is stored as a secret.
+	// Referencing image entries are rehashed. A changed hash voids approvals.
+	PutEnvSet(ctx context.Context, projectID uuid.UUID, name string, keys []EnvSecret, actor uuid.UUID, at time.Time) (EnvSet, error)
+	// PatchEnvKey flips visibility. It does not change spec hashes.
+	PatchEnvKey(ctx context.Context, projectID uuid.UUID, name, key string, in EnvKeyPatch, actor uuid.UUID, at time.Time) (EnvSet, error)
+	// DeleteEnvSet returns ErrConflict when an image entry references the set.
+	DeleteEnvSet(ctx context.Context, projectID uuid.UUID, name string) error
+	// ListEnvMaterial returns plaintext and ciphertext for one set. It is not an HTTP body.
+	ListEnvMaterial(ctx context.Context, projectID uuid.UUID, name string) ([]EnvMaterial, error)
+
+	ListRegistries(ctx context.Context, projectID uuid.UUID) ([]Registry, error)
+	PutRegistry(ctx context.Context, projectID uuid.UUID, host string, in RegistryWrite, actor uuid.UUID, at time.Time) (Registry, error)
+	DeleteRegistry(ctx context.Context, projectID uuid.UUID, host string) error
+	// GetRegistryMaterial returns one ciphertext. A missing host is ErrNotFound.
+	GetRegistryMaterial(ctx context.Context, projectID uuid.UUID, host string) (RegistryMaterial, error)
 }

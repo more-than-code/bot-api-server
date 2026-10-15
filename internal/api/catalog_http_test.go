@@ -31,7 +31,7 @@ func TestCatalogValidation(t *testing.T) {
 	status, env = w.do(w.token(extra.ID), http.MethodPost, path, programBody("a", "pnpm run dev", false))
 	mustHTTP(t, status, env, http.StatusNotFound, "not_found", "not found")
 	status, env = w.do(tok, http.MethodPost, path, `{"kind":"image","command":"pnpm","shell":false,"dir":"/home/joe/app","run_as":"joe"}`)
-	mustHTTP(t, status, env, http.StatusNotImplemented, "not_implemented", "not implemented")
+	mustHTTP(t, status, env, http.StatusBadRequest, "bad_request", "invalid json")
 	status, env = w.do(tok, http.MethodPost, path, `{"kind":"program","secret_env":{"A":"b"},"command":"pnpm","shell":false,"dir":"/home/joe/app","run_as":"joe"}`)
 	mustHTTP(t, status, env, http.StatusNotImplemented, "not_implemented", "not implemented")
 	status, env = w.do(tok, http.MethodPost, path, `{"command":"pnpm","shell":false,"dir":"/home/joe/app","run_as":"joe","name":"a"}`)

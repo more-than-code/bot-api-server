@@ -13,6 +13,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/google/uuid"
 	"github.com/more-than-code/bot-api-server/internal/audit"
+	"github.com/more-than-code/bot-api-server/internal/catalog"
 	"github.com/more-than-code/bot-api-server/internal/ingest"
 	"github.com/more-than-code/bot-api-server/internal/secret"
 	"github.com/more-than-code/bot-api-server/internal/store"
@@ -394,6 +395,7 @@ func (h *Hub) oneService(raw json.RawMessage) (store.Discovered, bool) {
 		SystemdUnit   *string         `json:"systemd_unit"`
 		SystemdScope  *string         `json:"systemd_scope"`
 		ContainerName *string         `json:"container_name"`
+		ImageDigest   *string         `json:"image_digest"`
 		ProcessName   *string         `json:"process_name"`
 		User          json.RawMessage `json:"user"`
 		Owner         json.RawMessage `json:"owner"`
@@ -401,6 +403,15 @@ func (h *Hub) oneService(raw json.RawMessage) (store.Discovered, bool) {
 	if err := json.Unmarshal(raw, &in); err != nil || !validService(in.Name, in.Kind, in.Ports, in.SystemdScope) {
 		h.log.Warn("skip service", "name", clipName(peek.Name))
 		return store.Discovered{}, false
+	}
+	digest, digestOK := serviceDigest(in.ImageDigest)
+	if !digestOK || !containerToken(in.ContainerName) {
+		h.log.Warn("skip service", "name", clipName(peek.Name))
+		return store.Discovered{}, false
+	}
+	if in.ContainerName != nil {
+		redacted := ingest.RedactCmdline(*in.ContainerName)
+		in.ContainerName = &redacted
 	}
 	ports := in.Ports
 	if ports == nil {
@@ -413,6 +424,7 @@ func (h *Hub) oneService(raw json.RawMessage) (store.Discovered, bool) {
 		SystemdUnit:   in.SystemdUnit,
 		SystemdScope:  in.SystemdScope,
 		ContainerName: in.ContainerName,
+		ImageDigest:   digest,
 		ProcessName:   in.ProcessName,
 		OwnerUser:     ownerUser(in.User),
 		Owner:         discoveredOwner(in.Owner),
@@ -455,7 +467,7 @@ func validService(name, kind string, ports []int, scope *string) bool {
 	if !serviceRe.MatchString(name) {
 		return false
 	}
-	if kind != "systemd" && kind != "process" {
+	if kind != "systemd" && kind != "process" && kind != "container" {
 		return false
 	}
 	for _, p := range ports {
@@ -465,6 +477,33 @@ func validService(name, kind string, ports []int, scope *string) bool {
 	}
 	if scope != nil && *scope != "system" && *scope != "user" {
 		return false
+	}
+	return true
+}
+
+// serviceDigest accepts a missing or empty digest. Anything else must be sha256:64 hex.
+func serviceDigest(raw *string) (*string, bool) {
+	if raw == nil || *raw == "" {
+		return nil, true
+	}
+	if !catalog.ValidDigest(*raw) {
+		return nil, false
+	}
+	return raw, true
+}
+
+func containerToken(name *string) bool {
+	if name == nil {
+		return true
+	}
+	if *name == "" || len(*name) > 128 {
+		return false
+	}
+	for i := 0; i < len(*name); i++ {
+		c := (*name)[i]
+		if c < 0x20 || c > 0x7e {
+			return false
+		}
 	}
 	return true
 }

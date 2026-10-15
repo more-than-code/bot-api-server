@@ -204,6 +204,12 @@ WHERE project_id = $1::uuid
 	if err := exec(ctx, tx, `DELETE FROM app.catalog_entries WHERE project_id = $1::uuid`, id.String()); err != nil {
 		return nil, mapErr(err)
 	}
+	if err := exec(ctx, tx, `DELETE FROM app.env_sets WHERE project_id = $1::uuid`, id.String()); err != nil {
+		return nil, mapErr(err)
+	}
+	if err := exec(ctx, tx, `DELETE FROM app.registries WHERE project_id = $1::uuid`, id.String()); err != nil {
+		return nil, mapErr(err)
+	}
 	rows, err := tx.Query(ctx, `
 SELECT id::text FROM app.hosts WHERE project_id = $1::uuid ORDER BY id::text
 `, id.String())

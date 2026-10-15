@@ -68,6 +68,11 @@ type Mem struct {
 	approvals     map[string]store.CatalogApproval
 	confirmations map[string]confirmationRec
 	idempotency   map[string]store.IdempotencyRecord
+
+	envSets      map[string]envSetRec
+	envValues    map[string][]envValueRec
+	registries   map[string]registryRec
+	imageDeploys map[uuid.UUID]imageDeployRec
 }
 
 type sessionRec struct {
@@ -140,6 +145,10 @@ func New() *Mem {
 		approvals:     map[string]store.CatalogApproval{},
 		confirmations: map[string]confirmationRec{},
 		idempotency:   map[string]store.IdempotencyRecord{},
+		envSets:       map[string]envSetRec{},
+		envValues:     map[string][]envValueRec{},
+		registries:    map[string]registryRec{},
+		imageDeploys:  map[uuid.UUID]imageDeployRec{},
 	}
 }
 

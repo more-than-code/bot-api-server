@@ -14,6 +14,7 @@ import (
 	"github.com/more-than-code/bot-api-server/internal/audit"
 	"github.com/more-than-code/bot-api-server/internal/auth"
 	"github.com/more-than-code/bot-api-server/internal/authz"
+	"github.com/more-than-code/bot-api-server/internal/seal"
 	"github.com/more-than-code/bot-api-server/internal/store"
 )
 
@@ -31,6 +32,13 @@ type Server struct {
 	TrustedProxy  string
 	Log           *slog.Logger
 	Now           func() time.Time
+	// Secrets is nil when BOT_SECRETS_KEY_FILE is unset. Env-set writes,
+	// registry writes, and deploys that need a secret then return unavailable.
+	Secrets *seal.Box
+	// imageBudget, when non-zero, replaces the image task timeout.
+	// Production leaves it at 0. Tests set it so a timeout does not wait
+	// out the real deploy budget.
+	imageBudget int
 }
 
 type route struct {
@@ -92,6 +100,18 @@ func contractRoutes() []route {
 		{"POST /v1/projects/{id}/catalog/{name}/restart", false, (*Server).handleCatalogRestart},
 		{"POST /v1/projects/{id}/catalog/{name}/logs", false, (*Server).handleCatalogLogs},
 		{"POST /v1/projects/{id}/catalog/{name}/status", false, (*Server).handleCatalogStatus},
+		{"POST /v1/projects/{id}/catalog/{name}/deploy", false, (*Server).handleCatalogDeploy},
+		{"POST /v1/projects/{id}/catalog/{name}/rollback", false, (*Server).handleCatalogRollback},
+		{"POST /v1/projects/{id}/catalog/{name}/remove", false, (*Server).handleCatalogRemove},
+		{"GET /v1/projects/{id}/catalog/{name}/deploys", false, (*Server).handleCatalogDeploys},
+		{"GET /v1/projects/{id}/env-sets", false, (*Server).handleEnvSetList},
+		{"GET /v1/projects/{id}/env-sets/{set}", false, (*Server).handleEnvSetGet},
+		{"PUT /v1/projects/{id}/env-sets/{set}", false, (*Server).handleEnvSetPut},
+		{"DELETE /v1/projects/{id}/env-sets/{set}", false, (*Server).handleEnvSetDelete},
+		{"PATCH /v1/projects/{id}/env-sets/{set}/keys/{key}", false, (*Server).handleEnvKeyPatch},
+		{"GET /v1/projects/{id}/registries", false, (*Server).handleRegistryList},
+		{"PUT /v1/projects/{id}/registries/{host}", false, (*Server).handleRegistryPut},
+		{"DELETE /v1/projects/{id}/registries/{host}", false, (*Server).handleRegistryDelete},
 		{"GET /v1/projects/{id}/hosts", false, (*Server).handleHostList},
 		{"GET /v1/projects/{id}/services", false, (*Server).handleProjectServices},
 		{"GET /v1/hosts/{id}", false, (*Server).handleHostGet},

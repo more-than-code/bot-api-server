@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,5 +43,44 @@ func TestDiscoveredUser(t *testing.T) {
 	}
 	if _, ok := got["typed"]; !ok || got["typed"] != nil {
 		t.Fatal("non-string user dropped the service or kept a value")
+	}
+}
+
+func TestContainerNameDropped(t *testing.T) {
+	h := New(memstore.New(), audit.Writer{}, slog.New(slog.NewTextHandler(io.Discard, nil)), time.Now)
+	long := strings.Repeat("a", 129)
+	raw := json.RawMessage(`[
+		{"name":"keep","kind":"container","container_name":"web"},
+		{"name":"nilname","kind":"container"},
+		{"name":"empty","kind":"container","container_name":""},
+		{"name":"long","kind":"container","container_name":"` + long + `"},
+		{"name":"ctrl","kind":"container","container_name":"a\nb"},
+		{"name":"assigned","kind":"container","container_name":"password=hunter22"}
+	]`)
+	items, _, report := h.discoveredReport(raw)
+	if !report {
+		t.Fatal("report dropped")
+	}
+	names := map[string]*string{}
+	for _, item := range items {
+		names[item.Name] = item.ContainerName
+	}
+	if names["keep"] == nil || *names["keep"] != "web" {
+		t.Fatalf("keep %#v", names["keep"])
+	}
+	if _, ok := names["nilname"]; !ok || names["nilname"] != nil {
+		t.Fatal("missing container_name dropped the service or kept a value")
+	}
+	if _, ok := names["empty"]; ok {
+		t.Fatal("empty container_name was stored")
+	}
+	if _, ok := names["long"]; ok {
+		t.Fatal("long container_name was stored")
+	}
+	if _, ok := names["ctrl"]; ok {
+		t.Fatal("control character in container_name was stored")
+	}
+	if names["assigned"] == nil || *names["assigned"] != "password=[REDACTED]" || strings.Contains(*names["assigned"], "hunter22") {
+		t.Fatalf("assignment %#v", names["assigned"])
 	}
 }

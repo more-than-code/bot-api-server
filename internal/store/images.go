@@ -1,0 +1,101 @@
+package store
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// ImageDeploy is one finished or in-flight image deploy.
+// InFlight is not part of the HTTP object.
+type ImageDeploy struct {
+	ID            uuid.UUID  `json:"id"`
+	EntryID       uuid.UUID  `json:"entry_id"`
+	HostID        uuid.UUID  `json:"host_id"`
+	Digest        *string    `json:"digest"`
+	SpecHash      string     `json:"spec_hash"`
+	Outcome       string     `json:"outcome"`
+	ExitCode      *int       `json:"exit_code"`
+	StartedAt     time.Time  `json:"started_at"`
+	FinishedAt    *time.Time `json:"finished_at"`
+	By            uuid.UUID  `json:"by"`
+	Via           string     `json:"via"`
+	InFlight      bool       `json:"-"`
+	InFlightUntil time.Time  `json:"-"`
+}
+
+// EnvKey is one env-set key in an HTTP body. Value is null when the key is secret.
+type EnvKey struct {
+	Key      string  `json:"key"`
+	IsSecret bool    `json:"is_secret"`
+	Value    *string `json:"value"`
+}
+
+// EnvSet is one project env set.
+type EnvSet struct {
+	Name      string    `json:"name"`
+	Keys      []EnvKey  `json:"keys"`
+	UpdatedAt time.Time `json:"updated_at"`
+	UpdatedBy uuid.UUID `json:"updated_by"`
+}
+
+// EnvSecret is one encrypted env value. The plaintext is not stored.
+type EnvSecret struct {
+	Key        string
+	Nonce      []byte
+	Ciphertext []byte
+	KeyVersion int
+}
+
+// EnvKeyPatch is a visibility change. Exactly one form is set.
+type EnvKeyPatch struct {
+	IsSecret   bool
+	Plain      string
+	Nonce      []byte
+	Ciphertext []byte
+	KeyVersion int
+}
+
+// EnvMaterial is a stored env value, including ciphertext. It is not returned over HTTP.
+type EnvMaterial struct {
+	Key        string
+	IsSecret   bool
+	Plain      string
+	Nonce      []byte
+	Ciphertext []byte
+	KeyVersion int
+}
+
+// Registry is a registry credential without the token.
+type Registry struct {
+	Host      string    `json:"host"`
+	Username  string    `json:"username"`
+	UpdatedAt time.Time `json:"updated_at"`
+	UpdatedBy uuid.UUID `json:"updated_by"`
+}
+
+// RegistryWrite is an encrypted registry token.
+type RegistryWrite struct {
+	Username   string
+	Nonce      []byte
+	Ciphertext []byte
+	KeyVersion int
+}
+
+// RegistryMaterial is one stored registry token. It is not returned over HTTP.
+type RegistryMaterial struct {
+	Host       string
+	Username   string
+	Nonce      []byte
+	Ciphertext []byte
+	KeyVersion int
+}
+
+// DefaultGrantActions is the grant inserted for a new entry.
+// Program owners do not receive deploy. Image owners and admins do.
+func DefaultGrantActions(kind string) (admin, viewer []string) {
+	if kind == "image" {
+		return []string{"run", "stop", "restart", "logs", "deploy"}, []string{"logs"}
+	}
+	return []string{"run", "stop", "restart", "logs"}, []string{"logs"}
+}

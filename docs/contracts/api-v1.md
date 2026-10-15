@@ -355,3 +355,76 @@ The API does not check host paths or accounts; the host policy and helper do (ag
    - `sort=status`: rows with `gone_at` set come after all rows with `gone_at = null`, for both values of `dir`; within each group the v1.3 order applies.
 4. Other routes are unchanged; `GET /v1/hosts/{id}/services` and `GET /v1/services/{id}` simply include `gone_at`.
 5. Migration `0008_service_gone.sql` backfills: for each host, rows whose `last_seen_at` is earlier than that host's greatest `last_seen_at` get `gone_at = last_seen_at`.
+
+## v1.8 catalog images (2026-10-15, approved spec `docs/spec-catalog-images.md` rev 3, wave 2a; additive)
+
+`kind:"image"` entries are now accepted. `not_implemented` remains only for managed files (wave 2b). The `docker run` paste prefill is console-side; the API has no parse route for it.
+
+### Objects
+
+```jsonc
+CatalogEntry   // kind "program" unchanged; for kind "image": "spec":ImageSpec, "command_display" = the image reference
+ImageSpec {"kind":"service"|"job","image":string,"command":[string]|null,"entrypoint":[string]|null,
+           "ports":[{"host":int,"container":int,"public":bool}],"env":{KEY:value},"env_sets":[string],
+           "secret_env":{KEY:"<set>.<KEY>"},"volumes":[{"name":string,"target":string,"read_only":bool}],
+           "restart":"no"|"on-failure"|"unless-stopped","user":string,"healthy_after_sec":int,
+           "memory_mb":int|null,"timeout_sec":int}
+ImageDeploy {"id","entry_id","host_id","digest","spec_hash","outcome","exit_code":int|null,
+             "started_at","finished_at","by":"<user uuid>","via":"console"|"mcp"}
+ImageStatus {"container":string|null,"state":"running"|"exited"|"created"|"paused"|"restarting"|"dead"|"missing",
+             "exit_code":int|null,"restart_count":int,"started_at":string|null,"finished_at":string|null,
+             "digest":string|null,"ports":[int]}
+EnvSet      {"name","keys":[{"key","is_secret":bool,"value":string|null}],"updated_at","updated_by"}   // value only when !is_secret
+Registry    {"host","username","updated_at","updated_by"}
+Outcome     ∈ succeeded|unchanged|failed|timeout|rolled_back|rollback_failed|image_unavailable|forbidden_spec|conflict
+```
+
+- `HostPrograms` gains `"images":bool,"docker":bool` (from the agent's hello).
+- `Service` gains `"container_name":string|null` and `"image_digest":string|null`; owned image services have `catalog_entry` set and `kind:"container"`.
+- `CatalogGrant` actions gain **`deploy`** (deploy, redeploy, job run, rollback, remove). New image entries default to owner/admin `[run,stop,restart,logs,deploy]`, viewer `[logs]`. `my_actions` may include `deploy`.
+
+### Writing an image entry
+
+Create/replace take `{"name","kind":"image","spec":ImageSpec}` (`name` on create only). Validation (`bad_request` with the field named, never echoing a value):
+1. `name` as v1.6, and additionally must not end with `-` or `-prev`.
+2. `image`: a Docker reference (`[registry/]path[:tag][@sha256:<64 hex>]`), ≤ 255 bytes, lowercase path; a reference with neither tag nor digest is stored with `:latest` appended.
+3. `command`, `entrypoint`: null or ≤ 32 strings, each ≤ 4096 bytes, no NUL/newline.
+4. `ports`: ≤ 16; host/container 1–65535; host ports unique within the entry.
+5. `env`: the v1.6 item 8 rules (including the secret-looking-key refusal) and the v1.6.1 denylist.
+6. `env_sets`: ≤ 8 names of sets in the **same project** (`^[a-z0-9][a-z0-9-]{0,47}$`); unknown → `bad_request`.
+7. `secret_env`: ≤ 64; key as env; value `<set>.<KEY>`, split at the first `.`, set in the same project and in `env_sets` or not (either is allowed), KEY present in that set; unknown → `bad_request`.
+8. `volumes`: ≤ 8; `name` `^[a-z0-9][a-z0-9-]{0,47}$` (the host volume is `<project-slug>-<name>`); `target` absolute, ≤ 255 bytes, no `.`/`..` segment; targets unique.
+9. `restart`: default `unless-stopped` for services; forced `no` for jobs.
+10. `user`: empty, a name `^[a-z_][a-z0-9_-]{0,31}$`, a positive uid, or `name|uid:name|gid`; uid/gid 0, `root` in either position and leading-zero numbers are refused.
+11. `healthy_after_sec` 5–600 (default 30, service only); `timeout_sec` 10–3600 (default 600, job only); `memory_mb` null or 16–65536.
+12. Env precedence when resolving: `env_sets` in order < `secret_env` < `env`.
+
+`spec_hash` for image entries = SHA-256 of canonical `{"kind","spec"}` **plus** `"env_keys": {<set>: sha256(sorted key names joined by "\n")}` for every referenced set, so a key added to or removed from a set changes the hash (and voids shared-host approvals). Values never enter the hash.
+
+### Routes
+
+| Method | Path | Who | Body | Result |
+|---|---|---|---|---|
+| POST | `/v1/projects/{id}/catalog/{name}/deploy` | grant `deploy` | `{"host_id","force"?:bool,"idempotency_key"}` | `{"deploy":ImageDeploy,"status":ImageStatus,"lines":[string]}` |
+| POST | `/v1/projects/{id}/catalog/{name}/rollback` | grant `deploy` | `{"host_id","digest","idempotency_key"}` | same |
+| POST | `/v1/projects/{id}/catalog/{name}/remove` | grant `deploy` | `{"host_id","idempotency_key"}` | `{"status":ImageStatus}` |
+| GET | `/v1/projects/{id}/catalog/{name}/deploys?host_id=` | any grant | — | `{"items":[ImageDeploy]}` newest first, ≤ 50 |
+| GET | `/v1/projects/{id}/env-sets` | admin+ | — | `{"items":[EnvSet]}` |
+| GET / PUT / DELETE | `/v1/projects/{id}/env-sets/{set}` | admin+ | PUT `{"dotenv":string}` | EnvSet / EnvSet / `{}` |
+| PATCH | `/v1/projects/{id}/env-sets/{set}/keys/{key}` | admin+ | `{"is_secret":bool}` | EnvSet |
+| GET | `/v1/projects/{id}/registries` | admin+ | — | `{"items":[Registry]}` |
+| PUT / DELETE | `/v1/projects/{id}/registries/{host}` | admin+ | PUT `{"username","token"}` | Registry / `{}` |
+
+- run/stop/restart/logs/status (v1.6 routes) dispatch by kind; for images, status/run/stop/restart return `ImageStatus`, logs return `{"container","lines","truncated"}`.
+- Deploy/rollback/remove follow the v1.6 check order (permission → host relation/approval → `HostPrograms.images && docker` else `bad_request` "this host does not run containers" → D25 confirmation for `api_delegated` → idempotency) and additionally: one in-flight deploy/rollback/remove per (host, entry) → `conflict`. `rollback.digest` must be one of the last 3 distinct `succeeded`/`unchanged` digests for (entry, host) → else `bad_request`. Outcomes are in the 200 body (`deploy.outcome`), not HTTP codes; only request-level failures use envelope errors.
+- D25 `plan` for deploy/rollback: "will deploy <entry> (<image or digest>) on <host>"; it never contains env values.
+- **dotenv grammar** (PUT): UTF-8, ≤ 256 KiB, ≤ 256 keys. Each line is blank, a `#` comment (after optional whitespace), or `[export ]KEY=value`. KEY as env rule and denylist (the secret-looking-key refusal does **not** apply: these are secrets). value is the rest of the line, optionally wrapped in one pair of matching `'` or `"` (removed); no escapes, no interpolation, no NUL; a value ≤ 4096 bytes. Duplicates or malformed lines → `bad_request` listing `"line N"` and the key if parsed, never a value. PUT replaces the set; every key becomes `is_secret:true`. `DELETE` of a set referenced by any entry → `conflict`.
+- Registry `{host}`: a registry hostname[:port], lowercase; `username` ≤ 255, `token` ≤ 4096, no CR/LF/NUL. GET never returns tokens.
+- Secret values and tokens are AES-256-GCM encrypted with `BOT_SECRETS_KEY` (key_version), a random 96-bit nonce per ciphertext, associated data `project_id|set|key` (or `project_id|registry|host`); they are decrypted only to build an `image_deploy`/`image_rollback` task for a host of the entry's project (or an approved shared host), and only the registry whose host equals the image reference's registry host is attached.
+- No MCP-facing route returns env values; there are no MCP tools for env sets or registries.
+
+**Audit:** `catalog.deploy`, `catalog.rollback`, `catalog.remove` (entry, host, digest, outcome, `via`), `env_set.replace`, `env_set.key_visibility`, `env_set.delete`, `registry.put`, `registry.delete` — key names, set names and registry hosts only.
+
+### v1.8.1 amendment (2026-10-16, Joe approved; from the wave 2a browser smoke)
+
+`ImageStatus.state` gains **`unknown`**: the API did not receive the container's state in time (a deploy or rollback whose task ran past its budget, outcome `timeout`). With `unknown`, `container`, `exit_code`, `started_at`, `finished_at` and `digest` are null, `restart_count` is 0 and `ports` is `[]`. An empty string is never sent. Consumers show it as "unknown".

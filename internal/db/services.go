@@ -15,7 +15,7 @@ import (
 // display_name and owner_user stay in this list so every Service JSON has them.
 const serviceColumns = `
 s.id::text, s.host_id::text, s.project_id::text, s.name, s.source, s.kind, s.ports,
-s.systemd_unit, s.systemd_scope, s.container_name, s.process_match,
+s.systemd_unit, s.systemd_scope, s.container_name, s.image_digest, s.process_match,
 s.display_name, s.owner_user, s.catalog_entry,
 s.first_seen_at, s.last_seen_at, s.gone_at,
 hr.time, hr.result, hr.latency_ms`
@@ -316,19 +316,19 @@ func (d *DB) UpsertDiscovered(ctx context.Context, hostID uuid.UUID, items []sto
 	}
 	names := make([]string, 0, len(items))
 	for _, item := range items {
-		name, source, projectID, catalogEntry := store.PlaceDiscovered(item, ownerProject, func(slug, entry string) (uuid.UUID, bool) {
-			return d.catalogLookup(ctx, tx, slug, entry)
+		name, source, projectID, catalogEntry := store.PlaceDiscovered(item, ownerProject, func(slug, entry, kind string) (uuid.UUID, bool) {
+			return d.catalogLookup(ctx, tx, slug, entry, kind)
 		})
 		names = append(names, name)
 		if err := exec(ctx, tx, `
 INSERT INTO app.services (
     id, host_id, name, source, kind, ports,
-    systemd_unit, systemd_scope, container_name, process_match,
+    systemd_unit, systemd_scope, container_name, image_digest, process_match,
     first_seen_at, last_seen_at, project_id, owner_user, catalog_entry
 ) VALUES (
     $1::uuid, $2::uuid, $3, $4, $5, $6::integer[],
-    $7, $8, $9, $10,
-    $11, $11, $12::uuid, $13, $14
+    $7, $8, $9, $10, $11,
+    $12, $12, $13::uuid, $14, $15
 )
 ON CONFLICT (host_id, name) DO UPDATE SET
     last_seen_at = EXCLUDED.last_seen_at,
@@ -352,9 +352,10 @@ ON CONFLICT (host_id, name) DO UPDATE SET
     systemd_unit = CASE WHEN app.services.source <> 'declared' THEN EXCLUDED.systemd_unit ELSE app.services.systemd_unit END,
     systemd_scope = CASE WHEN app.services.source <> 'declared' THEN EXCLUDED.systemd_scope ELSE app.services.systemd_scope END,
     container_name = CASE WHEN app.services.source <> 'declared' THEN EXCLUDED.container_name ELSE app.services.container_name END,
+    image_digest = CASE WHEN app.services.source <> 'declared' THEN EXCLUDED.image_digest ELSE app.services.image_digest END,
     process_match = CASE WHEN app.services.source <> 'declared' THEN EXCLUDED.process_match ELSE app.services.process_match END
 `, uuid.New().String(), hostID.String(), name, source, item.Kind, intsTo32(item.Ports),
-			optString(item.SystemdUnit), optString(item.SystemdScope), optString(item.ContainerName), optString(item.ProcessName),
+			optString(item.SystemdUnit), optString(item.SystemdScope), optString(item.ContainerName), optString(item.ImageDigest), optString(item.ProcessName),
 			at, projectID.String(), optString(store.NormalizeOwnerUser(item.OwnerUser)), optString(catalogEntry)); err != nil {
 			return mapErr(err)
 		}
@@ -508,7 +509,7 @@ func scanServiceInto(row pgx.Row, now time.Time, extra *projectServiceExtra) (st
 	var latency *float64
 	dest := []any{
 		&id, &hostID, &projectID, &s.Name, &s.Source, &s.Kind, &ports,
-		&s.SystemdUnit, &s.SystemdScope, &s.ContainerName, &s.ProcessName,
+		&s.SystemdUnit, &s.SystemdScope, &s.ContainerName, &s.ImageDigest, &s.ProcessName,
 		&s.DisplayName, &s.OwnerUser, &s.CatalogEntry,
 		&s.FirstSeenAt, &s.LastSeenAt, &s.GoneAt,
 		&checked, &result, &latency,

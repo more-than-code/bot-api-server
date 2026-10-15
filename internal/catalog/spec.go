@@ -318,8 +318,10 @@ func jsonString(s string) string {
 }
 
 // RejectKind reports rule 10. A missing kind is not this error.
+// kind image is accepted. A program body that carries top-level secret_env
+// is still not implemented. Managed files stay not implemented.
 func RejectKind(kind string, secretEnv bool) error {
-	if secretEnv || (kind != "" && kind != "program") {
+	if secretEnv || (kind != "" && kind != "program" && kind != "image") {
 		return notImplemented("not implemented")
 	}
 	return nil

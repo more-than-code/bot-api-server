@@ -153,8 +153,11 @@ func TestProgramFieldRules(t *testing.T) {
 			}
 		})
 	}
-	if err := RejectKind("image", false); err == nil || err.(*FieldError).Code != CodeNotImplemented {
+	if err := RejectKind("image", false); err != nil {
 		t.Fatalf("image %v", err)
+	}
+	if err := RejectKind("file", false); err == nil || err.(*FieldError).Code != CodeNotImplemented {
+		t.Fatalf("file %v", err)
 	}
 	if err := RejectKind("program", true); err == nil || err.(*FieldError).Code != CodeNotImplemented {
 		t.Fatalf("secret_env %v", err)
