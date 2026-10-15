@@ -57,6 +57,19 @@ func TestRouteTable(t *testing.T) {
 		"DELETE /v1/projects/{id}/invites/{invite_id}",
 		"POST /v1/invites/lookup",
 		"POST /v1/invites/accept",
+		"POST /v1/projects/{id}/catalog/parse",
+		"GET /v1/projects/{id}/catalog",
+		"POST /v1/projects/{id}/catalog",
+		"GET /v1/projects/{id}/catalog/{name}",
+		"PUT /v1/projects/{id}/catalog/{name}",
+		"DELETE /v1/projects/{id}/catalog/{name}",
+		"GET /v1/projects/{id}/catalog/{name}/permissions",
+		"PUT /v1/projects/{id}/catalog/{name}/permissions",
+		"POST /v1/projects/{id}/catalog/{name}/run",
+		"POST /v1/projects/{id}/catalog/{name}/stop",
+		"POST /v1/projects/{id}/catalog/{name}/restart",
+		"POST /v1/projects/{id}/catalog/{name}/logs",
+		"POST /v1/projects/{id}/catalog/{name}/status",
 		"GET /v1/projects/{id}/hosts",
 		"GET /v1/projects/{id}/services",
 		"GET /v1/hosts/{id}",
@@ -64,6 +77,9 @@ func TestRouteTable(t *testing.T) {
 		"GET /v1/hosts/{id}/shares",
 		"PUT /v1/hosts/{id}/shares/{project_id}",
 		"DELETE /v1/hosts/{id}/shares/{project_id}",
+		"GET /v1/hosts/{id}/catalog-approvals",
+		"POST /v1/hosts/{id}/catalog-approvals",
+		"DELETE /v1/hosts/{id}/catalog-approvals/{entry_id}",
 		"GET /v1/hosts/{id}/services",
 		"GET /v1/services/{id}",
 		"PATCH /v1/services/{id}",
@@ -73,6 +89,7 @@ func TestRouteTable(t *testing.T) {
 		"GET /v1/services/{id}/health",
 		"POST /v1/hosts/{id}/snapshot",
 		"POST /v1/services/{id}/probe",
+		"POST /v1/confirmations/{confirmation_id}",
 		"GET /v1/projects/{id}/audit",
 	}
 	got := Patterns()
@@ -210,6 +227,7 @@ func TestEnvelopeStatus(t *testing.T) {
 		{"access_denied", 400},
 		{"invalid_token", 401},
 		{"rate_limited", 429},
+		{"not_implemented", 501},
 	}
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()

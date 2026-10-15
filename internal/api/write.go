@@ -44,6 +44,8 @@ func phrase(code string) string {
 		return "invalid token"
 	case "rate_limited":
 		return "rate limited"
+	case "not_implemented":
+		return "not implemented"
 	default:
 		return code
 	}
@@ -69,6 +71,8 @@ func statusFor(code string) int {
 		return http.StatusServiceUnavailable
 	case "timeout":
 		return http.StatusGatewayTimeout
+	case "not_implemented":
+		return http.StatusNotImplemented
 	default:
 		return http.StatusInternalServerError
 	}

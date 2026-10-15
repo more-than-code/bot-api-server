@@ -21,6 +21,7 @@
 | `timeout` | 504 (agent did not answer within 30 s) |
 | `error` | 500 |
 | `rate_limited` | 429 (v1.5) |
+| `not_implemented` | 501 (v1.6) |
 
   The device token endpoint also uses `authorization_pending`, `slow_down`, `expired_token`, and `access_denied`, all with HTTP 400.
 - **Auth:** `Authorization: Bearer <session token>` on every route except those marked public. A missing, expired, or unknown token, or a disabled user, gives `unauthorized`.
@@ -255,3 +256,88 @@ Types: `Invite {"id","role","created_by","created_at","expires_at","max_uses","u
 7. **Audit:** `invite.create` (role, max_uses, expires_at), `invite.revoke`, `invite.accept` (invite id, user id). No audit row contains the token.
 8. **Deletion:** deleting a project deletes its invites.
 9. **Unchanged:** `POST /v1/projects/{id}/members` by email, and every other route.
+
+## v1.6 project catalog, programs (2026-10-15, approved spec `docs/spec-project-catalog.md`, wave 1)
+
+Additive. Container (`image`) entries, `secret_env` and the `docker run` form are wave 2: until then they are refused with the new envelope code **`not_implemented` (HTTP 501)**.
+
+### Objects
+
+```jsonc
+CatalogEntry {"id","project_id","name","kind":"program","spec":ProgramSpec,"spec_hash","command_display",
+              "created_by","created_at","updated_at","my_actions":["run","stop","restart","logs","status"]}
+ProgramSpec  {"dir","exec","args":[string],"shell":bool,"run_as","env":{KEY:value},"port":int|null,
+              "restart":"on-failure"|"no"}
+CatalogGrant {"subject":"role:viewer"|"role:admin"|"user:<uuid>","actions":[Action]}   // Action ∈ run|stop|restart|logs
+Approval     {"entry_id","entry_name","project_id","project_name","host_id","spec_hash","command_display",
+              "dir","run_as","shell","status":"pending"|"approved","requested_by","requested_at",
+              "approved_by","approved_at"}
+ProgramStatus {"unit","active_state","sub_state","main_pid":int|null,"started_at":string|null,"ports":[int]}
+ProgramLogs  {"unit","lines":[string],"truncated":bool}
+HostPrograms {"enabled":bool,"run_as":[string],"allow_shell":bool,"policy_hash":string}   // from the agent's hello; null when the agent reports none
+```
+
+- `name`: `^[a-z0-9][a-z0-9-]{0,47}$`, unique per project, immutable (rename = delete + create).
+- `my_actions` is what the caller may do on that entry. `status` is included whenever any action is.
+- `command_display` is the argv re-joined with POSIX quoting (or the raw line in shell mode). Display only.
+- `spec_hash` is lowercase hex SHA-256 of the canonical JSON of `{"kind","spec"}` (keys sorted, no whitespace).
+- `Host` gains `"programs": HostPrograms|null`. `Service` gains `"catalog_entry": string|null` (the entry name when `source='owned'`).
+
+### Writing a program entry
+
+Create and replace take `{"name","kind":"program","command":string,"shell":bool,"dir","run_as","env"?,"port"?,"restart"?}` (`name` only on create).
+1. **`command`** (1–4096 bytes, one line) is split into argv on the server with POSIX shell-word rules: single quotes, double quotes and backslash escapes are honoured; nothing else is interpreted.
+2. With `shell=false`, the line is refused with `bad_request` and a message naming the feature if it contains, outside quotes: `|`, `&`, `;`, `<`, `>`, `$`, a backquote, `*`, `?`, `[`, `(`, `)`, `{`, `}`, `~` at word start, or a newline. A first word `cd` is refused ("use the working directory field").
+3. Leading words of the form `KEY=value` (KEY matching the env key rule) are moved into `env`; a duplicate key is `bad_request`. The next word is `exec`; the rest are `args`.
+4. With `shell=true`, nothing is split: `exec` = `/bin/sh`, `args` = `["-c", <line>]`.
+5. **`exec`** is an absolute path or a bare name matching `^[A-Za-z0-9._+-]{1,128}$`; absolute paths match `^/[A-Za-z0-9._+/-]{1,255}$` with no `..` segment. `args`: ≤ 32, each ≤ 4096 bytes, no NUL or newline.
+6. **`dir`**: absolute, ≤ 255 bytes, no `..` segment, no NUL, no newline.
+7. **`run_as`**: `^[a-z_][a-z0-9_-]{0,31}$`, not `root`.
+8. **`env`**: ≤ 64 keys; key `^[A-Z_][A-Z0-9_]{0,63}$`; value ≤ 4096 bytes, no NUL or newline. A key matching `(?i)(password|passwd|token|secret|credential|api[_-]?key|private[_-]?key)` is `bad_request` ("use secret_env", which is wave 2). `PATH` and `HOME` are reserved (`bad_request`).
+9. `port` 1–65535 or null; `restart` default `on-failure`.
+10. `secret_env` present, or `kind` other than `program` → `not_implemented`.
+
+The API does not check host paths or accounts; the host policy and helper do (agent-protocol v1.3).
+
+### Routes
+
+| Method | Path | Who | Body | Result |
+|---|---|---|---|---|
+| GET | `/v1/projects/{id}/catalog` | viewer+ | — | `{"items":[CatalogEntry]}`; viewers see only entries where `my_actions` is non-empty |
+| POST | `/v1/projects/{id}/catalog/parse` | owner | `{"command","shell"}` | `{"exec","args","env","command_display"}` or `bad_request` (rules 1–5; the preview for the form) |
+| POST | `/v1/projects/{id}/catalog` | owner | create body | CatalogEntry, 201; `conflict` if the name exists |
+| GET | `/v1/projects/{id}/catalog/{name}` | viewer+ with any action | — | CatalogEntry |
+| PUT | `/v1/projects/{id}/catalog/{name}` | owner | replace body | CatalogEntry. A changed `spec_hash` voids every host approval of the entry. |
+| DELETE | `/v1/projects/{id}/catalog/{name}` | owner | — | `null`. Running units are not stopped (stop first); approvals and grants are deleted. |
+| GET | `/v1/projects/{id}/catalog/{name}/permissions` | owner | — | `{"grants":[CatalogGrant]}` |
+| PUT | `/v1/projects/{id}/catalog/{name}/permissions` | owner | `{"grants":[CatalogGrant]}` | the stored grants. A `user:` subject must be a current member (else `bad_request`); ≤ 100 grants. |
+| GET | `/v1/hosts/{id}/catalog-approvals` | admin+ of the host's owning project | — | `{"items":[Approval]}` (pending and approved; voided ones are gone) |
+| POST | `/v1/hosts/{id}/catalog-approvals` | admin+ of the host's owning project | `{"entry_id","spec_hash"}` | Approval; `conflict` if `spec_hash` is no longer the entry's current hash |
+| DELETE | `/v1/hosts/{id}/catalog-approvals/{entry_id}` | admin+ of the host's owning project | — | `null` |
+| POST | `/v1/projects/{id}/catalog/{name}/run` · `/stop` · `/restart` | grant for that action | `{"host_id","idempotency_key"}` | ProgramStatus, or 202 PendingConfirmation (below) |
+| POST | `/v1/projects/{id}/catalog/{name}/logs` | grant `logs` | `{"host_id","lines"?:1..1000 (default 200)}` | ProgramLogs |
+| POST | `/v1/projects/{id}/catalog/{name}/status` | any grant | `{"host_id"}` | ProgramStatus |
+| POST | `/v1/confirmations/{confirmation_id}` | the same user | `{}` | the result the original call would have returned |
+
+**Default grants** of a new entry: `role:admin` → run, stop, restart, logs; `role:viewer` → logs. The owner always has every action and cannot be listed as a subject.
+
+**Action checks, in order** (the first failure answers):
+1. The caller is a member of project `{id}` (`not_found`) with a grant for the action (`forbidden`).
+2. Host relation: the host is owned by `{id}`; or it is shared with `{id}` at level `deploy` **and** has an approval for (entry, host) with the entry's current `spec_hash`. Otherwise `not_found` if the host is not visible to the project at all, `forbidden` for a `metrics` share, and for a `deploy` share without a valid approval: `forbidden` with message "waiting for the host owner's approval" — this upserts a pending Approval (requested_by = caller) for the current `spec_hash`.
+3. Host policy: `Host.programs` is non-null, `enabled`, lists `run_as`, and allows shell when `shell=true` — otherwise `forbidden` with the reason. Host offline → `unavailable`.
+4. **Confirmation (D25):** if the caller's session kind is `api_delegated` (a call through MCP), run/stop/restart do nothing and answer **202** `{"confirmation_id","plan","expires_at"}`. `plan` is a sentence such as "will restart program tra-backend (pnpm run dev, as joe) on pi1". The id is 43-char base64url, stored hashed, single use, valid 5 min, bound to the user, route, entry `spec_hash` and body. `POST /v1/confirmations/{id}` re-runs checks 1–3 and then acts; an unknown, used, expired or foreign id → `not_found`; a changed `spec_hash` → `conflict`. Console sessions skip this step. logs and status never need it.
+5. **Idempotency:** run/stop/restart (and the confirm call) require `idempotency_key` (1–128 chars `[A-Za-z0-9._:-]`). The server stores (user, key) → request hash and response for 24 h. The same key with the same request returns the stored response without acting; with a different request → `conflict`.
+6. The task goes to the agent (agent-protocol v1.3) and waits up to 30 s; outcomes map as in v1.0.1 item 5, plus `task_reject` `policy_denied` → `forbidden` and agent `error_code` `policy_denied` → `forbidden`.
+
+**Audit:** `catalog.create`, `catalog.update` (old and new `spec_hash`), `catalog.delete`, `catalog.permissions`, `catalog.approve`, `catalog.approval_revoke`, `program.run`, `program.stop`, `program.restart` (host, entry, outcome; `via='mcp'` from delegated tokens), `program.confirmation_issued`. Reads (logs, status) are not audited.
+
+**Owned services:** a `services` report entry with `owner` (agent-protocol v1.3) is stored with `source='owned'`, `name` = the entry name, `catalog_entry` = the entry name, and `project_id` = the project whose slug the agent reports. If no such project/entry exists, the item is stored as `discovered` with its unit name.
+
+**Migration** 0007 adds the catalog, grants, approvals, confirmations and idempotency tables, `hosts.programs` (jsonb), and `services.catalog_entry`, with `deploybot_api` grants in the house style and a hand-run down script.
+
+### v1.6.1 amendments (2026-10-15, from the wave 1 review)
+
+1. **Confirm body:** `POST /v1/confirmations/{confirmation_id}` takes `{"idempotency_key"}` (rule 5 already required it; the table's `{}` was wrong).
+2. **Environment that changes what runs is refused** (`bad_request`, "this variable changes what the program runs"): keys starting `LD_` or `DYLD_`, and `NODE_OPTIONS`, `NODE_PATH`, `BASH_ENV`, `ENV`, `IFS`, `PYTHONPATH`, `PYTHONSTARTUP`, `PERL5OPT`, `PERL5LIB`, `RUBYOPT`, `RUBYLIB`. This applies to hoisted `KEY=value` words too.
+3. **Approvals show the environment:** `Approval` gains `"env":{KEY:value}` and `"exec","args"`, so the host owner sees everything that will run.
+4. **Idempotency is reserved before acting:** the server inserts the (user, key, request hash) row first; a second request with the same key while the first is still running → `conflict` ("request in progress"); after the outcome the stored response is filled in. A failed dispatch stores its error response too, so a retry with the same key replays it.

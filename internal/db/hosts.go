@@ -205,7 +205,7 @@ WHERE id = $1::uuid
 func (d *DB) GetHost(ctx context.Context, id uuid.UUID) (store.Host, error) {
 	return scanHost(d.pool.QueryRow(ctx, `
 SELECT id::text, project_id::text, name, node_type, os, arch, always_on, agent_version,
-       last_seen_at, enrolled_at, revoked_at
+       last_seen_at, enrolled_at, revoked_at, programs
 FROM app.hosts
 WHERE id = $1::uuid
 `, id.String()))
@@ -227,13 +227,13 @@ func (d *DB) ListHosts(ctx context.Context, projectID uuid.UUID, limit int, curs
 	rows, err := d.pool.Query(ctx, `
 WITH visible AS (
     SELECT h.id, h.project_id, h.name, h.node_type, h.os, h.arch, h.always_on,
-           h.agent_version, h.last_seen_at, h.enrolled_at, h.revoked_at,
+           h.agent_version, h.last_seen_at, h.enrolled_at, h.revoked_at, h.programs,
            0 AS rel_rank, NULL::text AS share_level
     FROM app.hosts h
     WHERE h.project_id = $1::uuid
     UNION ALL
     SELECT h.id, h.project_id, h.name, h.node_type, h.os, h.arch, h.always_on,
-           h.agent_version, h.last_seen_at, h.enrolled_at, h.revoked_at,
+           h.agent_version, h.last_seen_at, h.enrolled_at, h.revoked_at, h.programs,
            1 AS rel_rank, s.level AS share_level
     FROM app.host_shares s
     JOIN app.hosts h ON h.id = s.host_id
@@ -241,7 +241,7 @@ WITH visible AS (
       AND h.project_id <> $1::uuid
 )
 SELECT id::text, project_id::text, name, node_type, os, arch, always_on, agent_version,
-       last_seen_at, enrolled_at, revoked_at, rel_rank, share_level
+       last_seen_at, enrolled_at, revoked_at, programs, rel_rank, share_level
 FROM visible v
 WHERE (
     CAST($2 AS int) IS NULL
@@ -292,13 +292,17 @@ LIMIT $5
 func scanListedHost(row pgx.Row) (store.Host, error) {
 	var h store.Host
 	var id, projectID string
+	var programs []byte
 	var rank int
 	var level *string
 	if err := row.Scan(
 		&id, &projectID, &h.Name, &h.NodeType, &h.OS, &h.Arch, &h.AlwaysOn,
-		&h.AgentVersion, &h.LastSeenAt, &h.EnrolledAt, &h.RevokedAt, &rank, &level,
+		&h.AgentVersion, &h.LastSeenAt, &h.EnrolledAt, &h.RevokedAt, &programs, &rank, &level,
 	); err != nil {
 		return store.Host{}, mapErr(err)
+	}
+	if err := applyPrograms(&h, programs); err != nil {
+		return store.Host{}, err
 	}
 	var err error
 	if h.ID, err = parseID(id); err != nil {
@@ -368,18 +372,18 @@ func (d *DB) LookupCredential(ctx context.Context, hash []byte) (store.Credentia
 	var cred store.Credential
 	var host store.Host
 	var credID, hostID, projectID string
-	var stored []byte
+	var stored, programs []byte
 	err := d.pool.QueryRow(ctx, `
 SELECT c.id::text, c.host_id::text, c.credential_hash, c.revoked_at,
        h.project_id::text, h.name, h.node_type, h.os, h.arch, h.always_on,
-       h.agent_version, h.last_seen_at, h.enrolled_at, h.revoked_at
+       h.agent_version, h.last_seen_at, h.enrolled_at, h.revoked_at, h.programs
 FROM app.agent_credentials c
 JOIN app.hosts h ON h.id = c.host_id
 WHERE c.credential_hash = $1
 `, hash).Scan(
 		&credID, &hostID, &stored, &cred.RevokedAt,
 		&projectID, &host.Name, &host.NodeType, &host.OS, &host.Arch, &host.AlwaysOn,
-		&host.AgentVersion, &host.LastSeenAt, &host.EnrolledAt, &host.RevokedAt,
+		&host.AgentVersion, &host.LastSeenAt, &host.EnrolledAt, &host.RevokedAt, &programs,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		secret.Equal(hash, missHash)
@@ -402,6 +406,9 @@ WHERE c.credential_hash = $1
 	}
 	cred.Hash = stored
 	host.ID = cred.HostID
+	if err = applyPrograms(&host, programs); err != nil {
+		return store.Credential{}, store.Host{}, err
+	}
 	return cred, host, nil
 }
 
@@ -431,11 +438,15 @@ func scanJoin(row pgx.Row) (store.JoinToken, error) {
 func scanHost(row pgx.Row) (store.Host, error) {
 	var h store.Host
 	var id, projectID string
+	var programs []byte
 	if err := row.Scan(
 		&id, &projectID, &h.Name, &h.NodeType, &h.OS, &h.Arch, &h.AlwaysOn,
-		&h.AgentVersion, &h.LastSeenAt, &h.EnrolledAt, &h.RevokedAt,
+		&h.AgentVersion, &h.LastSeenAt, &h.EnrolledAt, &h.RevokedAt, &programs,
 	); err != nil {
 		return store.Host{}, mapErr(err)
+	}
+	if err := applyPrograms(&h, programs); err != nil {
+		return store.Host{}, err
 	}
 	var err error
 	if h.ID, err = parseID(id); err != nil {

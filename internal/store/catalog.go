@@ -1,0 +1,148 @@
+package store
+
+import (
+	"regexp"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// serviceNameRe is the agent service name rule. A fallback unit name that
+// fails it is not stored as the service name.
+var serviceNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+
+// IdempotencyTTL is how long a run, stop, or restart response is replayed.
+const IdempotencyTTL = 24 * time.Hour
+
+// ConfirmationTTL is how long a delegated confirmation stays usable.
+const ConfirmationTTL = 5 * time.Minute
+
+// HostPrograms is the agent hello programs object. A nil pointer on Host
+// means the agent reported no policy file.
+type HostPrograms struct {
+	Enabled    bool     `json:"enabled"`
+	RunAs      []string `json:"run_as"`
+	AllowShell bool     `json:"allow_shell"`
+	PolicyHash string   `json:"policy_hash"`
+}
+
+// ProgramSpec is the stored program document. Env and Args are never nil
+// after a write.
+type ProgramSpec struct {
+	Dir     string            `json:"dir"`
+	Exec    string            `json:"exec"`
+	Args    []string          `json:"args"`
+	Shell   bool              `json:"shell"`
+	RunAs   string            `json:"run_as"`
+	Env     map[string]string `json:"env"`
+	Port    *int              `json:"port"`
+	Restart string            `json:"restart"`
+}
+
+// CatalogEntry is one program the project may run. MyActions is filled by
+// the API for the caller; the store leaves it nil.
+type CatalogEntry struct {
+	ID             uuid.UUID   `json:"id"`
+	ProjectID      uuid.UUID   `json:"project_id"`
+	Name           string      `json:"name"`
+	Kind           string      `json:"kind"`
+	Spec           ProgramSpec `json:"spec"`
+	SpecHash       string      `json:"spec_hash"`
+	CommandDisplay string      `json:"command_display"`
+	CreatedBy      uuid.UUID   `json:"created_by"`
+	CreatedAt      time.Time   `json:"created_at"`
+	UpdatedAt      time.Time   `json:"updated_at"`
+	MyActions      []string    `json:"my_actions"`
+}
+
+// CatalogWrite is a new or replaced program entry.
+type CatalogWrite struct {
+	Name           string
+	Spec           ProgramSpec
+	SpecHash       string
+	CommandDisplay string
+	Actor          uuid.UUID
+	At             time.Time
+}
+
+// CatalogGrant is one subject allowed to act on an entry.
+// Subject is role:admin, role:viewer, or user:<uuid>.
+type CatalogGrant struct {
+	Subject string   `json:"subject"`
+	Actions []string `json:"actions"`
+}
+
+// CatalogApproval is a pending or approved run of one entry on one host.
+type CatalogApproval struct {
+	EntryID        uuid.UUID         `json:"entry_id"`
+	EntryName      string            `json:"entry_name"`
+	ProjectID      uuid.UUID         `json:"project_id"`
+	ProjectName    string            `json:"project_name"`
+	HostID         uuid.UUID         `json:"host_id"`
+	SpecHash       string            `json:"spec_hash"`
+	CommandDisplay string            `json:"command_display"`
+	Dir            string            `json:"dir"`
+	Exec           string            `json:"exec"`
+	Args           []string          `json:"args"`
+	Env            map[string]string `json:"env"`
+	RunAs          string            `json:"run_as"`
+	Shell          bool              `json:"shell"`
+	Status         string            `json:"status"`
+	RequestedBy    uuid.UUID         `json:"requested_by"`
+	RequestedAt    time.Time         `json:"requested_at"`
+	ApprovedBy     *uuid.UUID        `json:"approved_by"`
+	ApprovedAt     *time.Time        `json:"approved_at"`
+}
+
+// CatalogConfirmation is a single-use delegated action, stored by token hash.
+type CatalogConfirmation struct {
+	UserID         uuid.UUID
+	ProjectID      uuid.UUID
+	EntryID        uuid.UUID
+	EntryName      string
+	HostID         uuid.UUID
+	Action         string
+	SpecHash       string
+	IdempotencyKey string
+	RequestHash    []byte
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
+	UsedAt         *time.Time
+}
+
+// IdempotencyRecord is one stored run, stop, or restart response.
+// Body is the full JSON envelope. Pending means the response is not stored yet.
+type IdempotencyRecord struct {
+	RequestHash []byte
+	Status      int
+	Body        []byte
+	CreatedAt   time.Time
+	Pending     bool
+}
+
+// DiscoveredOwner is the agent-protocol v1.3 owner object.
+type DiscoveredOwner struct {
+	Kind    string
+	Project string
+	Entry   string
+}
+
+// PlaceDiscovered decides the service row for one reported item.
+// lookup reports the project id when that slug has a live catalog entry
+// of the given name. A matching program owner is stored as source owned.
+// Anything else with an owner object is stored as discovered under the
+// unit name. A report with no owner keeps the reported name.
+func PlaceDiscovered(item Discovered, hostProject uuid.UUID, lookup func(slug, entry string) (uuid.UUID, bool)) (name, source string, projectID uuid.UUID, catalog *string) {
+	if item.Owner == nil || item.Owner.Kind != "program" || item.Owner.Project == "" || item.Owner.Entry == "" {
+		return item.Name, "discovered", hostProject, nil
+	}
+	if id, ok := lookup(item.Owner.Project, item.Owner.Entry); ok {
+		ce := item.Owner.Entry
+		return item.Owner.Entry, "owned", id, &ce
+	}
+	name = item.Name
+	if item.SystemdUnit != nil && serviceNameRe.MatchString(*item.SystemdUnit) {
+		name = *item.SystemdUnit
+	}
+	return name, "discovered", hostProject, nil
+}

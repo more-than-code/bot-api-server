@@ -115,7 +115,7 @@ func (m *Mem) GetHost(_ context.Context, id uuid.UUID) (store.Host, error) {
 	if !ok {
 		return store.Host{}, store.ErrNotFound
 	}
-	return h, nil
+	return cloneHost(h), nil
 }
 
 func (m *Mem) ListHosts(_ context.Context, projectID uuid.UUID, limit int, cursor *store.Cursor) ([]store.Host, *store.Cursor, error) {
@@ -155,7 +155,7 @@ func (m *Mem) visibleHostsLocked(projectID uuid.UUID) []store.Host {
 		}
 		h.Relation = "owner"
 		h.ShareLevel = nil
-		items = append(items, h)
+		items = append(items, cloneHost(h))
 	}
 	for _, sh := range m.shares {
 		if sh.ProjectID != projectID {
@@ -168,7 +168,7 @@ func (m *Mem) visibleHostsLocked(projectID uuid.UUID) []store.Host {
 		h.Relation = "shared"
 		level := sh.Level
 		h.ShareLevel = &level
-		items = append(items, h)
+		items = append(items, cloneHost(h))
 	}
 	sort.Slice(items, func(i, j int) bool {
 		ri, rj := 0, 0
@@ -261,5 +261,5 @@ func (m *Mem) LookupCredential(_ context.Context, hash []byte) (store.Credential
 	if !ok {
 		return store.Credential{}, store.Host{}, store.ErrUnauthorized
 	}
-	return cred.Credential, host, nil
+	return cred.Credential, cloneHost(host), nil
 }

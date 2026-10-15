@@ -21,6 +21,7 @@ type frame struct {
 	HostID       string          `json:"host_id"`
 	CredentialID string          `json:"credential_id"`
 	Services     json.RawMessage `json:"services"`
+	Programs     json.RawMessage `json:"programs"`
 	BatchID      string          `json:"batch_id"`
 	Samples      json.RawMessage `json:"samples"`
 	TaskID       string          `json:"task_id"`

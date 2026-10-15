@@ -172,3 +172,79 @@ Supersedes the "whenever its discovered set changes (checked every 60 s)" senten
 1. The agent sends `services` when its discovered set changes (checked every 60 s), **and also at least every 300 s while connected even if the set is unchanged**. A changed set is sent at once and restarts the 300 s timer.
 2. The server treats every `services` message as proof that the listed services are present at that time and updates their `last_seen_at`. A service missing from the message is not changed; its `last_seen_at` stays at the last time it was reported.
 3. No new fields. Servers that predate v1.2 already upsert `last_seen_at` on every message.
+
+## v1.3 programs (2026-10-15, approved spec `docs/spec-project-catalog.md`, wave 1; additive)
+
+### Host policy
+
+`/etc/bot-agent/runner.toml`, written by the host's administrator, never by deploybot:
+
+```toml
+enabled = true
+run_as = ["joe"]                  # never root, never uid < 1000
+dirs = ["/home/joe/workspace"]    # realpath of a program dir must be inside one of these
+exec_allow = ["/usr/bin/node", "/usr/bin/npm", "/usr/bin/pnpm"]
+allow_shell = false
+max_programs = 20
+```
+
+- Unknown keys, a file not owned by root, or a file writable by group or others → the policy is **invalid** and treated as `enabled = false` (the agent logs why, without the file content).
+- The agent reads it at start-up only. A policy change needs an agent restart.
+- A `run_as` entry that is `root`, does not exist, or has uid < 1000 is dropped (logged).
+
+### Hello
+
+`capabilities` gains `"programs"` when the policy is valid and `enabled`. `hello` gains `"programs": {"enabled":bool,"run_as":[string],"allow_shell":bool,"policy_hash":"<hex sha256 of the file bytes>"}` whenever the file exists (invalid → `enabled:false`, empty `run_as`); it is absent when there is no file. Paths, `dirs` and `exec_allow` are never sent.
+
+### Task kinds
+
+`kind` may also be `program_start`, `program_stop`, `program_restart`, `program_status`, `program_logs`. `service` is null. Specs (closed key sets):
+
+- `program_start`: `{"project":"<slug>","entry":"<name>","dir","exec","args":[...],"shell":bool,"run_as","env":{...},"restart":"on-failure"|"no"}`
+- `program_stop`, `program_restart`, `program_status`: `{"project","entry"}`
+- `program_logs`: `{"project","entry","lines":1..1000}`
+
+Additional agent checks, after the v1.0 checks 1–4 (the first failure gives `task_reject` with that code; nothing runs):
+5. The policy is valid and `enabled` (`policy_denied`).
+6. For `program_start`: the same field rules as api-v1 v1.6 (`bad_spec`); `run_as` is in the policy; `shell=true` only if `allow_shell`; `dir` resolves (realpath, symlinks followed) inside a `dirs` entry; `exec` resolves as below (`policy_denied` for any of these).
+7. Starting would exceed `max_programs` running deploybot units (`policy_denied`).
+
+**exec resolution:** a bare name resolves to `<dir>/node_modules/.bin/<name>` if that exists and its realpath is inside `dir`, else to the `exec_allow` entry with that basename. An absolute path must equal an `exec_allow` entry or have a realpath inside `<dir>/node_modules/.bin/`'s target tree within `dir`. Shell mode always uses `/bin/sh`, which must be in `exec_allow`.
+
+**Unit:** `deploybot-<project>-<entry>.service`, a system unit. The agent never edits units itself; it asks the helper.
+
+**Results** (`task_result.payload`):
+- start, stop, restart, status → `ProgramStatus {"unit","active_state","sub_state","main_pid","started_at","ports"}`. start and restart succeed once systemd reports the unit `active` (or `activating` after 10 s); a unit that fails within 10 s → `failed`, `error_code` `start_failed`, payload = ProgramStatus plus `"lines"`: the last 50 log lines (redacted). stop of a unit that does not exist succeeds.
+- logs → `ProgramLogs {"unit","lines","truncated"}`: newest `lines` journal lines of the unit, each redacted with the v1.0.1 regex and truncated to 2048 chars, total ≤ 64 KiB (`truncated` when cut).
+- A helper refusal → `failed` with `error_code` `policy_denied` and no payload detail beyond a fixed reason code.
+
+### Owned services
+
+`Discovered` gains `"owner": {"kind":"program","project":"<slug>","entry":"<name>"} | null`. For each running deploybot unit the agent asks the helper for its listening sockets (by cgroup) and reports one Discovered entry with `name` = the entry, `kind` = `systemd`, `systemd_unit` = the unit name, `systemd_scope` = `system`, the exact `ports`, and `owner` set. Those sockets are not also reported as unmapped listeners. Old servers ignore `owner`.
+
+### Local helper (not on the wire; between bot-agent and root)
+
+`/usr/local/libexec/bot-agent-runner`, root:root 0755, built from the bot-agent repo. The only privilege bot-agent has is one sudoers line:
+
+```
+bot-agent ALL=(root) NOPASSWD: /usr/local/libexec/bot-agent-runner
+```
+
+- Invoked as `sudo -n /usr/local/libexec/bot-agent-runner <verb>` with one JSON object on stdin (≤ 64 KiB) and one JSON object on stdout. Verbs: `start`, `stop`, `restart`, `status`, `logs`, `sockets`, `list`. Anything else → refusal.
+- The helper re-reads and re-validates the policy and **every** field on every call, exactly as checks 5–7 above, independently of the agent. It acts only on units whose name matches `^deploybot-[a-z0-9-]{1,64}-[a-z0-9-]{1,48}\.service$` and that it created (its unit files carry `X-Deploybot-Project=` and `X-Deploybot-Entry=`).
+- **start** writes `/run/systemd/system/<unit>` (root 0644) with: `User=<run_as>`, `Group=<run_as's primary group>`, `WorkingDirectory=<realpath dir>`, `ExecStart=` the resolved exec and args, each argument quoted for systemd (`%` doubled, `$` doubled, quotes and backslashes escaped), `Environment=HOME=<run_as home>` and `Environment=PATH=<dir>/node_modules/.bin:/usr/local/bin:/usr/bin:/bin`, `EnvironmentFile=/run/bot-agent/env/<unit>.env` (root 0600, the plain env), `Restart=`, `NoNewPrivileges=yes`, `PrivateTmp=yes`, `ProtectSystem=full`, `ProtectHome=read-only`, `ReadWritePaths=<realpath dir>`, `RestrictSUIDSGID=yes`, `LockPersonality=yes`; then `systemctl daemon-reload` and `systemctl restart <unit>`. Units are transient across reboot (`/run`).
+- **stop** stops the unit and removes its unit and env files. **logs** runs `journalctl -u <unit> -n <lines> -o cat --no-pager`. **sockets** reads the unit's cgroup (`/sys/fs/cgroup/system.slice/<unit>/cgroup.procs`) and maps its pids' socket inodes to `/proc/net/tcp{,6}` listeners. **list** returns the deploybot units with their project and entry.
+- The helper never runs a shell except `/bin/sh -c <line>` for an entry in shell mode on a policy with `allow_shell = true`, and never logs env values.
+
+### v1.3.1 amendments (2026-10-15, from the wave 1 review; helper transport approved by Joe)
+
+1. **Helper transport (replaces sudo and the sudoers line).** The agent's own unit (`NoNewPrivileges=yes`, empty `CapabilityBoundingSet=`, `ProtectSystem=strict`, `ProtectHome=yes`) makes a sudo child powerless, and that sandbox stays. The helper is a root **socket-activated** service instead:
+   - `bot-agent-runner.socket`: `ListenStream=/run/bot-agent-runner.sock`, `SocketUser=root`, `SocketGroup=bot-agent`, `SocketMode=0660`, `Accept=yes`.
+   - `bot-agent-runner@.service`: `User=root`, `StandardInput=socket`, `StandardOutput=socket`, `ExecStart=/usr/local/libexec/bot-agent-runner serve-conn`, `RuntimeMaxSec=60`.
+   - One request per connection: `{"verb":"start|stop|restart|status|logs|sockets|list","request":{...}}` (≤ 64 KiB, newline-terminated), one JSON response, then close.
+   - The helper checks the peer with `SO_PEERCRED`: the uid must be the `bot-agent` account's uid, else a refusal. The socket mode also limits callers to root and group `bot-agent`.
+   - There is **no sudoers line**. Rollback: `systemctl disable --now bot-agent-runner.socket`, or `enabled = false`.
+2. **Who checks paths.** The agent cannot see `/home`, so it performs only the policy and lexical checks (5, 7, and the non-filesystem parts of 6: field rules, `run_as` listed, shell gate, exec name syntax). The **helper** performs every filesystem check (realpath of `dir`, exec resolution) and refuses with `policy_denied`; the agent returns that as `task_result` `failed` / `policy_denied`.
+3. **Environment denylist:** the agent and the helper both refuse the api-v1 v1.6.1 item 2 keys (`bad_spec` in the agent, `policy_denied` in the helper).
+4. **Program unit hardening adds** `PrivateDevices=yes`, `ProtectKernelTunables=yes`, `ProtectKernelModules=yes`, `ProtectControlGroups=yes`.
+5. **start/restart truth:** a non-zero `systemctl` exit is a failure (`start_failed`), and success needs the unit's `ActiveEnterTimestampMonotonic` to be newer than before the call.

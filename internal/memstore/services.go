@@ -55,12 +55,14 @@ func (m *Mem) UpsertDiscovered(_ context.Context, hostID uuid.UUID, items []stor
 	if _, ok := m.hosts[hostID]; !ok {
 		return store.ErrNotFound
 	}
+	hostProject := m.hosts[hostID].ProjectID
 	for _, item := range items {
+		name, source, projectID, catalogEntry := store.PlaceDiscovered(item, hostProject, m.lookupCatalogLocked)
 		var found uuid.UUID
 		var existing store.Service
 		ok := false
 		for id, s := range m.services {
-			if s.HostID == hostID && s.Name == item.Name {
+			if s.HostID == hostID && s.Name == name {
 				found = id
 				existing = s
 				ok = true
@@ -72,16 +74,17 @@ func (m *Mem) UpsertDiscovered(_ context.Context, hostID uuid.UUID, items []stor
 			m.services[id] = store.Service{
 				ID:            id,
 				HostID:        hostID,
-				ProjectID:     m.hosts[hostID].ProjectID,
-				Name:          item.Name,
-				Source:        "discovered",
+				ProjectID:     projectID,
+				Name:          name,
+				Source:        source,
 				Kind:          item.Kind,
 				Ports:         copyInts(item.Ports),
-				SystemdUnit:   item.SystemdUnit,
-				SystemdScope:  item.SystemdScope,
-				ContainerName: item.ContainerName,
-				ProcessName:   item.ProcessName,
+				SystemdUnit:   cloneString(item.SystemdUnit),
+				SystemdScope:  cloneString(item.SystemdScope),
+				ContainerName: cloneString(item.ContainerName),
+				ProcessName:   cloneString(item.ProcessName),
 				OwnerUser:     store.NormalizeOwnerUser(item.OwnerUser),
+				CatalogEntry:  cloneString(catalogEntry),
 				FirstSeenAt:   at,
 				LastSeenAt:    at,
 			}
@@ -89,13 +92,18 @@ func (m *Mem) UpsertDiscovered(_ context.Context, hostID uuid.UUID, items []stor
 		}
 		existing.LastSeenAt = at
 		existing.OwnerUser = store.NormalizeOwnerUser(item.OwnerUser)
-		if existing.Source == "discovered" {
+		if existing.Source != "declared" && source == "owned" {
+			existing.Source = "owned"
+			existing.ProjectID = projectID
+			existing.CatalogEntry = cloneString(catalogEntry)
+		}
+		if existing.Source != "declared" {
 			existing.Kind = item.Kind
 			existing.Ports = copyInts(item.Ports)
-			existing.SystemdUnit = item.SystemdUnit
-			existing.SystemdScope = item.SystemdScope
-			existing.ContainerName = item.ContainerName
-			existing.ProcessName = item.ProcessName
+			existing.SystemdUnit = cloneString(item.SystemdUnit)
+			existing.SystemdScope = cloneString(item.SystemdScope)
+			existing.ContainerName = cloneString(item.ContainerName)
+			existing.ProcessName = cloneString(item.ProcessName)
 		}
 		m.services[found] = existing
 	}
@@ -296,6 +304,7 @@ func (m *Mem) serviceCopyLocked(svc store.Service, now time.Time) store.Service 
 	svc.SystemdScope = cloneString(svc.SystemdScope)
 	svc.ContainerName = cloneString(svc.ContainerName)
 	svc.ProcessName = cloneString(svc.ProcessName)
+	svc.CatalogEntry = cloneString(svc.CatalogEntry)
 	return svc
 }
 

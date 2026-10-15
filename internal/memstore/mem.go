@@ -61,6 +61,13 @@ type Mem struct {
 	devices      map[uuid.UUID]store.Device
 	deviceByHash map[string]uuid.UUID
 	deviceByCode map[string]uuid.UUID
+
+	entries       map[uuid.UUID]store.CatalogEntry
+	entryByName   map[string]uuid.UUID
+	grants        map[uuid.UUID][]store.CatalogGrant
+	approvals     map[string]store.CatalogApproval
+	confirmations map[string]confirmationRec
+	idempotency   map[string]store.IdempotencyRecord
 }
 
 type sessionRec struct {
@@ -127,6 +134,12 @@ func New() *Mem {
 		devices:       map[uuid.UUID]store.Device{},
 		deviceByHash:  map[string]uuid.UUID{},
 		deviceByCode:  map[string]uuid.UUID{},
+		entries:       map[uuid.UUID]store.CatalogEntry{},
+		entryByName:   map[string]uuid.UUID{},
+		grants:        map[uuid.UUID][]store.CatalogGrant{},
+		approvals:     map[string]store.CatalogApproval{},
+		confirmations: map[string]confirmationRec{},
+		idempotency:   map[string]store.IdempotencyRecord{},
 	}
 }
 

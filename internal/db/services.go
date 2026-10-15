@@ -16,7 +16,7 @@ import (
 const serviceColumns = `
 s.id::text, s.host_id::text, s.project_id::text, s.name, s.source, s.kind, s.ports,
 s.systemd_unit, s.systemd_scope, s.container_name, s.process_match,
-s.display_name, s.owner_user,
+s.display_name, s.owner_user, s.catalog_entry,
 s.first_seen_at, s.last_seen_at,
 hr.time, hr.result, hr.latency_ms`
 
@@ -285,30 +285,53 @@ func (d *DB) UpsertDiscovered(ctx context.Context, hostID uuid.UUID, items []sto
 		return mapErr(err)
 	}
 	defer tx.Rollback(ctx)
+	var hostProject string
+	if err := tx.QueryRow(ctx, `SELECT project_id::text FROM app.hosts WHERE id = $1::uuid`, hostID.String()).Scan(&hostProject); err != nil {
+		return mapErr(err)
+	}
+	ownerProject, err := parseID(hostProject)
+	if err != nil {
+		return err
+	}
 	for _, item := range items {
+		name, source, projectID, catalogEntry := store.PlaceDiscovered(item, ownerProject, func(slug, entry string) (uuid.UUID, bool) {
+			return d.catalogLookup(ctx, tx, slug, entry)
+		})
 		if err := exec(ctx, tx, `
 INSERT INTO app.services (
     id, host_id, name, source, kind, ports,
     systemd_unit, systemd_scope, container_name, process_match,
-    first_seen_at, last_seen_at, project_id, owner_user
+    first_seen_at, last_seen_at, project_id, owner_user, catalog_entry
+) VALUES (
+    $1::uuid, $2::uuid, $3, $4, $5, $6::integer[],
+    $7, $8, $9, $10,
+    $11, $11, $12::uuid, $13, $14
 )
-SELECT $1::uuid, h.id, $3, 'discovered', $4, $5::integer[],
-    $6, $7, $8, $9,
-    $10, $10, h.project_id, $11
-FROM app.hosts h
-WHERE h.id = $2::uuid
 ON CONFLICT (host_id, name) DO UPDATE SET
     last_seen_at = EXCLUDED.last_seen_at,
     owner_user = EXCLUDED.owner_user,
-    kind = CASE WHEN app.services.source = 'discovered' THEN EXCLUDED.kind ELSE app.services.kind END,
-    ports = CASE WHEN app.services.source = 'discovered' THEN EXCLUDED.ports ELSE app.services.ports END,
-    systemd_unit = CASE WHEN app.services.source = 'discovered' THEN EXCLUDED.systemd_unit ELSE app.services.systemd_unit END,
-    systemd_scope = CASE WHEN app.services.source = 'discovered' THEN EXCLUDED.systemd_scope ELSE app.services.systemd_scope END,
-    container_name = CASE WHEN app.services.source = 'discovered' THEN EXCLUDED.container_name ELSE app.services.container_name END,
-    process_match = CASE WHEN app.services.source = 'discovered' THEN EXCLUDED.process_match ELSE app.services.process_match END
-`, uuid.New().String(), hostID.String(), item.Name, item.Kind, intsTo32(item.Ports),
+    source = CASE
+        WHEN app.services.source = 'declared' THEN app.services.source
+        WHEN EXCLUDED.source = 'owned' THEN 'owned'
+        ELSE app.services.source
+    END,
+    project_id = CASE
+        WHEN app.services.source <> 'declared' AND EXCLUDED.source = 'owned' THEN EXCLUDED.project_id
+        ELSE app.services.project_id
+    END,
+    catalog_entry = CASE
+        WHEN app.services.source <> 'declared' AND EXCLUDED.source = 'owned' THEN EXCLUDED.catalog_entry
+        ELSE app.services.catalog_entry
+    END,
+    kind = CASE WHEN app.services.source <> 'declared' THEN EXCLUDED.kind ELSE app.services.kind END,
+    ports = CASE WHEN app.services.source <> 'declared' THEN EXCLUDED.ports ELSE app.services.ports END,
+    systemd_unit = CASE WHEN app.services.source <> 'declared' THEN EXCLUDED.systemd_unit ELSE app.services.systemd_unit END,
+    systemd_scope = CASE WHEN app.services.source <> 'declared' THEN EXCLUDED.systemd_scope ELSE app.services.systemd_scope END,
+    container_name = CASE WHEN app.services.source <> 'declared' THEN EXCLUDED.container_name ELSE app.services.container_name END,
+    process_match = CASE WHEN app.services.source <> 'declared' THEN EXCLUDED.process_match ELSE app.services.process_match END
+`, uuid.New().String(), hostID.String(), name, source, item.Kind, intsTo32(item.Ports),
 			optString(item.SystemdUnit), optString(item.SystemdScope), optString(item.ContainerName), optString(item.ProcessName),
-			at, optString(store.NormalizeOwnerUser(item.OwnerUser))); err != nil {
+			at, projectID.String(), optString(store.NormalizeOwnerUser(item.OwnerUser)), optString(catalogEntry)); err != nil {
 			return mapErr(err)
 		}
 	}
@@ -451,7 +474,7 @@ func scanServiceInto(row pgx.Row, now time.Time, extra *projectServiceExtra) (st
 	dest := []any{
 		&id, &hostID, &projectID, &s.Name, &s.Source, &s.Kind, &ports,
 		&s.SystemdUnit, &s.SystemdScope, &s.ContainerName, &s.ProcessName,
-		&s.DisplayName, &s.OwnerUser,
+		&s.DisplayName, &s.OwnerUser, &s.CatalogEntry,
 		&s.FirstSeenAt, &s.LastSeenAt,
 		&checked, &result, &latency,
 	}

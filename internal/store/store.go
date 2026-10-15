@@ -16,10 +16,12 @@ var (
 	ErrNotFound           = errors.New("not found")
 	ErrUnknownMeasurement = errors.New("unknown measurement")
 	ErrConflict           = errors.New("conflict")
-	ErrUnauthorized       = errors.New("unauthorized")
-	ErrOwner              = errors.New("owner")
-	ErrExpired            = errors.New("expired")
-	ErrState              = errors.New("invalid state")
+	// ErrPending is an idempotency key that was claimed and has no response yet.
+	ErrPending      = errors.New("request in progress")
+	ErrUnauthorized = errors.New("unauthorized")
+	ErrOwner        = errors.New("owner")
+	ErrExpired      = errors.New("expired")
+	ErrState        = errors.New("invalid state")
 	// ErrInvalid is a rejected write, such as sharing a host with its owner.
 	ErrInvalid = errors.New("invalid")
 	// ErrReuse is a second redemption of an authorization code or a rotated refresh token.
@@ -171,6 +173,9 @@ type Host struct {
 	// ShareLevel is set when Relation is "shared". JSON null when the host
 	// is owned by the project (or the caller) being described.
 	ShareLevel *string `json:"share_level"`
+	// Programs is the last hello programs object. Nil when the agent has
+	// not reported a policy file.
+	Programs *HostPrograms `json:"programs"`
 }
 
 // HostShare is one project a host is shared with.
@@ -231,6 +236,7 @@ type Service struct {
 	ProjectID     uuid.UUID `json:"project_id"`
 	DisplayName   *string   `json:"display_name"`
 	OwnerUser     *string   `json:"owner_user"`
+	CatalogEntry  *string   `json:"catalog_entry"`
 	FirstSeenAt   time.Time `json:"first_seen_at"`
 	LastSeenAt    time.Time `json:"last_seen_at"`
 	Health        Health    `json:"health"`
@@ -284,6 +290,9 @@ type Discovered struct {
 	// OwnerUser is the account that owns the listening socket.
 	// The store drops values that are not printable or are longer than 64 bytes.
 	OwnerUser *string
+	// Owner is the agent-protocol v1.3 catalog owner. Nil when the agent
+	// did not set one.
+	Owner *DiscoveredOwner
 }
 
 type HealthCheck struct {
@@ -573,4 +582,46 @@ type Store interface {
 	RevokeTokenFamily(ctx context.Context, tokenHash []byte, at time.Time, allowClient string, confidential bool) (RevokeResult, error)
 
 	CreateBoundSession(ctx context.Context, in BoundSession) (Session, error)
+
+	CreateCatalogEntry(ctx context.Context, projectID uuid.UUID, in CatalogWrite) (CatalogEntry, error)
+	// ReplaceCatalogEntry updates the spec. A changed spec_hash deletes every
+	// host approval of the entry. oldHash is the hash before the write.
+	ReplaceCatalogEntry(ctx context.Context, projectID uuid.UUID, name string, in CatalogWrite) (oldHash string, entry CatalogEntry, err error)
+	// DeleteCatalogEntry removes the entry. Grants, approvals, and confirmations go with it.
+	DeleteCatalogEntry(ctx context.Context, projectID uuid.UUID, name string) (CatalogEntry, error)
+	GetCatalogEntry(ctx context.Context, projectID uuid.UUID, name string) (CatalogEntry, error)
+	ListCatalogEntries(ctx context.Context, projectID uuid.UUID) ([]CatalogEntry, error)
+	ListCatalogGrants(ctx context.Context, entryID uuid.UUID) ([]CatalogGrant, error)
+	ReplaceCatalogGrants(ctx context.Context, projectID uuid.UUID, name string, grants []CatalogGrant) error
+
+	// HostProjectRelation is "owner", "deploy", "metrics", or "" when the
+	// host exists and the project cannot see it. A missing host is ErrNotFound.
+	HostProjectRelation(ctx context.Context, projectID, hostID uuid.UUID) (string, error)
+	ListCatalogApprovals(ctx context.Context, hostID uuid.UUID) ([]CatalogApproval, error)
+	// ApproveCatalog records an approval for the entry's current spec.
+	// A hash that is not current is ErrConflict. A missing entry or host is ErrNotFound.
+	ApproveCatalog(ctx context.Context, hostID, entryID uuid.UUID, specHash string, approver uuid.UUID, at time.Time) (CatalogApproval, error)
+	DeleteCatalogApproval(ctx context.Context, hostID, entryID uuid.UUID) error
+	// UpsertPendingApproval stores a pending row for specHash.
+	// An approved row for that same hash is left as it is.
+	// A pending row, or an approved row for a different hash, becomes pending
+	// with requested_by = userID.
+	UpsertPendingApproval(ctx context.Context, entryID, hostID uuid.UUID, specHash string, userID uuid.UUID, at time.Time) error
+
+	PutConfirmation(ctx context.Context, hash []byte, c CatalogConfirmation) error
+	GetConfirmation(ctx context.Context, hash []byte) (CatalogConfirmation, error)
+	// MarkConfirmationUsed sets used_at when the row is unused, unexpired, and owned by userID.
+	// Anything else is ErrNotFound.
+	MarkConfirmationUsed(ctx context.Context, hash []byte, userID uuid.UUID, at time.Time) error
+	// GetIdempotency returns ErrNotFound when the key is missing or older than IdempotencyTTL.
+	// A stale row is deleted. A claimed row with no response has Pending set.
+	GetIdempotency(ctx context.Context, userID uuid.UUID, key string, at time.Time) (IdempotencyRecord, error)
+	// ClaimIdempotency inserts (user, key, hash) before the handler acts.
+	// claimed is true only for the insert. A finished row with the same hash
+	// is returned with claimed false. A different finished hash is ErrConflict.
+	// A row with no response yet is ErrPending. A stale row is replaced.
+	ClaimIdempotency(ctx context.Context, userID uuid.UUID, key string, hash []byte, at time.Time) (IdempotencyRecord, bool, error)
+	PutIdempotency(ctx context.Context, userID uuid.UUID, key string, rec IdempotencyRecord) error
+	ReplaceIdempotencyResponse(ctx context.Context, userID uuid.UUID, key string, status int, body []byte) error
+	SetHostPrograms(ctx context.Context, hostID uuid.UUID, programs *HostPrograms) error
 }

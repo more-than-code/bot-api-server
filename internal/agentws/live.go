@@ -37,6 +37,11 @@ func (h *Hub) Snapshot(ctx context.Context, host store.Host) (LiveResult, error)
 	return h.live(ctx, host, "host_snapshot", nil, map[string]any{})
 }
 
+// Program asks a live host to run a v1.3 program task. service is null.
+func (h *Hub) Program(ctx context.Context, host store.Host, kind string, spec map[string]any) (LiveResult, error) {
+	return h.live(ctx, host, kind, nil, spec)
+}
+
 // Probe asks a live host to run probe_health for svc.
 func (h *Hub) Probe(ctx context.Context, host store.Host, svc store.Service, spec map[string]any) (LiveResult, error) {
 	name := svc.Name
@@ -149,7 +154,7 @@ func (h *Hub) onTaskResult(ac *agentConn, f frame) error {
 	case "timed_out":
 		out.err = &CallError{Code: "timeout", Msg: "timed out"}
 	case "failed":
-		out.err = &CallError{Code: "error", Msg: jsonString(f.ErrorCode), Payload: taskPayload(f.Payload)}
+		out.err = failedTask(jsonString(f.ErrorCode), taskPayload(f.Payload))
 	default:
 		out.err = &CallError{Code: "error", Msg: jsonString(f.ErrorCode), Payload: taskPayload(f.Payload)}
 	}
@@ -182,9 +187,18 @@ func rejectCode(code string) (string, string) {
 		return "bad_request", "bad request"
 	case "busy":
 		return "unavailable", "host unavailable"
+	case "policy_denied":
+		return "forbidden", "forbidden"
 	default:
 		return "error", "internal error"
 	}
+}
+
+func failedTask(code string, payload json.RawMessage) *CallError {
+	if code == "policy_denied" {
+		return &CallError{Code: "forbidden", Msg: "forbidden"}
+	}
+	return &CallError{Code: "error", Msg: code, Payload: payload}
 }
 
 func taskPayload(raw json.RawMessage) json.RawMessage {

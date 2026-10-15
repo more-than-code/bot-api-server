@@ -50,6 +50,11 @@ func TestIntegration(t *testing.T) {
 	assertOAuthSchema(t, d, ctx)
 	if _, err := d.pool.Exec(ctx, `
 TRUNCATE TABLE
+    app.catalog_confirmations,
+    app.catalog_host_approvals,
+    app.catalog_grants,
+    app.idempotency_keys,
+    app.catalog_entries,
     metrics.ingest_batches,
     metrics.host_cpu,
     metrics.host_mem,
@@ -103,7 +108,7 @@ TRUNCATE TABLE
 		t.Fatalf("migrations: %v", err)
 	}
 	rows.Close()
-	if !names["0001_app.sql"] || !names["0002_metrics.sql"] || !names["0003_shared_hosts.sql"] || !names["0004_service_names.sql"] || !names["0005_mcp_oauth.sql"] || !names["0006_invites.sql"] || names["0003_shared_hosts.down.sql"] || names["0004_service_names.down.sql"] || names["0005_mcp_oauth.down.sql"] || names["0006_invites.down.sql"] {
+	if !names["0001_app.sql"] || !names["0002_metrics.sql"] || !names["0003_shared_hosts.sql"] || !names["0004_service_names.sql"] || !names["0005_mcp_oauth.sql"] || !names["0006_invites.sql"] || !names["0007_catalog.sql"] || names["0003_shared_hosts.down.sql"] || names["0004_service_names.down.sql"] || names["0005_mcp_oauth.down.sql"] || names["0006_invites.down.sql"] || names["0007_catalog.down.sql"] {
 		t.Fatalf("schema_migrations = %v", names)
 	}
 
@@ -244,6 +249,7 @@ WHERE id = $1::uuid
 	sharedHostsIntegration(t, d, ctx, user, project, enrolled, serviceID, at)
 	oauthHTTPIntegration(t, d, ctx)
 	assertInvites(t, d, ctx)
+	assertCatalog(t, d, ctx, at)
 }
 
 // sharedHostsIntegration is the Postgres half of spec §6: backfill shape,

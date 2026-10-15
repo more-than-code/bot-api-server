@@ -1,6 +1,7 @@
 package agentws
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -233,6 +234,7 @@ func (h *Hub) hello(ac *agentConn, token string, f frame) bool {
 		ac.fail(websocket.StatusInternalError, "error", "unavailable")
 		return false
 	}
+	h.storePrograms(ac, f.Programs)
 	h.upsertServices(ac, f.Services)
 	cfg, err := h.agentConfig(ac.parent, host.ID)
 	if err != nil {
@@ -292,6 +294,35 @@ func (h *Hub) onPing(ac *agentConn) error {
 	})
 }
 
+// storePrograms writes the hello programs object. An absent or null value
+// clears a policy stored on an earlier connection. An object that is not
+// the v1.3 shape is stored as disabled with no run_as.
+func (h *Hub) storePrograms(ac *agentConn, raw json.RawMessage) {
+	programs, ok := parsePrograms(raw)
+	if !ok {
+		programs = &store.HostPrograms{Enabled: false, RunAs: []string{}}
+	}
+	if err := h.st.SetHostPrograms(ac.parent, ac.hostID, programs); err != nil {
+		h.log.Error("programs update failed", "host_id", ac.hostID.String())
+	}
+}
+
+func parsePrograms(raw json.RawMessage) (*store.HostPrograms, bool) {
+	if len(bytes.TrimSpace(raw)) == 0 || string(raw) == "null" {
+		return nil, true
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var p store.HostPrograms
+	if err := dec.Decode(&p); err != nil {
+		return nil, false
+	}
+	if p.RunAs == nil {
+		p.RunAs = []string{}
+	}
+	return &p, true
+}
+
 func (h *Hub) upsertServices(ac *agentConn, raw json.RawMessage) {
 	items := h.discovered(raw)
 	if len(items) == 0 {
@@ -335,6 +366,7 @@ func (h *Hub) oneService(raw json.RawMessage) (store.Discovered, bool) {
 		ContainerName *string         `json:"container_name"`
 		ProcessName   *string         `json:"process_name"`
 		User          json.RawMessage `json:"user"`
+		Owner         json.RawMessage `json:"owner"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil || !validService(in.Name, in.Kind, in.Ports, in.SystemdScope) {
 		h.log.Warn("skip service", "name", clipName(peek.Name))
@@ -353,7 +385,26 @@ func (h *Hub) oneService(raw json.RawMessage) (store.Discovered, bool) {
 		ContainerName: in.ContainerName,
 		ProcessName:   in.ProcessName,
 		OwnerUser:     ownerUser(in.User),
+		Owner:         discoveredOwner(in.Owner),
 	}, true
+}
+
+func discoveredOwner(raw json.RawMessage) *store.DiscoveredOwner {
+	if len(bytes.TrimSpace(raw)) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var o struct {
+		Kind    string `json:"kind"`
+		Project string `json:"project"`
+		Entry   string `json:"entry"`
+	}
+	if err := json.Unmarshal(raw, &o); err != nil {
+		return nil
+	}
+	if o.Kind == "" && o.Project == "" && o.Entry == "" {
+		return nil
+	}
+	return &store.DiscoveredOwner{Kind: o.Kind, Project: o.Project, Entry: o.Entry}
 }
 
 // ownerUser reads Discovered.user. A missing, null, or non-string value
