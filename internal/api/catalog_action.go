@@ -173,7 +173,7 @@ func (s *Server) handleConfirmation(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	if entry.ID != c.EntryID || !allowsAction(heldActions(entry.Kind, role, p.User.ID, grants), c.Action) {
+	if entry.ID != c.EntryID || !allowsAction(heldActions(entry.Kind, role, p.User.ID, grants), grantForAction(entry.Kind, c.Action)) {
 		if entry.Kind == "image" {
 			s.imageDeny(w, r, p, c.ProjectID, c.HostID, "", entry.Name, c.Action, "forbidden", "forbidden")
 			return
@@ -585,6 +585,16 @@ func (s *Server) programDeny(w http.ResponseWriter, r *http.Request, p principal
 		})
 	}
 	writeCode(w, code, msg)
+}
+
+// grantForAction is the grant a confirmed action needs. For an image entry the
+// deploy grant covers deploy, rollback and remove (api-v1 v1.8), as on the
+// direct routes; every other action needs the grant of its own name.
+func grantForAction(kind, action string) string {
+	if kind == "image" && (action == "deploy" || action == "rollback" || action == "remove") {
+		return "deploy"
+	}
+	return action
 }
 
 func programPlan(action, entry, display, runAs, host string) string {

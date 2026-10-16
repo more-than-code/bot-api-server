@@ -262,6 +262,26 @@ func TestImageTaskFrame(t *testing.T) {
 	if _, ok := pub["registry_auth"]; !ok || pub["registry_auth"] != nil {
 		t.Fatalf("registry_auth %#v", pub["registry_auth"])
 	}
+
+	// The deploy grant covers rollback and remove, through MCP confirmations too.
+	digest, _ := deploy["digest"].(string)
+	for _, step := range []struct {
+		action, key string
+		extra       map[string]any
+	}{
+		{"rollback", "del-rollback", map[string]any{"digest": digest}},
+		{"remove", "del-remove", nil},
+	} {
+		before := log.count()
+		status, env, _ = postImage(t, w, delegated, project, "web", step.action, host, step.key, step.extra)
+		mustHTTP(t, status, env, http.StatusAccepted, "ok", "ok")
+		id, _ := objectPayload(t, env)["confirmation_id"].(string)
+		status, env, _ = mustCall(t, w, delegated, http.MethodPost, "/v1/confirmations/"+id, confirmBody(step.key))
+		mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+		if log.count() != before+1 {
+			t.Fatalf("%s confirm tasks %d", step.action, log.count()-before)
+		}
+	}
 }
 
 func TestImageSecretBoundary(t *testing.T) {
