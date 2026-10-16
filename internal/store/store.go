@@ -24,6 +24,8 @@ var (
 	ErrState        = errors.New("invalid state")
 	// ErrInvalid is a rejected write, such as sharing a host with its owner.
 	ErrInvalid = errors.New("invalid")
+	// ErrTooManyFiles is a new file name when the project already has MaxProjectFiles.
+	ErrTooManyFiles = errors.New("too many files")
 	// ErrReuse is a second redemption of an authorization code or a rotated refresh token.
 	// The store has already revoked the tokens the contract requires.
 	ErrReuse = errors.New("reuse")
@@ -674,4 +676,16 @@ type Store interface {
 	DeleteRegistry(ctx context.Context, projectID uuid.UUID, host string) error
 	// GetRegistryMaterial returns one ciphertext. A missing host is ErrNotFound.
 	GetRegistryMaterial(ctx context.Context, projectID uuid.UUID, host string) (RegistryMaterial, error)
+
+	// ListProjectFiles returns metadata sorted by name. SHA256 is nil when secret.
+	ListProjectFiles(ctx context.Context, projectID uuid.UUID) ([]ProjectFile, error)
+	// GetProjectFile returns metadata. Plain is set only for a plain file.
+	GetProjectFile(ctx context.Context, projectID uuid.UUID, name string) (ProjectFile, error)
+	// PutProjectFile creates or replaces one file. A new name past MaxProjectFiles
+	// is ErrTooManyFiles. Replacing an existing name is allowed at the limit.
+	PutProjectFile(ctx context.Context, projectID uuid.UUID, name string, in FileWrite, actor uuid.UUID, at time.Time) (ProjectFile, error)
+	// DeleteProjectFile returns *FileInUse when an image entry names the file.
+	DeleteProjectFile(ctx context.Context, projectID uuid.UUID, name string) error
+	// ListFileMaterial returns plaintext and ciphertext. It is not an HTTP body.
+	ListFileMaterial(ctx context.Context, projectID uuid.UUID) ([]FileMaterial, error)
 }

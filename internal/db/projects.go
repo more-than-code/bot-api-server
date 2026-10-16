@@ -210,6 +210,10 @@ WHERE project_id = $1::uuid
 	if err := exec(ctx, tx, `DELETE FROM app.registries WHERE project_id = $1::uuid`, id.String()); err != nil {
 		return nil, mapErr(err)
 	}
+	// Soft-delete does not cascade. Files have no FK from catalog rows.
+	if err := exec(ctx, tx, `DELETE FROM app.project_files WHERE project_id = $1::uuid`, id.String()); err != nil {
+		return nil, mapErr(err)
+	}
 	rows, err := tx.Query(ctx, `
 SELECT id::text FROM app.hosts WHERE project_id = $1::uuid ORDER BY id::text
 `, id.String())

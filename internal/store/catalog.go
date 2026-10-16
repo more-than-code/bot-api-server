@@ -27,6 +27,7 @@ type HostPrograms struct {
 	PolicyHash string   `json:"policy_hash"`
 	Images     bool     `json:"images"`
 	Docker     bool     `json:"docker"`
+	Files      bool     `json:"files"`
 }
 
 // ProgramSpec is the stored program document. Env and Args are never nil
@@ -83,6 +84,8 @@ func (e CatalogEntry) MarshalJSON() ([]byte, error) {
 	spec := e.ImageRaw
 	if len(spec) == 0 {
 		spec = json.RawMessage("null")
+	} else {
+		spec = ensureFiles(spec)
 	}
 	return json.Marshal(struct {
 		ID             uuid.UUID       `json:"id"`
@@ -101,6 +104,24 @@ func (e CatalogEntry) MarshalJSON() ([]byte, error) {
 		SpecHash: e.SpecHash, CommandDisplay: e.CommandDisplay, CreatedBy: e.CreatedBy,
 		CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, MyActions: e.MyActions,
 	})
+}
+
+// ensureFiles adds "files":[] when a stored image spec omitted the key.
+// A spec that already has the key is returned unchanged.
+func ensureFiles(raw json.RawMessage) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return raw
+	}
+	if _, ok := fields["files"]; ok {
+		return raw
+	}
+	fields["files"] = json.RawMessage(`[]`)
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return raw
+	}
+	return out
 }
 
 // CatalogGrant is one subject allowed to act on an entry.

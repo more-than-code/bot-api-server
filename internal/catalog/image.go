@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"path"
 	"strconv"
 	"strings"
 )
@@ -18,6 +19,7 @@ const (
 	maxEnvSets     = 8
 	maxSecretEnv   = 64
 	maxVolumes     = 8
+	maxFiles       = 16
 	maxTargetBytes = 255
 	minHealthy     = 5
 	maxHealthy     = 600
@@ -36,7 +38,7 @@ const (
 var imageUserRe = runAsRe
 
 // Image is a normalised image entry spec. Empty command and entrypoint are
-// nil. Env, SecretEnv, EnvSets, Ports, and Volumes are non-nil.
+// nil. Env, SecretEnv, EnvSets, Ports, Volumes, and Files are non-nil.
 type Image struct {
 	Kind            string
 	Image           string
@@ -48,6 +50,7 @@ type Image struct {
 	EnvSets         []string
 	SecretEnv       map[string]string
 	Volumes         []Volume
+	Files           []FileMount
 	Restart         string
 	User            string
 	HealthyAfterSec int
@@ -69,6 +72,13 @@ type Volume struct {
 	ReadOnly bool   `json:"read_only"`
 }
 
+// FileMount is one project file mounted read-only. Target is absolute.
+// Content is not part of the spec.
+type FileMount struct {
+	File   string `json:"file"`
+	Target string `json:"target"`
+}
+
 // SetKeys maps an env set name to its key names. Values are not included.
 type SetKeys map[string][]string
 
@@ -80,10 +90,12 @@ func ValidImageName(name string) bool {
 	return !strings.HasSuffix(name, "-") && !strings.HasSuffix(name, "-prev")
 }
 
-// BuildImage applies v1.8 writing rules 1–11.
-// sets is the project's env-set key names. Errors name a field and do not
-// include image references, commands, env values, volume targets, users, or set names.
-func BuildImage(name string, raw []byte, sets SetKeys) (Image, error) {
+// BuildImage applies v1.8 writing rules 1–11 and v1.9 rule 13.
+// sets is the project's env-set key names. files is the project's file names.
+// A nil files map rejects every named file. Errors name a field and do not
+// include image references, commands, env values, volume targets, file
+// targets, users, or set names.
+func BuildImage(name string, raw []byte, sets SetKeys, files map[string]struct{}) (Image, error) {
 	if !ValidImageName(name) {
 		return Image{}, fieldErr("invalid name")
 	}
@@ -154,6 +166,13 @@ func BuildImage(name string, raw []byte, sets SetKeys) (Image, error) {
 	}
 	volumes, err := decodeVolumes(fields["volumes"])
 	if err != nil {
+		return Image{}, err
+	}
+	mounts, err := decodeFiles(fields["files"], files)
+	if err != nil {
+		return Image{}, err
+	}
+	if err := filesOverlapVolumes(mounts, volumes); err != nil {
 		return Image{}, err
 	}
 	restart, restartSet, err := decodeOptionalString(fields, "restart")
@@ -227,6 +246,7 @@ func BuildImage(name string, raw []byte, sets SetKeys) (Image, error) {
 		EnvSets:         envSets,
 		SecretEnv:       secretEnv,
 		Volumes:         volumes,
+		Files:           mounts,
 		Restart:         restart,
 		User:            user,
 		HealthyAfterSec: healthy,
@@ -332,19 +352,34 @@ func CanonicalImage(img Image, keyDigests map[string]string) string {
 		ek.WriteString(jsonString(d))
 	}
 	ek.WriteByte('}')
-	return `{"env_keys":` + ek.String() + `,"kind":"image","spec":` + SpecJSON(img) + `}`
+	return `{"env_keys":` + ek.String() + `,"kind":"image","spec":` + hashSpecJSON(img) + `}`
 }
 
-// SpecJSON is the stored ImageSpec object.
+// SpecJSON is the stored ImageSpec object. An empty files list is [].
 func SpecJSON(img Image) string {
+	return specJSON(img, true)
+}
+
+// hashSpecJSON is the spec_hash input. An empty files list is omitted so the
+// hash matches a wave 2a entry that had no files field.
+func hashSpecJSON(img Image) string {
+	return specJSON(img, len(img.Files) > 0)
+}
+
+func specJSON(img Image, withFiles bool) string {
 	mem := "null"
 	if img.MemoryMB != nil {
 		mem = strconv.Itoa(*img.MemoryMB)
+	}
+	files := ""
+	if withFiles {
+		files = `,"files":` + filesJSON(img.Files)
 	}
 	return `{"command":` + argvJSON(img.Command) +
 		`,"entrypoint":` + argvJSON(img.Entrypoint) +
 		`,"env":` + stringMapJSON(img.Env) +
 		`,"env_sets":` + stringArrayJSON(img.EnvSets) +
+		files +
 		`,"healthy_after_sec":` + strconv.Itoa(img.HealthyAfterSec) +
 		`,"image":` + jsonString(img.Image) +
 		`,"kind":` + jsonString(img.Kind) +
@@ -383,6 +418,7 @@ func ParseStored(raw []byte) (Image, error) {
 		EnvSets:         nonNilList(doc.EnvSets),
 		SecretEnv:       nonNilMap(doc.SecretEnv),
 		Volumes:         doc.Volumes,
+		Files:           doc.Files,
 		Restart:         doc.Restart,
 		User:            doc.User,
 		HealthyAfterSec: doc.HealthyAfterSec,
@@ -394,6 +430,9 @@ func ParseStored(raw []byte) (Image, error) {
 	}
 	if img.Volumes == nil {
 		img.Volumes = []Volume{}
+	}
+	if img.Files == nil {
+		img.Files = []FileMount{}
 	}
 	return img, nil
 }
@@ -408,6 +447,7 @@ type storedImage struct {
 	EnvSets         []string          `json:"env_sets"`
 	SecretEnv       map[string]string `json:"secret_env"`
 	Volumes         []Volume          `json:"volumes"`
+	Files           []FileMount       `json:"files"`
 	Restart         string            `json:"restart"`
 	User            string            `json:"user"`
 	HealthyAfterSec int               `json:"healthy_after_sec"`
@@ -465,7 +505,7 @@ func sortStrings(items []string) {
 
 var imageFields = map[string]struct{}{
 	"kind": {}, "image": {}, "command": {}, "entrypoint": {}, "ports": {},
-	"env": {}, "env_sets": {}, "secret_env": {}, "volumes": {}, "restart": {},
+	"env": {}, "env_sets": {}, "secret_env": {}, "volumes": {}, "files": {}, "restart": {},
 	"user": {}, "healthy_after_sec": {}, "memory_mb": {}, "timeout_sec": {},
 }
 
@@ -665,6 +705,124 @@ type volumeIn struct {
 	Name     string `json:"name"`
 	Target   string `json:"target"`
 	ReadOnly bool   `json:"read_only"`
+}
+
+func decodeFiles(raw json.RawMessage, known map[string]struct{}) ([]FileMount, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return []FileMount{}, nil
+	}
+	var items []fileIn
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&items); err != nil {
+		return nil, fieldErr("invalid files")
+	}
+	if len(items) > maxFiles {
+		return nil, fieldErr("invalid files")
+	}
+	out := make([]FileMount, 0, len(items))
+	names := map[string]struct{}{}
+	targets := map[string]struct{}{}
+	for _, item := range items {
+		if !ValidFileName(item.File) {
+			return nil, fieldErr("invalid files")
+		}
+		if _, ok := known[item.File]; !ok {
+			return nil, fieldErr("unknown file")
+		}
+		if !validFileTarget(item.Target) {
+			return nil, fieldErr("invalid files")
+		}
+		if _, dup := names[item.File]; dup {
+			return nil, fieldErr("invalid files")
+		}
+		if _, dup := targets[item.Target]; dup {
+			return nil, fieldErr("invalid files")
+		}
+		names[item.File] = struct{}{}
+		targets[item.Target] = struct{}{}
+		out = append(out, FileMount{File: item.File, Target: item.Target})
+	}
+	return out, nil
+}
+
+type fileIn struct {
+	File   string `json:"file"`
+	Target string `json:"target"`
+}
+
+func validFileTarget(target string) bool {
+	if target == "" || target == "/" || len(target) > maxTargetBytes {
+		return false
+	}
+	if !strings.HasPrefix(target, "/") || strings.HasSuffix(target, "/") {
+		return false
+	}
+	if strings.ContainsRune(target, 0) || strings.ContainsAny(target, "\n\r") {
+		return false
+	}
+	parts := strings.Split(target, "/")
+	if len(parts) < 2 || parts[0] != "" {
+		return false
+	}
+	for _, seg := range parts[1:] {
+		if seg == "" || seg == "." || seg == ".." {
+			return false
+		}
+	}
+	if target == "/proc" || strings.HasPrefix(target, "/proc/") {
+		return false
+	}
+	if target == "/sys" || strings.HasPrefix(target, "/sys/") {
+		return false
+	}
+	if target == "/dev" || strings.HasPrefix(target, "/dev/") {
+		return false
+	}
+	return true
+}
+
+func filesOverlapVolumes(files []FileMount, volumes []Volume) error {
+	for _, file := range files {
+		for _, vol := range volumes {
+			if targetsOverlap(file.Target, vol.Target) {
+				return fieldErr("invalid files")
+			}
+		}
+	}
+	return nil
+}
+
+// targetsOverlap compares a file target with a volume target. Volume rule 8
+// still accepts "/", a trailing slash, and empty segments; those are cleaned
+// here so they cannot hide an overlap. A volume that cleans to "/" covers
+// every file.
+func targetsOverlap(fileTarget, volumeTarget string) bool {
+	file := path.Clean(fileTarget)
+	volume := path.Clean(volumeTarget)
+	if volume == "/" {
+		return true
+	}
+	if file == volume {
+		return true
+	}
+	return strings.HasPrefix(file, volume+"/") || strings.HasPrefix(volume, file+"/")
+}
+
+func filesJSON(items []FileMount) string {
+	if len(items) == 0 {
+		return "[]"
+	}
+	var b strings.Builder
+	b.WriteByte('[')
+	for i, item := range items {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(`{"file":` + jsonString(item.File) + `,"target":` + jsonString(item.Target) + `}`)
+	}
+	b.WriteByte(']')
+	return b.String()
 }
 
 func validTarget(target string) bool {

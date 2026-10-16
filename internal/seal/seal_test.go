@@ -41,6 +41,24 @@ func TestSealRoundTrip(t *testing.T) {
 	if _, err := box.Open(RegistryAAD("proj", "ghcr.io"), n3, c3); err == nil || err.Error() != "decrypt failed" {
 		t.Fatalf("aad %v", err)
 	}
+	if FileAAD("p", "n") != "p|file|n" {
+		t.Fatalf("FileAAD %q", FileAAD("p", "n"))
+	}
+	fa := FileAAD("proj", "site.conf")
+	fn, fc, err := box.Seal(fa, []byte("file-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := box.Open(fa, fn, fc); err != nil || string(got) != "file-secret" {
+		t.Fatalf("file open %q %v", got, err)
+	}
+	if _, err := box.Open(EnvAAD("proj", "services", "site.conf"), fn, fc); err == nil || err.Error() != "decrypt failed" {
+		t.Fatalf("file aad %v", err)
+	}
+	fc[0] ^= 1
+	if _, err := box.Open(fa, fn, fc); err == nil || err.Error() != "decrypt failed" {
+		t.Fatalf("file tamper %v", err)
+	}
 	if _, err := New([]byte("short")); err == nil {
 		t.Fatal("short key")
 	}

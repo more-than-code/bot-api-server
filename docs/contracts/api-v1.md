@@ -432,3 +432,55 @@ Create/replace take `{"name","kind":"image","spec":ImageSpec}` (`name` on create
 ### v1.8.2 amendment (2026-10-16, Joe approved; from the dev console after the wave 2a cleanup)
 
 `view=deploybot` (and so `deploybot_and_discovered`) no longer lists an **owned** row that is gone **and** whose `catalog_entry` no longer exists in the row's project: nothing can start it again. Such a row stays in the database and in `view=all`, with its `display_name` and health checks. If an entry with the same name is created and deployed, the next report clears `gone_at` and the row is listed again. Declared rows, owned rows with `gone_at = null`, and owned rows with `catalog_entry = null` are unchanged. `total` and cursors follow the narrower set. Before (v1.7): `deploybot` = `source` in (`owned`, `declared`), gone or not.
+
+## v1.9 managed files (2026-10-16, approved spec `docs/spec-catalog-files.md` rev 1, wave 2b; additive)
+
+The v1.8 line "`not_implemented` remains only for managed files" no longer applies: `files` is accepted in ImageSpec.
+
+### Objects
+
+```jsonc
+ProjectFile  {"name","is_secret":bool,"size":int,"sha256":string|null,"updated_at","updated_by"}   // sha256 (hex of the content) only when !is_secret
+ProjectFileContent {"name","content":string,"size":int,"sha256":string,"updated_at","updated_by"} // plain files only
+ImageSpec    gains "files":[{"file":string,"target":string}]   // default []
+```
+
+- `HostPrograms` gains `"files":bool` (from the agent's hello, agent-protocol v1.5); absent = false.
+
+### Project files
+
+1. **Name:** `^[a-z0-9][a-z0-9._-]{0,63}$`, not `.` or `..`.
+2. **Content:** valid UTF-8, 1–65536 bytes, no NUL. Secret content is stored as AES-256-GCM ciphertext with `key_version` (the env-set key, `BOT_SECRETS_KEY_FILE`); plain content as text. At most **64 files per project** (a new name beyond that → `bad_request`).
+3. **Routes** (owner/admin of the project, **console sessions only**: an `api_delegated` token → `forbidden` before any decrypt; `mcp_access` / `mcp_refresh` tokens are already 401 `invalid_token` on every `/v1` route by the audience rule; a non-member → `not_found`):
+
+| Method | Path | Body | Payload |
+|---|---|---|---|
+| GET | `/v1/projects/{id}/files` | — | `{"items":[ProjectFile]}` sorted by name, not paginated |
+| GET | `/v1/projects/{id}/files/{name}` | — | `ProjectFileContent`; a secret file → `forbidden` |
+| PUT | `/v1/projects/{id}/files/{name}` | `{"content":string,"secret":bool}` (`secret` omitted = `true`) | `ProjectFile`; creates or replaces content and flag |
+| DELETE | `/v1/projects/{id}/files/{name}` | — | `null`; `conflict` listing the entry names while any image entry of the project references it |
+
+   Errors never echo content. An unknown name on GET/DELETE → `not_found`.
+4. **Audit:** `file.put` (`name`, `is_secret`, `size`), `file.delete` (`name`). Never content or `sha256` of a secret file.
+
+### Writing an image entry: rule 13
+
+13. `files`: ≤ 16 rows. `file` must name a file of the **same project** (unknown → `bad_request`), and each `file` appears at most once per entry (a slot holds one copy per name). `target`: absolute, ≤ 255 bytes, normalised (no empty, `.` or `..` segment, no trailing `/`), not `/`, not `/proc`, `/sys`, `/dev` or under them; unique among `files` targets and `volumes` targets; not under a volume target, and no volume target under it.
+
+`spec_hash` covers `files` as written (names and targets), as part of `spec`. File content never enters `spec_hash`, so a content change does not void a shared-host approval.
+
+### Deploy and rollback
+
+- The API resolves each `spec.files[i].file` to its current content when it builds an `image_deploy` / `image_rollback` task (agent-protocol v1.5). A file deleted since the entry was saved → `bad_request` "file <name> no longer exists", and no task is sent.
+- The v1.4.1 frame-size check includes the resolved files: an oversized frame → `bad_request` "the resolved environment and files are too large for one task".
+- `GET` of a catalog entry and task records show `files` as names and targets only. MCP `list_catalog` shows file names only (targets are dropped, as for volumes).
+
+### Env-set values and redaction (Joe 2026-10-16, from the pi3 mirror)
+
+1. **dotenv values are literal:** `$` and `\` are allowed and taken as-is (no escapes, no interpolation means nothing is interpreted). NUL is still refused, and the 4096-byte value limit stays. Inline `env` in an ImageSpec keeps the v1.6 item 8 rules.
+2. **Image tasks send `secret_keys`** (agent-protocol v1.5), and the API's own redaction of image results and logs uses the same secret-only set: secret env-set values after precedence, the registry token, and secret-file items. Structured fields of `ImageStatus`, `ImageDeploy`, `outcome`, `digest` and `exit_code` are never redacted. Only free-text `lines` are.
+
+### Migration
+
+`0010_project_files.sql` (+ hand-run `.down.sql`): table `app.project_files` (`project_id` uuid FK → projects ON DELETE CASCADE, `name`, `is_secret`, `content_plain` text NULL, `nonce` bytea NULL, `content_cipher` bytea NULL, `key_version` int NULL (the env-set sealing scheme: a fresh 12-byte nonce per write, AAD `project_id|file|name`), `sha256` text, `size` int, `updated_by` uuid, `updated_at` timestamptz; PK `(project_id, name)`; CHECK exactly one of `content_plain` / `content_cipher` per `is_secret`). Grants to `deploybot_api` as for `app.env_values`.
+

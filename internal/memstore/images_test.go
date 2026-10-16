@@ -23,7 +23,7 @@ func TestImageRehashVoidsApproval(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	img, err := catalog.BuildImage("web", []byte(`{"kind":"service","image":"nginx","env_sets":["svc"]}`), catalog.SetKeys{"svc": {"A"}})
+	img, err := catalog.BuildImage("web", []byte(`{"kind":"service","image":"nginx","env_sets":["svc"]}`), catalog.SetKeys{"svc": {"A"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,6 +91,46 @@ func TestImageRehashVoidsApproval(t *testing.T) {
 	}
 }
 
+func TestEnvReplaceKeepsWave2aHash(t *testing.T) {
+	ctx := context.Background()
+	m := New()
+	at := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	owner := catalogUser(t, m, "image-2a")
+	home := catalogProject(t, m, owner.ID, "Home", "home", at)
+	host := catalogHost(t, m, home, owner.ID, "pi", at)
+	box, err := seal.New(bytes.Repeat([]byte{3}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := catalog.BuildImage("web", []byte(`{"kind":"service","image":"nginx","env_sets":["svc"]}`), catalog.SetKeys{"svc": {"A"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := catalog.ImageHash(img, map[string]string{"svc": catalog.EnvKeyDigest([]string{"A"})})
+	raw := bytes.ReplaceAll([]byte(catalog.SpecJSON(img)), []byte(`,"files":[]`), nil)
+	if bytes.Contains(raw, []byte(`"files"`)) {
+		t.Fatalf("2a spec %s", raw)
+	}
+	entry, err := m.CreateCatalogEntry(ctx, home.ID, store.CatalogWrite{
+		Name: "web", Kind: "image", ImageRaw: raw,
+		SpecHash: hash, CommandDisplay: img.Image, Actor: owner.ID, At: at,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.ApproveCatalog(ctx, host.ID, entry.ID, hash, owner.ID, at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.PutEnvSet(ctx, home.ID, "svc", []store.EnvSecret{sealKey(t, box, home.ID.String(), "svc", "A", "other")}, owner.ID, at); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.GetCatalogEntry(ctx, home.ID, "web")
+	kept, err2 := m.ListCatalogApprovals(ctx, host.ID)
+	if err != nil || err2 != nil || got.SpecHash != hash || len(kept) != 1 || kept[0].Status != "approved" {
+		t.Fatalf("hash %s approvals %#v %v %v", got.SpecHash, kept, err, err2)
+	}
+}
+
 func TestImageInFlightAndRollback(t *testing.T) {
 	ctx := context.Background()
 	m := New()
@@ -98,7 +138,7 @@ func TestImageInFlightAndRollback(t *testing.T) {
 	owner := catalogUser(t, m, "flight-owner")
 	home := catalogProject(t, m, owner.ID, "Home", "home", at)
 	host := catalogHost(t, m, home, owner.ID, "pi", at)
-	img, err := catalog.BuildImage("web", []byte(`{"kind":"service","image":"nginx"}`), nil)
+	img, err := catalog.BuildImage("web", []byte(`{"kind":"service","image":"nginx"}`), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

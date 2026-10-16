@@ -332,3 +332,45 @@ Rules (normative; spec rev 3 §4.1 and §12 in full):
 
 1. `container_logs` request: `{"project","entry","lines","redact"?:[string]}`. `redact` is optional, ≤ 64 values, each 6–4096 bytes, no NUL. The helper removes every value in raw, base64 std, base64 url (padded and raw) and JSON-escaped form from each raw log line **before** the v1.0.1 regex and the 2048-char cut, and never logs or returns the list.
 2. The agent sends the task's exact set (env values and the registry token) in `redact` for the log tail it puts in `image_deploy` / `image_rollback` results. `image_logs` tasks carry no values, so their `container_logs` call has no `redact`.
+
+## v1.5 managed files (2026-10-16, approved spec `docs/spec-catalog-files.md` rev 1, wave 2b; additive)
+
+### Task specs
+
+- `image_deploy` and `image_rollback` gain a top-level `"files":[{"name","target","content","secret":bool}]` (default `[]`), in the order of `spec.files`. `spec.files` stays as stored (`[{"file","target"}]`, api-v1 v1.9). Resolved content travels **only** in the top-level `files`. The agent refuses a task whose `files` names and targets do not equal `spec.files` one for one, or that breaks api-v1 v1.9 rules 1–2 and 13, with `task_reject` `bad_spec`, as for every other ImageSpec rule failure (v1.4).
+- Task records and logs keep `name` and `target` only, never content.
+
+### Exact-value redaction
+
+For every **secret** file of the task, the agent adds to that task's exact set:
+1. the whole content, when it is 6–4096 bytes;
+2. every line of the content, trimmed of surrounding whitespace, of 16–4096 bytes;
+3. when the content parses as JSON: every string value of 16–4096 bytes, and every trimmed line of 16–4096 bytes inside a string value (so the lines of a PEM key held in a JSON field are covered).
+
+Plain files add nothing. The set applies as in v1.4.2 (results, log lines, and the `redact` list of `container_logs`).
+
+**Only secret values (Joe 2026-10-16, from the pi3 mirror):** `image_deploy` and `image_rollback` gain `"secret_keys":[KEY]`: the keys of the top-level `env` whose resolved value comes from an env-set key with `is_secret: true` (through `env_sets` or `secret_env`, after the v1.8 item 12 precedence; a key overridden by inline `env` is not secret). The exact set is: the `env` values of `secret_keys`, the registry token, and the secret-file items above. Inline `env`, plain env-set keys and plain files are not redacted. The API sends `secret_keys` (possibly `[]`) **only to a host whose `hello.programs.files` is true**; to an older agent it omits the key, because a v1.4 agent refuses unknown keys. When `secret_keys` is absent, every `env` value joins the set, as in v1.4.
+
+**Structured fields are never redacted:** in `task_result` payloads the exact set and the v1.0.1 regex apply only to free text: `lines`, log `lines`, and error messages. `outcome`, `digest`, `exit_code` and every `status` field (`container`, `state`, `exit_code`, `restart_count`, `started_at`, `finished_at`, `digest`, `ports`) are passed as the helper returned them. The helper builds them from labels, names and the Engine, never from env values.
+
+`container_logs` `redact` limits become: ≤ **2048** values, each 6–4096 bytes, total ≤ **512 KiB**, no NUL.
+
+### Hello
+
+`hello.programs` gains `"files":bool`: true when this agent and its helper support v1.5 files. The API refuses a deploy of an entry with non-empty `files` to a host whose `files` is not true (`bad_request` "this host's agent does not support files"), before any task is sent.
+
+### Local helper
+
+1. **Request size:** image verbs accept requests up to **2 MiB**; program verbs keep 64 KiB.
+2. **Units (host security files, Joe reviews before install):** `bot-agent-runner@.service` gains `StateDirectory=bot-agent-runner` and `StateDirectoryMode=0700`. `bot-agent.service` `InaccessiblePaths=` gains `-/var/lib/bot-agent-runner`.
+3. **`container_deploy`** request gains `"files":[{"name","target","content"}]` (default `[]`); `container_status` response gains `"files_hash":string` (`""` when the container has none).
+4. **Store:** `/var/lib/bot-agent-runner/files/`. One **slot** directory per container: `<project>-<entry>`, `<project>-<entry>-prev`, and the transient `<project>-<entry>.new`. Each file is `<slot>/<name>`.
+5. **Writes:** the helper opens the store with `O_DIRECTORY|O_NOFOLLOW` and works only with `openat`/`mkdirat`/`renameat`/`unlinkat` relative to directory handles, never through a path string. Slot directories are created mode 0700, owner 0:0. Each file is created `O_CREAT|O_EXCL|O_NOFOLLOW|O_WRONLY`, written, `fsync`ed, set to mode 0444, owner 0:0. Then the slot directory is `fsync`ed.
+6. **Checks before every use** (`fstatat` with `AT_SYMLINK_NOFOLLOW`): the store and each slot are directories owned by 0:0 with mode 0700 exactly; each file is a regular file owned by 0:0, mode 0444, link count 1; nothing else is in a slot. Any mismatch → `bad_spec`, and the deploy stops before any container is touched.
+7. **Mounts:** for each file, `HostConfig.Mounts` gains `{"Type":"bind","Source":"/var/lib/bot-agent-runner/files/<slot>/<name>","Target","ReadOnly":true}`. No `BindOptions`, no other bind mounts. `Source` is built by the helper only.
+8. **Label:** when `files` is non-empty, the container gets `dev.deploybot.files_hash` = hex SHA-256 of the lines `<name>:<hex sha256 of content>\n`, sorted by name. With no files the label is absent.
+9. **Service deploy order** (extends v1.4 rule 6, under the entry lock): remove a leftover `.new` slot and any slot whose container no longer exists → write the `.new` slot (when `files` is non-empty) → check labels → remove `-prev` and its slot → stop the current container, rename it to `-prev` and its slot to `-prev` → rename `.new` to the current slot → ensure network and volumes → create → start.
+10. **Rollback:** remove the current container and its slot, rename `-prev` and its slot back, start. **Job:** remove the existing job container and its slot, write the slot, create, start. **`container_remove`:** removes the container and its slot.
+11. **Unchanged:** the agent reports `unchanged` only when digest, `spec_hash` and `files_hash` all match (the agent computes the expected `files_hash` from the task's `files` by rule 8; `""` when none).
+12. Projections (v1.4 rule 7) never contain file content, slot paths or mounts.
+

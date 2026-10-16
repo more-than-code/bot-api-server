@@ -47,7 +47,7 @@ func TestParseImageRef(t *testing.T) {
 func TestBuildImageRules(t *testing.T) {
 	sets := SetKeys{"services": {"MONGODB_URI", "DB_PASSWORD"}}
 	base := func(spec string) (Image, error) {
-		return BuildImage("web", []byte(spec), sets)
+		return BuildImage("web", []byte(spec), sets, nil)
 	}
 	img, err := base(`{"kind":"service","image":"nginx"}`)
 	if err != nil {
@@ -56,7 +56,7 @@ func TestBuildImageRules(t *testing.T) {
 	if img.Image != "docker.io/library/nginx:latest" || img.Restart != "unless-stopped" || img.HealthyAfterSec != 30 || img.TimeoutSec != 0 {
 		t.Fatalf("defaults %+v", img)
 	}
-	if img.Command != nil || img.Env == nil || img.EnvSets == nil || img.Ports == nil {
+	if img.Command != nil || img.Env == nil || img.EnvSets == nil || img.Ports == nil || img.Files == nil {
 		t.Fatal("empty collections")
 	}
 	job, err := base(`{"kind":"job","image":"nginx","restart":"unless-stopped","timeout_sec":10}`)
@@ -143,7 +143,7 @@ func TestBuildImageRules(t *testing.T) {
 		case "prev":
 			n = "web-prev"
 		}
-		_, err := BuildImage(n, []byte(tc.spec), sets)
+		_, err := BuildImage(n, []byte(tc.spec), sets, nil)
 		if tc.spec == "" && tc.name != "name" && tc.name != "trailing" && tc.name != "prev" {
 			continue
 		}
@@ -173,7 +173,7 @@ func TestBuildImageRules(t *testing.T) {
 
 func TestImageHashKeysNotValues(t *testing.T) {
 	sets := SetKeys{"services": {"A"}}
-	img, err := BuildImage("web", []byte(`{"kind":"service","image":"nginx","env_sets":["services"],"env":{"NODE_ENV":"a"}}`), sets)
+	img, err := BuildImage("web", []byte(`{"kind":"service","image":"nginx","env_sets":["services"],"env":{"NODE_ENV":"a"}}`), sets, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func TestImageHashKeysNotValues(t *testing.T) {
 	if DeployTimeoutSec(img) != 300+30+60 {
 		t.Fatal("service timeout")
 	}
-	job, err := BuildImage("job", []byte(`{"kind":"job","image":"nginx"}`), nil)
+	job, err := BuildImage("job", []byte(`{"kind":"job","image":"nginx"}`), nil, nil)
 	if err != nil || DeployTimeoutSec(job) != 300+600+60 || RollbackTimeoutSec(job) != 360 {
 		t.Fatalf("job timeout %+v %v", job, err)
 	}

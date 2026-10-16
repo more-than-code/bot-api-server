@@ -24,6 +24,7 @@ import (
 
 const (
 	reasonNoContainers = "this host does not run containers"
+	reasonNoFiles      = "this host's agent does not support files"
 	invalidAgentResult = "invalid agent result"
 	settleTimeout      = 5 * time.Second
 	staleGraceSec      = 120
@@ -33,6 +34,8 @@ const (
 	maxAgentLineTotal  = 64 << 10
 	maxStatusBytes     = 2048
 	secretRedactMin    = 6
+	secretLineMin      = 16
+	secretPieceMax     = 4096
 )
 
 var (
@@ -187,6 +190,10 @@ func (s *Server) imageMutate(w http.ResponseWriter, r *http.Request, action stri
 		s.fail(w, err)
 		return
 	}
+	if (action == "deploy" || action == "rollback") && !filesReady(host, img) {
+		s.imageDeny(w, r, p, projectID, host.ID, host.Name, entry.Name, action, "bad_request", reasonNoFiles)
+		return
+	}
 	if action == "rollback" && !s.digestAllowed(w, r, entry.ID, host.ID, body.Digest) {
 		return
 	}
@@ -233,6 +240,19 @@ func (s *Server) finishImageShort(w http.ResponseWriter, r *http.Request, p prin
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+	// Logs are not audited and are not idempotent. Refuse before the hub
+	// call so a missing key cannot return unredacted lines.
+	if action == "logs" && s.Secrets == nil {
+		needs, err := s.logsNeedKey(r.Context(), projectID, img)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		if needs {
+			writeCode(w, "unavailable", errSecretsKey.Error())
+			return
+		}
 	}
 	hash := programRequestHash(action, projectID, host.ID, entry.Name)
 	if action == "run" || action == "stop" || action == "restart" {
@@ -283,6 +303,10 @@ func (s *Server) confirmImage(w http.ResponseWriter, r *http.Request, p principa
 	digest := ""
 	if c.ImageDigest != nil {
 		digest = *c.ImageDigest
+	}
+	if (c.Action == "deploy" || c.Action == "rollback") && !filesReady(host, img) {
+		s.imageDeny(w, r, p, c.ProjectID, host.ID, host.Name, entry.Name, c.Action, "bad_request", reasonNoFiles)
+		return
 	}
 	if c.Action == "rollback" && !s.digestAllowed(w, r, entry.ID, host.ID, digest) {
 		return
@@ -348,7 +372,7 @@ func (s *Server) performImage(w http.ResponseWriter, r *http.Request, p principa
 			}
 		}()
 	}
-	spec, secrets, err := s.imageTask(ctx, projectID, entry, img, action, force, digest, lines)
+	spec, secrets, err := s.imageTask(ctx, projectID, host, entry, img, action, force, digest, lines)
 	if err != nil {
 		s.auditDecrypt(ctx, p, projectID, host, entry.Name, action, err)
 		s.imageFail(ctx, w, p.User.ID, key, err, secretForms(secrets))
@@ -384,11 +408,11 @@ func (s *Server) performImage(w http.ResponseWriter, r *http.Request, p principa
 		return
 	}
 	if action == "logs" {
-		s.imageDone(w, p.User.ID, "", got.logs, forms)
+		s.imageDone(w, p.User.ID, "", got.logs)
 		return
 	}
 	if action == "run" || action == "stop" || action == "restart" || action == "status" {
-		s.imageDone(w, p.User.ID, key, got.status, forms)
+		s.imageDone(w, p.User.ID, key, got.status)
 		return
 	}
 	if action == "remove" {
@@ -397,7 +421,7 @@ func (s *Server) performImage(w http.ResponseWriter, r *http.Request, p principa
 			return s.Store.ReleaseImageOp(c, opID)
 		})
 		s.auditImageOK(ctx, p, projectID, host, entry.Name, action, got.outcome, nil, forms)
-		s.imageDone(w, p.User.ID, key, map[string]any{"status": got.status}, forms)
+		s.imageDone(w, p.User.ID, key, map[string]any{"status": got.status})
 		return
 	}
 	var finished store.ImageDeploy
@@ -416,7 +440,7 @@ func (s *Server) performImage(w http.ResponseWriter, r *http.Request, p principa
 		"deploy": finished,
 		"status": got.status,
 		"lines":  got.lines,
-	}, forms)
+	})
 }
 
 func (s *Server) writeImage(w http.ResponseWriter, r *http.Request, p principal, projectID uuid.UUID, name string, raw json.RawMessage, replace bool) {
@@ -428,7 +452,12 @@ func (s *Server) writeImage(w http.ResponseWriter, r *http.Request, p principal,
 	if names == nil {
 		names = map[string][]string{}
 	}
-	img, err := catalog.BuildImage(name, raw, names)
+	known, err := s.projectFileNames(r.Context(), projectID)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	img, err := catalog.BuildImage(name, raw, names, known)
 	if err != nil {
 		s.writeField(w, err)
 		return
@@ -564,7 +593,11 @@ func (s *Server) imageNeedsKey(ctx context.Context, projectID uuid.UUID, img cat
 	if img.ReferencesEnv() {
 		return true, nil
 	}
-	_, err := s.Store.GetRegistryMaterial(ctx, projectID, img.RegistryHost)
+	needs, err := s.filesNeedKey(ctx, projectID, img)
+	if err != nil || needs {
+		return needs, err
+	}
+	_, err = s.Store.GetRegistryMaterial(ctx, projectID, img.RegistryHost)
 	if errors.Is(err, store.ErrNotFound) {
 		return false, nil
 	}
@@ -574,14 +607,14 @@ func (s *Server) imageNeedsKey(ctx context.Context, projectID uuid.UUID, img cat
 	return true, nil
 }
 
-func (s *Server) imageTask(ctx context.Context, projectID uuid.UUID, entry store.CatalogEntry, img catalog.Image, action string, force bool, digest string, lines int) (map[string]any, []string, error) {
+func (s *Server) imageTask(ctx context.Context, projectID uuid.UUID, host store.Host, entry store.CatalogEntry, img catalog.Image, action string, force bool, digest string, lines int) (map[string]any, []string, error) {
 	project, err := s.Store.GetProject(ctx, projectID)
 	if err != nil {
 		return nil, nil, err
 	}
 	switch action {
 	case "deploy", "rollback":
-		env, err := s.mergeEnv(ctx, projectID, img)
+		env, secretKeys, err := s.mergeEnv(ctx, projectID, img)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -593,15 +626,11 @@ func (s *Server) imageTask(ctx context.Context, projectID uuid.UUID, entry store
 		if err != nil {
 			return nil, nil, err
 		}
-		secrets := make([]string, 0, len(env)+1)
-		for _, v := range env {
-			secrets = append(secrets, v)
+		files, fileSecrets, err := s.resolveFiles(ctx, projectID, img)
+		if err != nil {
+			return nil, append(fileSecrets, secretValues(env, secretKeys, reg)...), err
 		}
-		if regMap, ok := reg.(map[string]any); ok {
-			if tok, ok := regMap["token"].(string); ok {
-				secrets = append(secrets, tok)
-			}
-		}
+		secrets := append(secretValues(env, secretKeys, reg), fileSecrets...)
 		out := map[string]any{
 			"project":       project.Slug,
 			"entry":         entry.Name,
@@ -610,6 +639,15 @@ func (s *Server) imageTask(ctx context.Context, projectID uuid.UUID, entry store
 			"registry_auth": reg,
 			"force":         force,
 			"spec_hash":     entry.SpecHash,
+		}
+		// A wave 2a agent rejects an unknown key. Absent files means [].
+		// secret_keys is sent only when this host stored programs.files,
+		// and then always, including an empty list.
+		if len(files) > 0 {
+			out["files"] = files
+		}
+		if host.Programs != nil && host.Programs.Files {
+			out["secret_keys"] = secretKeys
 		}
 		if action == "rollback" {
 			out["digest"] = digest
@@ -622,31 +660,182 @@ func (s *Server) imageTask(ctx context.Context, projectID uuid.UUID, entry store
 	}
 }
 
-// redactValues loads the entry's env values and the matching registry token
-// only so a response can hide them. The task frame is not changed. A missing
-// key returns nothing. A decrypt failure logs once, with no value, and returns
-// nothing so the caller keeps the keyword rule and still answers.
+// redactValues loads secret env values that opened, the matching registry
+// token when it opens, and secret file pieces. Each source is collected on
+// its own: an env or registry failure does not drop file pieces that opened.
+// Plain env-set values and inline env are not included. The task frame is
+// not changed. A missing key returns nothing; image_logs is refused before
+// this runs when the entry references a secret env key or a secret file. A
+// decrypt failure logs once, with no value. A missing or undecryptable file
+// is skipped; every secret that opened is still returned. The same set is
+// used whether or not the frame sends secret_keys.
 func (s *Server) redactValues(ctx context.Context, projectID uuid.UUID, img catalog.Image) []string {
-	if s.Secrets == nil {
-		return nil
-	}
-	env, err := s.mergeEnv(ctx, projectID, img)
-	if err != nil {
+	var secrets []string
+	failed := false
+	if s.Secrets != nil {
+		envSecrets, envFailed := s.redactEnvValues(ctx, projectID, img)
+		secrets = append(secrets, envSecrets...)
+		failed = envFailed
+		reg, err := s.registryAuth(ctx, projectID, img.RegistryHost)
 		if errors.Is(err, errDecrypt) {
-			s.logger().Error("decrypt failed")
+			failed = true
+		} else if err == nil {
+			secrets = append(secrets, secretValues(nil, nil, reg)...)
 		}
-		return nil
 	}
-	reg, err := s.registryAuth(ctx, projectID, img.RegistryHost)
-	if err != nil {
-		if errors.Is(err, errDecrypt) {
-			s.logger().Error("decrypt failed")
+	more, ferr := s.secretFileValues(ctx, projectID, img)
+	if errors.Is(ferr, errDecrypt) {
+		failed = true
+	}
+	if failed {
+		s.logger().Error("decrypt failed")
+	}
+	return append(secrets, more...)
+}
+
+// redactEnvValues returns secret env values whose winning material opened.
+// Precedence matches mergeEnv. A later set, secret_env, or inline env
+// replaces an earlier key. A winning secret that does not decrypt is omitted.
+// A store error skips that set and keeps values already opened. Deploy still
+// uses mergeEnv, which fails closed.
+func (s *Server) redactEnvValues(ctx context.Context, projectID uuid.UUID, img catalog.Image) ([]string, bool) {
+	out := map[string]string{}
+	failed := false
+	for _, set := range img.EnvSets {
+		mats, err := s.Store.ListEnvMaterial(ctx, projectID, set)
+		if err != nil {
+			continue
 		}
-		return nil
+		for _, m := range mats {
+			if !m.IsSecret {
+				delete(out, m.Key)
+				continue
+			}
+			val, err := s.openEnv(projectID, set, m)
+			if err != nil {
+				if errors.Is(err, errDecrypt) {
+					failed = true
+				}
+				delete(out, m.Key)
+				continue
+			}
+			out[m.Key] = val
+		}
 	}
-	secrets := make([]string, 0, len(env)+1)
-	for _, v := range env {
-		secrets = append(secrets, v)
+	for key, ref := range img.SecretEnv {
+		set, name, ok := strings.Cut(ref, ".")
+		if !ok {
+			failed = true
+			delete(out, key)
+			continue
+		}
+		mats, err := s.Store.ListEnvMaterial(ctx, projectID, set)
+		if err != nil {
+			delete(out, key)
+			continue
+		}
+		found := false
+		for _, m := range mats {
+			if m.Key != name {
+				continue
+			}
+			found = true
+			if !m.IsSecret {
+				delete(out, key)
+				break
+			}
+			val, err := s.openEnv(projectID, set, m)
+			if err != nil {
+				if errors.Is(err, errDecrypt) {
+					failed = true
+				}
+				delete(out, key)
+				break
+			}
+			out[key] = val
+			break
+		}
+		if !found {
+			failed = true
+			delete(out, key)
+		}
+	}
+	for key := range img.Env {
+		delete(out, key)
+	}
+	secrets := make([]string, 0, len(out))
+	for _, val := range out {
+		secrets = append(secrets, val)
+	}
+	return secrets, failed
+}
+
+// mergeEnv resolves env sets in order, then secret_env, then inline env.
+// The returned names are the keys whose winning value came from an env-set
+// key with is_secret, and which inline env did not override. The slice is
+// sorted and never nil.
+func (s *Server) mergeEnv(ctx context.Context, projectID uuid.UUID, img catalog.Image) (map[string]string, []string, error) {
+	out := map[string]string{}
+	secret := map[string]bool{}
+	for _, set := range img.EnvSets {
+		mats, err := s.Store.ListEnvMaterial(ctx, projectID, set)
+		if err != nil {
+			return nil, nil, err
+		}
+		for _, m := range mats {
+			val, err := s.openEnv(projectID, set, m)
+			if err != nil {
+				return nil, nil, err
+			}
+			out[m.Key] = val
+			secret[m.Key] = m.IsSecret
+		}
+	}
+	for key, ref := range img.SecretEnv {
+		set, name, ok := strings.Cut(ref, ".")
+		if !ok {
+			return nil, nil, errDecrypt
+		}
+		mats, err := s.Store.ListEnvMaterial(ctx, projectID, set)
+		if err != nil {
+			return nil, nil, err
+		}
+		found := false
+		for _, m := range mats {
+			if m.Key != name {
+				continue
+			}
+			val, err := s.openEnv(projectID, set, m)
+			if err != nil {
+				return nil, nil, err
+			}
+			out[key] = val
+			secret[key] = m.IsSecret
+			found = true
+			break
+		}
+		if !found {
+			return nil, nil, errDecrypt
+		}
+	}
+	for key, val := range img.Env {
+		out[key] = val
+		secret[key] = false
+	}
+	keys := make([]string, 0)
+	for key, isSecret := range secret {
+		if isSecret {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	return out, keys, nil
+}
+
+func secretValues(env map[string]string, keys []string, reg any) []string {
+	secrets := make([]string, 0, len(keys)+1)
+	for _, key := range keys {
+		secrets = append(secrets, env[key])
 	}
 	if regMap, ok := reg.(map[string]any); ok {
 		if tok, ok := regMap["token"].(string); ok {
@@ -656,51 +845,168 @@ func (s *Server) redactValues(ctx context.Context, projectID uuid.UUID, img cata
 	return secrets
 }
 
-func (s *Server) mergeEnv(ctx context.Context, projectID uuid.UUID, img catalog.Image) (map[string]string, error) {
-	out := map[string]string{}
+func (s *Server) projectFileNames(ctx context.Context, projectID uuid.UUID) (map[string]struct{}, error) {
+	items, err := s.Store.ListProjectFiles(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]struct{}{}
+	for _, item := range items {
+		out[item.Name] = struct{}{}
+	}
+	return out, nil
+}
+
+func filesReady(host store.Host, img catalog.Image) bool {
+	if len(img.Files) == 0 {
+		return true
+	}
+	return host.Programs != nil && host.Programs.Files
+}
+
+// logsNeedKey reports whether image_logs would have to hide a secret env
+// value or a secret file. Precedence matches mergeEnv and does not decrypt.
+// A plain winning value, a missing secret_env reference, and a registry
+// credential do not count. Inline env clears the flag.
+func (s *Server) logsNeedKey(ctx context.Context, projectID uuid.UUID, img catalog.Image) (bool, error) {
+	secret := map[string]bool{}
 	for _, set := range img.EnvSets {
 		mats, err := s.Store.ListEnvMaterial(ctx, projectID, set)
 		if err != nil {
-			return nil, err
+			return false, err
 		}
 		for _, m := range mats {
-			val, err := s.openEnv(projectID, set, m)
-			if err != nil {
-				return nil, err
-			}
-			out[m.Key] = val
+			secret[m.Key] = m.IsSecret
 		}
 	}
 	for key, ref := range img.SecretEnv {
 		set, name, ok := strings.Cut(ref, ".")
 		if !ok {
-			return nil, errDecrypt
+			continue
 		}
 		mats, err := s.Store.ListEnvMaterial(ctx, projectID, set)
 		if err != nil {
-			return nil, err
+			return false, err
 		}
-		found := false
 		for _, m := range mats {
 			if m.Key != name {
 				continue
 			}
-			val, err := s.openEnv(projectID, set, m)
-			if err != nil {
-				return nil, err
-			}
-			out[key] = val
-			found = true
+			secret[key] = m.IsSecret
 			break
 		}
-		if !found {
-			return nil, errDecrypt
+	}
+	for key := range img.Env {
+		secret[key] = false
+	}
+	for _, isSecret := range secret {
+		if isSecret {
+			return true, nil
 		}
 	}
-	for key, val := range img.Env {
-		out[key] = val
+	return s.filesNeedKey(ctx, projectID, img)
+}
+
+func (s *Server) filesNeedKey(ctx context.Context, projectID uuid.UUID, img catalog.Image) (bool, error) {
+	if len(img.Files) == 0 {
+		return false, nil
 	}
-	return out, nil
+	mats, err := s.Store.ListFileMaterial(ctx, projectID)
+	if err != nil {
+		return false, err
+	}
+	by := map[string]store.FileMaterial{}
+	for _, mat := range mats {
+		by[mat.Name] = mat
+	}
+	for _, row := range img.Files {
+		mat, ok := by[row.File]
+		if ok && mat.IsSecret {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Server) resolveFiles(ctx context.Context, projectID uuid.UUID, img catalog.Image) ([]map[string]any, []string, error) {
+	if len(img.Files) == 0 {
+		return []map[string]any{}, nil, nil
+	}
+	mats, err := s.Store.ListFileMaterial(ctx, projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	by := map[string]store.FileMaterial{}
+	for _, mat := range mats {
+		by[mat.Name] = mat
+	}
+	out := make([]map[string]any, 0, len(img.Files))
+	var secrets []string
+	for _, row := range img.Files {
+		mat, ok := by[row.File]
+		if !ok {
+			return nil, secrets, &agentws.CallError{Code: "bad_request", Msg: "file " + row.File + " no longer exists"}
+		}
+		content, err := s.openFile(projectID, mat)
+		if err != nil {
+			return nil, secrets, err
+		}
+		if mat.IsSecret {
+			secrets = append(secrets, secretFilePieces(content)...)
+		}
+		out = append(out, map[string]any{
+			"name":    row.File,
+			"target":  row.Target,
+			"content": content,
+			"secret":  mat.IsSecret,
+		})
+	}
+	return out, secrets, nil
+}
+
+func (s *Server) secretFileValues(ctx context.Context, projectID uuid.UUID, img catalog.Image) ([]string, error) {
+	if len(img.Files) == 0 || s.Secrets == nil {
+		return nil, nil
+	}
+	mats, err := s.Store.ListFileMaterial(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	by := map[string]store.FileMaterial{}
+	for _, mat := range mats {
+		by[mat.Name] = mat
+	}
+	var secrets []string
+	var failed error
+	for _, row := range img.Files {
+		mat, ok := by[row.File]
+		if !ok || !mat.IsSecret {
+			continue
+		}
+		content, err := s.openFile(projectID, mat)
+		if err != nil {
+			if errors.Is(err, errDecrypt) {
+				failed = err
+			}
+			continue
+		}
+		secrets = append(secrets, secretFilePieces(content)...)
+	}
+	return secrets, failed
+}
+
+func (s *Server) openFile(projectID uuid.UUID, m store.FileMaterial) (string, error) {
+	if !m.IsSecret {
+		return m.Plain, nil
+	}
+	if s.Secrets == nil {
+		return "", errSecretsKey
+	}
+	plain, err := s.Secrets.Open(seal.FileAAD(projectID.String(), m.Name), m.Nonce, m.Ciphertext)
+	if err != nil {
+		return "", errDecrypt
+	}
+	return string(plain), nil
 }
 
 func (s *Server) openEnv(projectID uuid.UUID, set string, m store.EnvMaterial) (string, error) {
@@ -735,12 +1041,16 @@ func (s *Server) registryAuth(ctx context.Context, projectID uuid.UUID, host str
 	return map[string]any{"host": host, "username": mat.Username, "token": string(token)}, nil
 }
 
-// storedSpec is the entry's ImageSpec as stored. Inline env, env_sets, and
-// secret_env stay references. Resolved values travel only in the task's top-level env.
+// storedSpec is the entry's ImageSpec for the task frame. Inline env, env_sets,
+// and secret_env stay references. Resolved values travel only in the task's
+// top-level env. An empty files list is omitted; a wave 2a agent rejects the key.
 func storedSpec(img catalog.Image) (map[string]any, error) {
 	var spec map[string]any
 	if err := json.Unmarshal([]byte(catalog.SpecJSON(img)), &spec); err != nil {
 		return nil, err
+	}
+	if len(img.Files) == 0 {
+		delete(spec, "files")
 	}
 	return spec, nil
 }
@@ -903,7 +1213,7 @@ func takeStatus(remove bool, res agentws.LiveResult, err error, forms []string) 
 		if st, stOK := normalizeStatus(p.Status); stOK {
 			outcome := "failed"
 			if imageOutcomeOK(call.Msg) && call.Msg != "succeeded" {
-				outcome = redactExact(call.Msg, forms)
+				outcome = call.Msg
 			}
 			return imageCall{outcome: outcome, status: st, lines: []string{}}
 		}
@@ -1114,6 +1424,54 @@ func boundLines(lines []string, maxCount int) ([]string, bool) {
 	return lines, true
 }
 
+// secretFilePieces is agent-protocol v1.5 exact-value redaction for one secret
+// file, before raw, base64, and JSON-escaped forms. Whole content is kept at
+// 6–4096 bytes. Trimmed lines, JSON string values, and trimmed lines inside
+// those values are kept at 16–4096 bytes. A shorter secret file adds nothing.
+func secretFilePieces(content string) []string {
+	var out []string
+	if n := len(content); n >= secretRedactMin && n <= secretPieceMax {
+		out = append(out, content)
+	}
+	out = append(out, trimmedSecretLines(content)...)
+	var doc any
+	if json.Unmarshal([]byte(content), &doc) == nil {
+		out = append(out, jsonSecretPieces(doc)...)
+	}
+	return out
+}
+
+func trimmedSecretLines(s string) []string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		line = strings.TrimSpace(line)
+		if n := len(line); n >= secretLineMin && n <= secretPieceMax {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+func jsonSecretPieces(v any) []string {
+	var out []string
+	switch x := v.(type) {
+	case string:
+		if n := len(x); n >= secretLineMin && n <= secretPieceMax {
+			out = append(out, x)
+		}
+		out = append(out, trimmedSecretLines(x)...)
+	case map[string]any:
+		for _, child := range x {
+			out = append(out, jsonSecretPieces(child)...)
+		}
+	case []any:
+		for _, child := range x {
+			out = append(out, jsonSecretPieces(child)...)
+		}
+	}
+	return out
+}
+
 func redactLines(lines []string, forms []string) []string {
 	out := make([]string, len(lines))
 	for i, line := range lines {
@@ -1160,8 +1518,10 @@ func redactExact(s string, forms []string) string {
 	return ingest.RedactCmdline(s)
 }
 
-// redactBody applies exact and keyword redaction to each JSON string.
-// The keyword rule treats every following non-space byte as the value, so
+// redactBody applies exact and keyword redaction to each JSON string of an
+// error envelope. Success bodies do not use it: lines are already redacted,
+// and outcome, digest, exit_code, and status fields pass through. The
+// keyword rule treats every following non-space byte as the value, so
 // running it on the raw document would swallow the rest of the object.
 func redactBody(body []byte, forms []string) []byte {
 	if len(body) == 0 {
@@ -1247,8 +1607,8 @@ func (s *Server) recordAudit(ctx context.Context, row store.AuditRow) {
 	_ = s.settle(write)
 }
 
-func (s *Server) imageDone(w http.ResponseWriter, userID uuid.UUID, key string, payload any, forms []string) {
-	body := redactBody(envelopeRaw("ok", "ok", payload), forms)
+func (s *Server) imageDone(w http.ResponseWriter, userID uuid.UUID, key string, payload any) {
+	body := envelopeRaw("ok", "ok", payload)
 	s.finishImageKey(userID, key, http.StatusOK, body)
 	writeJSON(w, http.StatusOK, body)
 }

@@ -56,6 +56,8 @@ const (
 	ActionEnvSetDelete          = "env_set.delete"
 	ActionRegistryPut           = "registry.put"
 	ActionRegistryDelete        = "registry.delete"
+	ActionFilePut               = "file.put"
+	ActionFileDelete            = "file.delete"
 
 	ViaConsole = "console"
 	ViaMCP     = "mcp"

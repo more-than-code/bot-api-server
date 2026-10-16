@@ -73,7 +73,7 @@ func assertImages(t *testing.T, d *DB, ctx context.Context, at time.Time) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	img, err := catalog.BuildImage("web", []byte(`{"kind":"service","image":"nginx","env_sets":["svc"]}`), catalog.SetKeys{"svc": {"TOKEN"}})
+	img, err := catalog.BuildImage("web", []byte(`{"kind":"service","image":"nginx","env_sets":["svc"]}`), catalog.SetKeys{"svc": {"TOKEN"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ VALUES ($1::uuid, 'svc', 'LEAK', true, 'plain-and-secret')
 
 func assertImageSchema(t *testing.T, d *DB, ctx context.Context) {
 	t.Helper()
-	for _, table := range []string{"image_deploys", "env_sets", "env_values", "registries"} {
+	for _, table := range []string{"image_deploys", "env_sets", "env_values", "registries", "project_files"} {
 		var name *string
 		if err := d.pool.QueryRow(ctx, `SELECT to_regclass($1)`, "app."+table).Scan(&name); err != nil || name == nil {
 			t.Fatalf("table %s %v", table, err)
@@ -328,6 +328,7 @@ WHERE table_schema = 'app' AND table_name = 'services' AND column_name = 'image_
 	assertTablePrivs(t, d, ctx, "env_sets", true, true, false, true, []string{"updated_at", "updated_by"})
 	assertTablePrivs(t, d, ctx, "env_values", true, true, false, true, []string{"is_secret", "value", "nonce", "ciphertext", "key_version"})
 	assertTablePrivs(t, d, ctx, "registries", true, true, false, true, []string{"username", "nonce", "ciphertext", "key_version", "updated_at", "updated_by"})
+	assertTablePrivs(t, d, ctx, "project_files", true, true, false, true, []string{"is_secret", "content_plain", "nonce", "content_cipher", "key_version", "sha256", "size", "updated_by", "updated_at"})
 	var indexDef string
 	if err := d.pool.QueryRow(ctx, `SELECT pg_get_indexdef(to_regclass('app.image_deploys_in_flight_uidx'))`).Scan(&indexDef); err != nil {
 		t.Fatal(err)

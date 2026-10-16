@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/more-than-code/bot-api-server/internal/seal"
+	"github.com/more-than-code/bot-api-server/internal/secret"
 	"github.com/more-than-code/bot-api-server/internal/store"
 )
 
@@ -186,6 +187,9 @@ func TestImageTaskFrame(t *testing.T) {
 	if strings.Join(mapKeys(spec), ",") != "entry,env,force,project,registry_auth,spec,spec_hash" {
 		t.Fatalf("spec keys %#v", spec)
 	}
+	if _, ok := spec["files"]; ok {
+		t.Fatalf("empty files key %#v", spec["files"])
+	}
 	if spec["project"] != "proj" || spec["entry"] != "web" || spec["force"] != false || spec["spec_hash"] != hash {
 		t.Fatalf("spec %#v", spec)
 	}
@@ -197,6 +201,9 @@ func TestImageTaskFrame(t *testing.T) {
 	nestedEnv, _ := nested["env"].(map[string]any)
 	nestedSets, _ := nested["env_sets"].([]any)
 	nestedSecret, _ := nested["secret_env"].(map[string]any)
+	if _, ok := nested["files"]; ok {
+		t.Fatalf("nested files key %#v", nested["files"])
+	}
 	if nestedEnv["NODE_ENV"] != "from-inline" || len(nestedEnv) != 1 || len(nestedSets) != 1 || nestedSets[0] != "svc" || nestedSecret["DB_PASSWORD"] != "lock.DB_PASSWORD" || len(nestedSecret) != 1 {
 		t.Fatalf("stored spec %#v", nested)
 	}
@@ -555,8 +562,12 @@ func TestImageFlightRollbackDisconnect(t *testing.T) {
 		t.Fatalf("rollback %#v", log.raw(0))
 	}
 	rb, _ := log.raw(0)["spec"].(map[string]any)
-	if strings.Join(mapKeys(rb), ",") != "digest,entry,env,force,project,registry_auth,spec,spec_hash" || rb["digest"] != digests[3] {
+	if _, ok := rb["files"]; ok || strings.Join(mapKeys(rb), ",") != "digest,entry,env,force,project,registry_auth,spec,spec_hash" || rb["digest"] != digests[3] {
 		t.Fatalf("rollback spec %#v", rb)
+	}
+	rbNested, _ := rb["spec"].(map[string]any)
+	if _, ok := rbNested["files"]; ok {
+		t.Fatalf("rollback nested files %#v", rbNested["files"])
 	}
 	if log.raw(0)["timeout_sec"] != float64(390) {
 		t.Fatalf("rollback timeout %#v", log.raw(0)["timeout_sec"])
@@ -1143,6 +1154,7 @@ func TestImageNilKeyDoesNotStick(t *testing.T) {
 		{name: "secret", spec: `{"kind":"service","image":"nginx","secret_env":{"DB_PASSWORD":"lock.DB_PASSWORD"}}`, setup: "secret", action: "deploy"},
 		{name: "env", spec: `{"kind":"service","image":"nginx","env_sets":["svc"]}`, setup: "env", action: "deploy"},
 		{name: "rollback", spec: `{"kind":"service","image":"nginx","env_sets":["svc"]}`, setup: "env", action: "rollback"},
+		{name: "files", spec: `{"kind":"service","image":"nginx","files":[{"file":"key.json","target":"/run/secrets/key.json"}]}`, setup: "files", action: "deploy"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1157,13 +1169,20 @@ func TestImageNilKeyDoesNotStick(t *testing.T) {
 				putRegistry(t, w, tok, project, "ghcr.io", "bot", regSecret)
 			case "secret":
 				putEnv(t, w, tok, project, "lock", "DB_PASSWORD="+envSecret+"\n")
+			case "files":
+				status, env, _ := putFile(t, w, tok, project, "key.json", "file-lock-secret-value", nil)
+				mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
 			default:
 				putEnv(t, w, tok, project, "svc", "FOO="+envSecret+"\n")
 			}
 			created := createImage(t, w, tok, sc.project.ID, "web", tc.spec)
 			entryID := uuid.MustParse(created["id"].(string))
 			hash, _ := created["spec_hash"].(string)
-			conn := helloAgent(t, w, sc.host, sc.credPlain, sc.credID, allowImages(), nil)
+			programs := allowImages()
+			if tc.setup == "files" {
+				programs["files"] = true
+			}
+			conn := helloAgent(t, w, sc.host, sc.credPlain, sc.credID, programs, nil)
 			log := watchTasks(t, conn, func(msg map[string]any) map[string]any {
 				return imageDeployReply(msg, shaDigest(2))
 			})
@@ -1197,6 +1216,207 @@ func TestImageNilKeyDoesNotStick(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestImageSecretKeys(t *testing.T) {
+	w := newWorld(t)
+	w.srv.Secrets = testBox(t)
+	owner := w.user("owner@ex.com", "Owner")
+	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
+	tok := w.token(owner.ID)
+	project := sc.project.ID.String()
+	putEnv(t, w, tok, project, "services", "DB_NAME=mohiguide\nBETA=beta-secret-value\nZED=zed-secret-value\n")
+	status, env, _ := mustCall(t, w, tok, http.MethodPatch, envPath(project, "services")+"/keys/DB_NAME", `{"is_secret":false}`)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	createImage(t, w, tok, sc.project.ID, "web", `{"kind":"service","image":"nginx","env_sets":["services"],"secret_env":{"FROM_SECRET":"services.BETA","FROM_PLAIN":"services.DB_NAME"},"env":{"BETA":"inline-not-secret"}}`)
+	createImage(t, w, tok, sc.project.ID, "plain", `{"kind":"service","image":"nginx","env":{"ONLY":"inline-only"}}`)
+	conn := helloAgent(t, w, sc.host, sc.credPlain, sc.credID, allowImages(), nil)
+	log := watchTasks(t, conn, func(msg map[string]any) map[string]any {
+		return imageDeployReply(msg, shaDigest(5))
+	})
+	host := sc.host.ID.String()
+	status, env, _ = postImage(t, w, tok, project, "web", "deploy", host, "off-1", nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	spec, _ := log.raw(0)["spec"].(map[string]any)
+	_, hasKeys := spec["secret_keys"]
+	_, hasFiles := spec["files"]
+	if hasKeys || hasFiles || strings.Join(mapKeys(spec), ",") != "entry,env,force,project,registry_auth,spec,spec_hash" {
+		t.Fatalf("files-false frame %#v", spec)
+	}
+	envMap, _ := spec["env"].(map[string]any)
+	if envMap["DB_NAME"] != "mohiguide" || envMap["BETA"] != "inline-not-secret" || envMap["ZED"] != "zed-secret-value" || envMap["FROM_SECRET"] != "beta-secret-value" || envMap["FROM_PLAIN"] != "mohiguide" || len(envMap) != 5 {
+		t.Fatalf("env %#v", envMap)
+	}
+	setPrograms(t, w, sc.host.ID, &store.HostPrograms{Enabled: true, RunAs: []string{"joe"}, Images: true, Docker: true, PolicyHash: "abc", Files: true})
+	status, env, _ = postImage(t, w, tok, project, "web", "deploy", host, "on-1", nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	spec, _ = log.raw(1)["spec"].(map[string]any)
+	if _, ok := spec["files"]; ok || strings.Join(mapKeys(spec), ",") != "entry,env,force,project,registry_auth,secret_keys,spec,spec_hash" || strings.Join(stringList(spec["secret_keys"]), ",") != "FROM_SECRET,ZED" {
+		t.Fatalf("files-true frame %#v", spec)
+	}
+	status, env, _ = postImage(t, w, tok, project, "plain", "deploy", host, "empty-1", nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	spec, _ = log.raw(2)["spec"].(map[string]any)
+	keys, isSlice := spec["secret_keys"].([]any)
+	if _, ok := spec["files"]; ok || !isSlice || len(keys) != 0 {
+		t.Fatalf("empty secret_keys %#v", spec["secret_keys"])
+	}
+}
+
+func TestImagePlainEnvNotRedacted(t *testing.T) {
+	const plain = "mohiguide"
+	const secretVal = "s3cret-value-1"
+	w := newWorld(t)
+	w.srv.Secrets = testBox(t)
+	owner := w.user("owner@ex.com", "Owner")
+	ctx := context.Background()
+	project, err := w.mem.CreateProject(ctx, owner.ID, "Mohi Guide", plain, w.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, joinHash, err := secret.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.mem.CreateJoinToken(ctx, project.ID, joinHash, nil, owner.ID, w.now.Add(time.Hour), w.now); err != nil {
+		t.Fatal(err)
+	}
+	credPlain, credHash, err := secret.NewToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	credID := uuid.New()
+	host, err := w.mem.ConsumeJoinToken(ctx, joinHash, store.EnrollInput{
+		Name: "pi3", NodeType: "pi", OS: "linux", Arch: "arm64", AlwaysOn: true, AgentVersion: "0.1.0",
+	}, credID, credHash, w.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := w.token(owner.ID)
+	pid := project.ID.String()
+	putEnv(t, w, tok, pid, "services", "DB_NAME="+plain+"\nAPI_KEY="+secretVal+"\n")
+	status, env, _ := mustCall(t, w, tok, http.MethodPatch, envPath(pid, "services")+"/keys/DB_NAME", `{"is_secret":false}`)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	createImage(t, w, tok, project.ID, "web", `{"kind":"service","image":"nginx","env_sets":["services"]}`)
+	conn := helloAgent(t, w, host, credPlain, credID, allowImages(), nil)
+	lines := []string{"db " + plain + " ready", "key " + secretVal + " used"}
+	log := watchTasks(t, conn, func(msg map[string]any) map[string]any {
+		kind, _ := msg["kind"].(string)
+		if kind == "image_logs" {
+			return map[string]any{
+				"v": 1, "type": "task_result", "task_id": msg["task_id"], "state": "succeeded",
+				"payload": map[string]any{"container": plain + "-web", "lines": lines, "truncated": false},
+			}
+		}
+		return map[string]any{
+			"v": 1, "type": "task_result", "task_id": msg["task_id"], "state": "succeeded",
+			"payload": map[string]any{
+				"outcome": "succeeded", "digest": shaDigest(4), "exit_code": 0,
+				"status": map[string]any{
+					"container": plain + "-web", "state": "running", "restart_count": 0, "ports": []int{},
+				},
+				"lines": lines,
+			},
+		}
+	})
+	hostID := host.ID.String()
+	status, env, raw := postImage(t, w, tok, pid, "web", "deploy", hostID, "mohi-1", nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	spec, _ := log.raw(0)["spec"].(map[string]any)
+	if spec["project"] != plain {
+		t.Fatalf("slug %#v", spec["project"])
+	}
+	_, hasKeys := spec["secret_keys"]
+	_, hasFiles := spec["files"]
+	if hasKeys || hasFiles {
+		t.Fatalf("files-false frame sent secret_keys or files %#v", spec)
+	}
+	envMap, _ := spec["env"].(map[string]any)
+	if envMap["DB_NAME"] != plain || envMap["API_KEY"] != secretVal {
+		t.Fatalf("env %#v", envMap)
+	}
+	assertPlainKept(t, env, raw, false)
+	status, env, replay := postImage(t, w, tok, pid, "web", "deploy", hostID, "mohi-1", nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	if replay != raw || log.count() != 1 {
+		t.Fatal("idempotency body changed or replay dispatched")
+	}
+	assertPlainKept(t, env, replay, false)
+	status, env, raw = postImage(t, w, tok, pid, "web", "logs", hostID, "", nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	assertPlainKept(t, env, raw, true)
+	if log.count() != 2 || log.raw(1)["kind"] != "image_logs" {
+		t.Fatalf("logs tasks %d", log.count())
+	}
+}
+
+func assertPlainKept(t *testing.T, env envelope, raw string, logs bool) {
+	t.Helper()
+	payload := objectPayload(t, env)
+	container := payload["container"]
+	if !logs {
+		status, _ := payload["status"].(map[string]any)
+		container = status["container"]
+		deploy, _ := payload["deploy"].(map[string]any)
+		if deploy["outcome"] != "succeeded" || deploy["digest"] != shaDigest(4) || deploy["exit_code"] != float64(0) {
+			t.Fatalf("deploy %#v", deploy)
+		}
+	}
+	lines, _ := payload["lines"].([]any)
+	if container != "mohiguide-web" || len(lines) != 2 || lines[0] != "db mohiguide ready" || lines[1] != "key [redacted] used" || strings.Contains(raw, "s3cret-value-1") {
+		t.Fatalf("redaction %#v %s", payload, raw)
+	}
+}
+
+func TestDotenvLiteralResolved(t *testing.T) {
+	w := newWorld(t)
+	w.srv.Secrets = testBox(t)
+	owner := w.user("owner@ex.com", "Owner")
+	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
+	tok := w.token(owner.ID)
+	project := sc.project.ID.String()
+	putEnv(t, w, tok, project, "literals", "DOLLAR=$HOME/bin\nSLASH=C:\\temp\nESCAPED=a\\nb\n")
+	createImage(t, w, tok, sc.project.ID, "web", `{"kind":"service","image":"nginx","env_sets":["literals"]}`)
+	conn := helloAgent(t, w, sc.host, sc.credPlain, sc.credID, allowImages(), nil)
+	log := watchTasks(t, conn, func(msg map[string]any) map[string]any {
+		return imageDeployReply(msg, shaDigest(6))
+	})
+	status, env, _ := postImage(t, w, tok, project, "web", "deploy", sc.host.ID.String(), "lit-1", nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	spec, _ := log.raw(0)["spec"].(map[string]any)
+	envMap, _ := spec["env"].(map[string]any)
+	if envMap["DOLLAR"] != "$HOME/bin" || envMap["SLASH"] != `C:\temp` || envMap["ESCAPED"] != `a\nb` || len(envMap) != 3 {
+		t.Fatalf("resolved %#v", envMap)
+	}
+	for _, key := range []string{"DOLLAR", "SLASH", "ESCAPED"} {
+		status, env, _ = mustCall(t, w, tok, http.MethodPatch, envPath(project, "literals")+"/keys/"+key, `{"is_secret":false}`)
+		mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	}
+	status, env, _ = mustCall(t, w, tok, http.MethodGet, envPath(project, "literals"), "")
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	got := map[string]string{}
+	for _, item := range objectPayload(t, env)["keys"].([]any) {
+		row, _ := item.(map[string]any)
+		name, _ := row["key"].(string)
+		value, _ := row["value"].(string)
+		if row["is_secret"] != false || value == "" {
+			t.Fatalf("stored %#v", row)
+		}
+		got[name] = value
+	}
+	if got["DOLLAR"] != "$HOME/bin" || got["SLASH"] != `C:\temp` || got["ESCAPED"] != `a\nb` || len(got) != 3 {
+		t.Fatalf("stored %#v", got)
+	}
+}
+
+func stringList(v any) []string {
+	items, _ := v.([]any)
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		s, _ := item.(string)
+		out = append(out, s)
+	}
+	return out
 }
 
 func TestImageRedactsAgentEcho(t *testing.T) {
@@ -1314,7 +1534,21 @@ func TestImageShortActionsRedactEcho(t *testing.T) {
 		}
 		status, env, raw := postImage(t, w, tok, project, "web", action, host, key, extra)
 		mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
-		assertNoSecret(t, raw)
+		payload := objectPayload(t, env)
+		if action == "logs" {
+			if payload["container"] != echo {
+				t.Fatalf("logs container %#v", payload["container"])
+			}
+			assertNoSecret(t, mustText(payload["lines"]))
+		} else {
+			statusBody := payload
+			if action == "remove" {
+				statusBody, _ = payload["status"].(map[string]any)
+			}
+			if statusBody["container"] != echo || statusBody["started_at"] != envSecret || statusBody["finished_at"] != regSecret {
+				t.Fatalf("%s status %#v", action, statusBody)
+			}
+		}
 		assertShortImage(t, action, env)
 		task := log.raw(log.count() - 1)
 		if task["kind"] != imageKind(action) {
@@ -1352,7 +1586,6 @@ func TestImageShortActionsRedactEcho(t *testing.T) {
 		if raw != stored[action] {
 			t.Fatalf("%s replay body changed", action)
 		}
-		assertNoSecret(t, raw)
 	}
 	if log.count() != len(actions) {
 		t.Fatal("replay dispatched")
@@ -1368,6 +1601,9 @@ func TestImageShortRedactWithoutKey(t *testing.T) {
 	project := sc.project.ID.String()
 	putEnv(t, w, tok, project, "svc", "FOO="+envSecret+"\n")
 	putRegistry(t, w, tok, project, "ghcr.io", "bot", regSecret)
+	// FOO is plain. A missing key still returns logs. The registry credential is not a reason to refuse.
+	status, env, _ := mustCall(t, w, tok, http.MethodPatch, envPath(project, "svc")+"/keys/FOO", `{"is_secret":false}`)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
 	createImage(t, w, tok, sc.project.ID, "web", `{"kind":"service","image":"ghcr.io/joe/app","env_sets":["svc"]}`)
 	w.srv.Secrets = nil
 	logs := captureLog(w)
@@ -1384,11 +1620,64 @@ func TestImageShortRedactWithoutKey(t *testing.T) {
 	})
 	status, env, raw := postImage(t, w, tok, project, "web", "logs", sc.host.ID.String(), "", nil)
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
-	if !strings.Contains(raw, envSecret) || !strings.Contains(raw, "password=[REDACTED]") || strings.Contains(raw, "hunter22") {
-		t.Fatalf("key unset body %s", raw)
+	if objectPayload(t, env)["container"] != "password=hunter22" {
+		t.Fatalf("container %#v", objectPayload(t, env)["container"])
+	}
+	lines := mustText(objectPayload(t, env)["lines"])
+	if !strings.Contains(lines, envSecret) || !strings.Contains(lines, "password=[REDACTED]") || strings.Contains(lines, "hunter22") {
+		t.Fatalf("key unset lines %s body %s", lines, raw)
 	}
 	if strings.Contains(logs.String(), "decrypt failed") || strings.Contains(logs.String(), envSecret) {
 		t.Fatalf("key unset log %s", logs.String())
+	}
+}
+
+func TestImageLogsRefusesMissingKey(t *testing.T) {
+	w := newWorld(t)
+	w.srv.Secrets = testBox(t)
+	owner := w.user("owner@ex.com", "Owner")
+	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
+	tok := w.token(owner.ID)
+	project := sc.project.ID.String()
+	putEnv(t, w, tok, project, "svc", "FOO="+envSecret+"\n")
+	createImage(t, w, tok, sc.project.ID, "sek", `{"kind":"service","image":"nginx","env_sets":["svc"]}`)
+	createImage(t, w, tok, sc.project.ID, "copy", `{"kind":"service","image":"nginx","secret_env":{"COPIED":"svc.FOO"}}`)
+	createImage(t, w, tok, sc.project.ID, "over", `{"kind":"service","image":"nginx","env_sets":["svc"],"env":{"FOO":"inline-plain-value"}}`)
+	w.srv.Secrets = nil
+	logged := captureLog(w)
+	conn := helloAgent(t, w, sc.host, sc.credPlain, sc.credID, allowImages(), nil)
+	tasks := watchTasks(t, conn, func(msg map[string]any) map[string]any {
+		return map[string]any{
+			"v": 1, "type": "task_result", "task_id": msg["task_id"], "state": "succeeded",
+			"payload": map[string]any{
+				"container": "web",
+				"lines":     []string{"password=hunter22", "inline-plain-value"},
+				"truncated": false,
+			},
+		}
+	})
+	host := sc.host.ID.String()
+	for _, name := range []string{"sek", "copy"} {
+		status, env, raw := postImage(t, w, tok, project, name, "logs", host, "", nil)
+		mustHTTP(t, status, env, http.StatusServiceUnavailable, "unavailable", "secrets key not configured")
+		if env.Payload != nil || strings.Contains(raw, envSecret) {
+			t.Fatalf("%s returned lines %s", name, raw)
+		}
+	}
+	if tasks.count() != 0 {
+		t.Fatal("missing key dispatched")
+	}
+	if strings.Contains(logged.String(), "decrypt failed") || strings.Contains(logged.String(), envSecret) {
+		t.Fatalf("missing key log %s", logged.String())
+	}
+	status, env, raw := postImage(t, w, tok, project, "over", "logs", host, "", nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	if tasks.count() != 1 {
+		t.Fatal("inline override refused logs")
+	}
+	lines := mustText(objectPayload(t, env)["lines"])
+	if !strings.Contains(lines, "inline-plain-value") || !strings.Contains(lines, "password=[REDACTED]") || strings.Contains(lines, "hunter22") {
+		t.Fatalf("override lines %s body %s", lines, raw)
 	}
 }
 
@@ -1554,7 +1843,7 @@ func TestImageFrameTooLarge(t *testing.T) {
 	before := auditRows(t, w, sc.project.ID)
 	for _, key := range []string{"big-1", "big-2"} {
 		status, env, raw := postImage(t, w, tok, project, "web", "deploy", host, key, nil)
-		mustHTTP(t, status, env, http.StatusBadRequest, "bad_request", "the resolved environment is too large for one task")
+		mustHTTP(t, status, env, http.StatusBadRequest, "bad_request", "the resolved environment and files are too large for one task")
 		if strings.Contains(raw, "<") || strings.Contains(raw, `\u003c`) || log.count() != 0 {
 			t.Fatalf("oversize %s dispatched or echoed a value", key)
 		}
@@ -1620,7 +1909,7 @@ func TestImageClosedTaskSpecs(t *testing.T) {
 	status, env, _ := postImage(t, w, tok, project, "web", "rollback", host, "closed-roll", map[string]any{"digest": digest})
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
 	spec, _ := log.raw(log.count() - 1)["spec"].(map[string]any)
-	if strings.Join(mapKeys(spec), ",") != "digest,entry,env,force,project,registry_auth,spec,spec_hash" {
+	if _, ok := spec["files"]; ok || strings.Join(mapKeys(spec), ",") != "digest,entry,env,force,project,registry_auth,spec,spec_hash" {
 		t.Fatalf("rollback keys %#v", spec)
 	}
 	frame, err := json.Marshal(log.raw(log.count() - 1))

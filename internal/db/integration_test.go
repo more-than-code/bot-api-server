@@ -54,6 +54,7 @@ TRUNCATE TABLE
     app.env_values,
     app.env_sets,
     app.registries,
+    app.project_files,
     app.catalog_confirmations,
     app.catalog_host_approvals,
     app.catalog_grants,
@@ -112,7 +113,7 @@ TRUNCATE TABLE
 		t.Fatalf("migrations: %v", err)
 	}
 	rows.Close()
-	if !names["0001_app.sql"] || !names["0002_metrics.sql"] || !names["0003_shared_hosts.sql"] || !names["0004_service_names.sql"] || !names["0005_mcp_oauth.sql"] || !names["0006_invites.sql"] || !names["0007_catalog.sql"] || !names["0008_service_gone.sql"] || !names["0009_catalog_images.sql"] || names["0003_shared_hosts.down.sql"] || names["0004_service_names.down.sql"] || names["0005_mcp_oauth.down.sql"] || names["0006_invites.down.sql"] || names["0007_catalog.down.sql"] || names["0008_service_gone.down.sql"] || names["0009_catalog_images.down.sql"] {
+	if !names["0001_app.sql"] || !names["0002_metrics.sql"] || !names["0003_shared_hosts.sql"] || !names["0004_service_names.sql"] || !names["0005_mcp_oauth.sql"] || !names["0006_invites.sql"] || !names["0007_catalog.sql"] || !names["0008_service_gone.sql"] || !names["0009_catalog_images.sql"] || !names["0010_project_files.sql"] || names["0003_shared_hosts.down.sql"] || names["0004_service_names.down.sql"] || names["0005_mcp_oauth.down.sql"] || names["0006_invites.down.sql"] || names["0007_catalog.down.sql"] || names["0008_service_gone.down.sql"] || names["0009_catalog_images.down.sql"] || names["0010_project_files.down.sql"] {
 		t.Fatalf("schema_migrations = %v", names)
 	}
 

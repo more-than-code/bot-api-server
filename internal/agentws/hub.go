@@ -79,7 +79,7 @@ var errFrameTooLarge = errors.New("outbound frame too large")
 
 // EnvFrameTooLarge is the image deploy and rollback error when the task the
 // API built exceeds maxFrame. No bytes are written and the socket stays up.
-const EnvFrameTooLarge = "the resolved environment is too large for one task"
+const EnvFrameTooLarge = "the resolved environment and files are too large for one task"
 
 var _ http.Handler = (*Hub)(nil)
 

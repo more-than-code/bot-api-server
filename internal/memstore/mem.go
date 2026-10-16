@@ -72,6 +72,7 @@ type Mem struct {
 	envSets      map[string]envSetRec
 	envValues    map[string][]envValueRec
 	registries   map[string]registryRec
+	projectFiles map[string]fileRec
 	imageDeploys map[uuid.UUID]imageDeployRec
 }
 
@@ -148,6 +149,7 @@ func New() *Mem {
 		envSets:       map[string]envSetRec{},
 		envValues:     map[string][]envValueRec{},
 		registries:    map[string]registryRec{},
+		projectFiles:  map[string]fileRec{},
 		imageDeploys:  map[uuid.UUID]imageDeployRec{},
 	}
 }

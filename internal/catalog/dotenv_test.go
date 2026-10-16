@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -20,9 +21,6 @@ func TestParseDotenv(t *testing.T) {
 	}
 	refusals := []struct{ body, want, absent string }{
 		{"FOO=bar\nFOO=baz\n", "line 2: FOO duplicate", "baz"},
-		{"FOO=bar\\\n", "line 1: FOO invalid env value", ""},
-		{"FOO=\"a\\nb\"\n", "line 1: FOO invalid env value", "nb"},
-		{"FOO=$HOME\n", "line 1: FOO invalid env value", "HOME"},
 		{"FOO=\"unterminated\n", "line 1: FOO malformed", "unterminated"},
 		{"NOT KEY=1\n", "line 1: malformed", "NOT"},
 		{"PATH=/tmp/" + secret + "\n", "line 1: PATH is reserved", secret},
@@ -70,5 +68,44 @@ func TestParseDotenv(t *testing.T) {
 	}
 	if pairs, err := ParseDotenv([]byte(exact.String())); err != nil || len(pairs) != 256 {
 		t.Fatalf("256 keys: %d %v", len(pairs), err)
+	}
+	slash, err := ParseDotenv([]byte("FOO=bar\\\n"))
+	if err != nil || len(slash) != 1 || slash[0].Value != `bar\` {
+		t.Fatalf("backslash %#v %v", slash, err)
+	}
+	quotedSlash, err := ParseDotenv([]byte("FOO=\"a\\nb\"\n"))
+	if err != nil || len(quotedSlash) != 1 || quotedSlash[0].Value != `a\nb` {
+		t.Fatalf("quoted backslash %#v %v", quotedSlash, err)
+	}
+	dollar, err := ParseDotenv([]byte("FOO=$HOME\n"))
+	if err != nil || len(dollar) != 1 || dollar[0].Value != "$HOME" {
+		t.Fatalf("dollar %#v %v", dollar, err)
+	}
+}
+
+func TestDotenvJSONLiteral(t *testing.T) {
+	raw := []byte(`{"dotenv":"DOLLAR=$HOME/bin\nSLASH=C:\\temp\nESCAPED=\"a\\nb\"\n"}`)
+	var body struct {
+		Dotenv string `json:"dotenv"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseDotenv([]byte(body.Dotenv))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []EnvPair{
+		{Key: "DOLLAR", Value: "$HOME/bin"},
+		{Key: "SLASH", Value: `C:\temp`},
+		{Key: "ESCAPED", Value: `a\nb`},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("%#v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("pair %d %#v", i, got[i])
+		}
 	}
 }

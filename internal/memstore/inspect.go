@@ -3,6 +3,7 @@ package memstore
 import (
 	"bytes"
 
+	"github.com/google/uuid"
 	"github.com/more-than-code/bot-api-server/internal/store"
 )
 
@@ -14,6 +15,31 @@ func (m *Mem) AllAudits() []store.AuditEntry {
 	out := make([]store.AuditEntry, len(m.audits))
 	copy(out, m.audits)
 	return out
+}
+
+// DropProjectFile removes a file without the reference check. Tests use it
+// to build the deleted-since-save state the API refuses to create.
+func (m *Mem) DropProjectFile(projectID uuid.UUID, name string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.projectFiles, envKey(projectID, name))
+}
+
+// TamperProjectFile flips the last ciphertext byte. Tests use it to prove a
+// deploy fails closed. It does not log the bytes.
+func (m *Mem) TamperProjectFile(projectID uuid.UUID, name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	key := envKey(projectID, name)
+	rec, ok := m.projectFiles[key]
+	if !ok || len(rec.Ciphertext) == 0 {
+		return false
+	}
+	ct := append([]byte(nil), rec.Ciphertext...)
+	ct[len(ct)-1] ^= 0xff
+	rec.Ciphertext = ct
+	m.projectFiles[key] = rec
+	return true
 }
 
 // HoldsPlaintext reports whether a session, join token, invite, device code,

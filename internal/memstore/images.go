@@ -478,4 +478,9 @@ func (m *Mem) deleteSecretsLocked(projectID uuid.UUID) {
 			delete(m.registries, key)
 		}
 	}
+	for key := range m.projectFiles {
+		if len(key) >= len(prefix) && key[:len(prefix)] == prefix {
+			delete(m.projectFiles, key)
+		}
+	}
 }

@@ -5,6 +5,20 @@ import (
 	"testing"
 )
 
+func TestParseProgramsFiles(t *testing.T) {
+	absent, ok := parsePrograms(json.RawMessage(`{"enabled":true,"run_as":["joe"],"allow_shell":false,"policy_hash":"abc","images":true,"docker":true}`))
+	if !ok || absent == nil || absent.Files {
+		t.Fatalf("absent files %#v %v", absent, ok)
+	}
+	on, ok := parsePrograms(json.RawMessage(`{"enabled":true,"run_as":[],"allow_shell":false,"policy_hash":"abc","images":false,"docker":false,"files":true}`))
+	if !ok || on == nil || !on.Files || on.RunAs == nil {
+		t.Fatalf("files true %#v %v", on, ok)
+	}
+	if _, ok := parsePrograms(json.RawMessage(`{"enabled":true,"files":"yes"}`)); ok {
+		t.Fatal("non-bool files accepted")
+	}
+}
+
 func TestPolicyDeniedMapping(t *testing.T) {
 	code, msg := rejectCode("policy_denied")
 	if code != "forbidden" || msg != "forbidden" {

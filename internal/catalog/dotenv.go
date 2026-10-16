@@ -18,8 +18,9 @@ type EnvPair struct {
 	Value string
 }
 
-// ParseDotenv applies the v1.8 dotenv grammar.
-// Errors name the line and the key when the key parsed, and never a value.
+// ParseDotenv applies the dotenv grammar. A value is taken as written,
+// including $ and \. Errors name the line and the key when the key parsed,
+// and never a value.
 func ParseDotenv(in []byte) ([]EnvPair, error) {
 	if len(in) > maxDotenvBytes {
 		return nil, fieldErr("dotenv is too large")
@@ -62,7 +63,7 @@ func ParseDotenv(in []byte) ([]EnvPair, error) {
 		if changesWhatRuns(key) {
 			return nil, fieldErr(fmt.Sprintf("line %d: %s this variable changes what the program runs", n, key))
 		}
-		if strings.ContainsRune(value, 0) || strings.ContainsAny(value, "\\$") {
+		if strings.ContainsRune(value, 0) {
 			return nil, fieldErr(fmt.Sprintf("line %d: %s invalid env value", n, key))
 		}
 		if len(value) >= 2 {
@@ -91,7 +92,7 @@ func ParseDotenv(in []byte) ([]EnvPair, error) {
 }
 
 func dotenvValue(n int, key, value string) error {
-	if strings.ContainsRune(value, 0) || strings.ContainsAny(value, "\\$") || len(value) > maxEnvValue {
+	if strings.ContainsRune(value, 0) || len(value) > maxEnvValue {
 		return fieldErr(fmt.Sprintf("line %d: %s invalid env value", n, key))
 	}
 	return nil

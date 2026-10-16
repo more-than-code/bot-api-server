@@ -1,5 +1,5 @@
-// Package seal encrypts env values and registry tokens at rest.
-// Plaintext, keys, and nonces are never logged.
+// Package seal encrypts env values, registry tokens, and secret project
+// files at rest. Plaintext, keys, and nonces are never logged.
 package seal
 
 import (
@@ -36,6 +36,11 @@ func EnvAAD(projectID, setName, key string) string {
 // RegistryAAD binds a ciphertext to one registry host.
 func RegistryAAD(projectID, host string) string {
 	return projectID + "|registry|" + host
+}
+
+// FileAAD binds a ciphertext to one project file.
+func FileAAD(projectID, name string) string {
+	return projectID + "|file|" + name
 }
 
 // Seal returns a fresh 12-byte nonce and the ciphertext. The nonce is not

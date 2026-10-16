@@ -1,0 +1,120 @@
+{
+  "catalog_entry": {
+    "code": "ok",
+    "msg": "ok",
+    "payload": {
+      "command_display": "docker.io/library/nginx:latest",
+      "created_at": "2026-10-13T12:00:00Z",
+      "created_by": "OWNER",
+      "id": "ENTRY_WEB",
+      "kind": "image",
+      "my_actions": [
+        "run",
+        "stop",
+        "restart",
+        "logs",
+        "deploy",
+        "status"
+      ],
+      "name": "web",
+      "project_id": "PROJECT",
+      "spec": {
+        "command": null,
+        "entrypoint": null,
+        "env": {},
+        "env_sets": [],
+        "files": [
+          {
+            "file": "app.conf",
+            "target": "/config/app.conf"
+          },
+          {
+            "file": "key.json",
+            "target": "/run/secrets/key.json"
+          }
+        ],
+        "healthy_after_sec": 30,
+        "image": "docker.io/library/nginx:latest",
+        "kind": "service",
+        "memory_mb": null,
+        "ports": [],
+        "restart": "unless-stopped",
+        "secret_env": {},
+        "timeout_sec": 0,
+        "user": "",
+        "volumes": []
+      },
+      "spec_hash": "e15f4cd9919e5aca98cd7c40764c8a9145fe5df38fc379c6b171b7cec494f968",
+      "updated_at": "2026-10-13T12:00:00Z"
+    }
+  },
+  "delete_conflict": {
+    "code": "conflict",
+    "msg": "referenced by api, web",
+    "payload": null
+  },
+  "deploy_unsupported": {
+    "code": "bad_request",
+    "msg": "this host's agent does not support files",
+    "payload": null
+  },
+  "get_plain": {
+    "code": "ok",
+    "msg": "ok",
+    "payload": {
+      "content": "plain-config-line",
+      "name": "app.conf",
+      "sha256": "f395f66c028f7f579159bec04d13356b2027b4f36809bd4634301abb3cb530ff",
+      "size": 17,
+      "updated_at": "2026-10-13T12:00:00Z",
+      "updated_by": "OWNER"
+    }
+  },
+  "host_programs": {
+    "allow_shell": false,
+    "docker": true,
+    "enabled": true,
+    "files": true,
+    "images": true,
+    "policy_hash": "abc",
+    "run_as": [
+      "joe"
+    ]
+  },
+  "list_files": {
+    "code": "ok",
+    "msg": "ok",
+    "payload": {
+      "items": [
+        {
+          "is_secret": false,
+          "name": "app.conf",
+          "sha256": "f395f66c028f7f579159bec04d13356b2027b4f36809bd4634301abb3cb530ff",
+          "size": 17,
+          "updated_at": "2026-10-13T12:00:00Z",
+          "updated_by": "OWNER"
+        },
+        {
+          "is_secret": true,
+          "name": "key.json",
+          "sha256": null,
+          "size": 31,
+          "updated_at": "2026-10-13T12:00:00Z",
+          "updated_by": "OWNER"
+        }
+      ]
+    }
+  },
+  "put_file": {
+    "code": "ok",
+    "msg": "ok",
+    "payload": {
+      "is_secret": true,
+      "name": "key.json",
+      "sha256": null,
+      "size": 31,
+      "updated_at": "2026-10-13T12:00:00Z",
+      "updated_by": "OWNER"
+    }
+  }
+}

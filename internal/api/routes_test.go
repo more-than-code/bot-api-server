@@ -82,6 +82,10 @@ func TestRouteTable(t *testing.T) {
 		"GET /v1/projects/{id}/registries",
 		"PUT /v1/projects/{id}/registries/{host}",
 		"DELETE /v1/projects/{id}/registries/{host}",
+		"GET /v1/projects/{id}/files",
+		"GET /v1/projects/{id}/files/{name}",
+		"PUT /v1/projects/{id}/files/{name}",
+		"DELETE /v1/projects/{id}/files/{name}",
 		"GET /v1/projects/{id}/hosts",
 		"GET /v1/projects/{id}/services",
 		"GET /v1/hosts/{id}",
@@ -211,7 +215,7 @@ func callsAuthorize(body *ast.BlockStmt) bool {
 	found := false
 	ast.Inspect(body, func(n ast.Node) bool {
 		sel, ok := n.(*ast.SelectorExpr)
-		if ok && (sel.Sel.Name == "Authorize" || sel.Sel.Name == "AuthorizeHost" || sel.Sel.Name == "AuthorizeUnshare" || sel.Sel.Name == "gateHost") {
+		if ok && (sel.Sel.Name == "Authorize" || sel.Sel.Name == "AuthorizeHost" || sel.Sel.Name == "AuthorizeUnshare" || sel.Sel.Name == "gateHost" || sel.Sel.Name == "fileProject") {
 			found = true
 		}
 		return true
