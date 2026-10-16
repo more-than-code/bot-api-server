@@ -150,7 +150,8 @@ func (s *Server) handleConfirmation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if body.Key != c.IdempotencyKey {
-		writeCode(w, "conflict", "conflict")
+		// The confirm call reuses the key of the request that returned the 202.
+		writeCode(w, "conflict", "idempotency_key does not match the request that issued this confirmation")
 		return
 	}
 	role, err := s.Store.Role(r.Context(), c.ProjectID, p.User.ID)
