@@ -428,3 +428,7 @@ Create/replace take `{"name","kind":"image","spec":ImageSpec}` (`name` on create
 ### v1.8.1 amendment (2026-10-16, Joe approved; from the wave 2a browser smoke)
 
 `ImageStatus.state` gains **`unknown`**: the API did not receive the container's state in time (a deploy or rollback whose task ran past its budget, outcome `timeout`). With `unknown`, `container`, `exit_code`, `started_at`, `finished_at` and `digest` are null, `restart_count` is 0 and `ports` is `[]`. An empty string is never sent. Consumers show it as "unknown".
+
+### v1.8.2 amendment (2026-10-16, Joe approved; from the dev console after the wave 2a cleanup)
+
+`view=deploybot` (and so `deploybot_and_discovered`) no longer lists an **owned** row that is gone **and** whose `catalog_entry` no longer exists in the row's project: nothing can start it again. Such a row stays in the database and in `view=all`, with its `display_name` and health checks. If an entry with the same name is created and deployed, the next report clears `gone_at` and the row is listed again. Declared rows, owned rows with `gone_at = null`, and owned rows with `catalog_entry = null` are unchanged. `total` and cursors follow the narrower set. Before (v1.7): `deploybot` = `source` in (`owned`, `declared`), gone or not.

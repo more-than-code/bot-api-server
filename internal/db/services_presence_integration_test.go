@@ -17,6 +17,7 @@ func TestServicePresenceIntegration(t *testing.T) {
 	t.Run("column", func(t *testing.T) { assertGoneColumn(t, d, ctx) })
 	t.Run("mark", func(t *testing.T) { assertPresenceMark(t, d, ctx) })
 	t.Run("views", func(t *testing.T) { assertServiceViews(t, d, ctx) })
+	t.Run("deleted entry", func(t *testing.T) { assertDeletedEntryHidden(t, d, ctx) })
 	t.Run("status", func(t *testing.T) { assertStatusSortGoneLast(t, d, ctx) })
 	t.Run("filters", func(t *testing.T) { assertServiceViewFilters(t, d, ctx) })
 	t.Run("placed", func(t *testing.T) { assertPresencePlacedName(t, d, ctx) })
@@ -268,6 +269,55 @@ func assertServiceViews(t *testing.T, d *DB, ctx context.Context) {
 	}, at)
 	if err != nil || page.Total != 4 || len(page.Items) != 1 {
 		t.Fatalf("total %d items %d %v", page.Total, len(page.Items), err)
+	}
+}
+
+// A gone owned row whose catalog entry was deleted leaves the deploybot views;
+// "all" still lists it. A deleted entry's row that is still present stays.
+func assertDeletedEntryHidden(t *testing.T, d *DB, ctx context.Context) {
+	t.Helper()
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	tag := strings.ReplaceAll(uuid.New().String(), "-", "")[:10]
+	user := mustSvcUser(t, d, ctx, "deleted-"+tag, at)
+	project := mustSvcProject(t, d, ctx, user.ID, "Deleted", "deleted-"+tag, at)
+	host := enrollHostDB(t, d, ctx, project.ID, user.ID, "deleted-"+tag, at)
+	gone := at
+	for _, row := range []struct {
+		name string
+		gone *time.Time
+	}{
+		{"kept", &gone},
+		{"dropped", &gone},
+		{"running", nil},
+	} {
+		spec, hash, display := catalogSpec(t, "pnpm run dev")
+		if _, err := d.CreateCatalogEntry(ctx, project.ID, store.CatalogWrite{
+			Name: row.name, Spec: spec, SpecHash: hash, CommandDisplay: display, Actor: user.ID, At: at,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		id := insertPresenceRow(t, d, ctx, host.ID, project.ID, row.name, "owned", row.gone, at)
+		if _, err := d.pool.Exec(ctx, `UPDATE app.services SET catalog_entry = $2 WHERE id = $1::uuid`, id.String(), row.name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"dropped", "running"} {
+		if _, err := d.DeleteCatalogEntry(ctx, project.ID, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		view string
+		want []string
+	}{
+		{"all", []string{"dropped", "kept", "running"}},
+		{"deploybot", []string{"kept", "running"}},
+		{"deploybot_and_discovered", []string{"kept", "running"}},
+	} {
+		page, err := d.ListProjectServices(ctx, project.ID, store.ServiceListQuery{Sort: "name", Dir: "asc", Limit: 50, View: tc.view}, at)
+		if err != nil || !sameLive(livePageNames(page), tc.want) {
+			t.Fatalf("view %q %v %v", tc.view, livePageNames(page), err)
+		}
 	}
 }
 

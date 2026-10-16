@@ -35,7 +35,7 @@ Decisions (Joe, AskUserQuestion, 2026-10-15):
 | Ingest of a `services` report | upserts reported rows | also sets `gone_at = <report time>` on this host's rows not in the report (if still `null`), and `gone_at = null` on reported rows |
 
 View semantics:
-- `deploybot`: rows with `source` in (`owned`, `declared`), whether gone or not.
+- `deploybot`: rows with `source` in (`owned`, `declared`), whether gone or not. *(Amended by api-v1 v1.8.2, 2026-10-16: a gone owned row whose catalog entry was deleted is left out.)*
 - `deploybot_and_discovered`: `deploybot`, plus `source = discovered` rows with `gone_at IS NULL`.
 - `all`: every row, as today.
 

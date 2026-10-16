@@ -257,7 +257,7 @@ func (m *Mem) ListProjectServices(_ context.Context, projectID uuid.UUID, q stor
 		if q.HostID != nil && svc.HostID != *q.HostID {
 			continue
 		}
-		if !serviceInView(svc, q.View) {
+		if !m.serviceInViewLocked(svc, q.View) {
 			continue
 		}
 		projectName := ""
@@ -350,17 +350,34 @@ func serviceOrder(row store.ProjectService) store.ServiceOrder {
 	}
 }
 
-func serviceInView(svc store.Service, view string) bool {
+func (m *Mem) serviceInViewLocked(svc store.Service, view string) bool {
 	switch view {
 	case "deploybot":
-		return svc.Source == "owned" || svc.Source == "declared"
+		return m.deploybotRowLocked(svc)
 	case "deploybot_and_discovered":
-		if svc.Source == "owned" || svc.Source == "declared" {
+		if m.deploybotRowLocked(svc) {
 			return true
 		}
 		return svc.Source == "discovered" && svc.GoneAt == nil
 	default:
 		return true
+	}
+}
+
+// deploybotRowLocked mirrors db.deploybotRowsSQL: a gone owned row whose
+// catalog entry was deleted is no longer a deploybot service.
+func (m *Mem) deploybotRowLocked(svc store.Service) bool {
+	switch svc.Source {
+	case "declared":
+		return true
+	case "owned":
+		if svc.GoneAt == nil || svc.CatalogEntry == nil {
+			return true
+		}
+		_, ok := m.entryByName[entryKey(svc.ProjectID, *svc.CatalogEntry)]
+		return ok
+	default:
+		return false
 	}
 }
 

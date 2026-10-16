@@ -216,6 +216,48 @@ func TestServiceViews(t *testing.T) {
 	}
 }
 
+// A gone owned row whose catalog entry was deleted leaves the deploybot views;
+// "all" still lists it. A deleted entry's row that is still reported stays.
+func TestDeploybotViewHidesGoneRowsOfDeletedEntries(t *testing.T) {
+	ctx := context.Background()
+	at := time.Date(2026, 10, 16, 13, 0, 0, 0, time.UTC)
+	mem := New()
+	owner := mustUser(t, mem, "deleted@ex.com", at)
+	project := makeProject(t, mem, owner.ID, "Deleted", "deleted", at)
+	host := enrollMem(t, mem, project.ID, owner.ID, "deleted-host", at)
+	for _, name := range []string{"kept", "dropped", "running"} {
+		spec, hash, display := catalogSpec(t, "pnpm run dev")
+		if _, err := mem.CreateCatalogEntry(ctx, project.ID, store.CatalogWrite{
+			Name: name, Spec: spec, SpecHash: hash, CommandDisplay: display, Actor: owner.ID, At: at,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		mem.PutDiscovered(host.ID, name, "process", nil, nil, at)
+		setOwnedEntry(t, mem, name, name)
+	}
+	if err := mem.UpsertDiscovered(ctx, host.ID, []store.Discovered{{Name: "running", Kind: "process"}}, at, true, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"dropped", "running"} {
+		if _, err := mem.DeleteCatalogEntry(ctx, project.ID, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		view string
+		want []string
+	}{
+		{"all", []string{"dropped", "kept", "running"}},
+		{"deploybot", []string{"kept", "running"}},
+		{"deploybot_and_discovered", []string{"kept", "running"}},
+	} {
+		got := projectNames(t, mem, project.ID, store.ServiceListQuery{Sort: "name", Dir: "asc", Limit: 50, View: tc.view}, at)
+		if !sameNames(got, tc.want) {
+			t.Fatalf("view %q %v", tc.view, got)
+		}
+	}
+}
+
 func TestStatusSortGoneLast(t *testing.T) {
 	ctx := context.Background()
 	at := time.Date(2026, 10, 15, 14, 0, 0, 0, time.UTC)
@@ -345,6 +387,22 @@ func TestPresenceUsesPlacedName(t *testing.T) {
 	if got.GoneAt == nil || !got.GoneAt.Equal(at) {
 		t.Fatalf("sibling %v", got.GoneAt)
 	}
+}
+
+func setOwnedEntry(t *testing.T, mem *Mem, name, entry string) {
+	t.Helper()
+	mem.mu.Lock()
+	defer mem.mu.Unlock()
+	for id, svc := range mem.services {
+		if svc.Name != name {
+			continue
+		}
+		svc.Source = "owned"
+		svc.CatalogEntry = &entry
+		mem.services[id] = svc
+		return
+	}
+	t.Fatalf("missing %s", name)
 }
 
 func setSource(t *testing.T, mem *Mem, name, source string) {
