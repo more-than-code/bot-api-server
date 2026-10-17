@@ -62,12 +62,13 @@ type Mem struct {
 	deviceByHash map[string]uuid.UUID
 	deviceByCode map[string]uuid.UUID
 
-	entries       map[uuid.UUID]store.CatalogEntry
-	entryByName   map[string]uuid.UUID
-	grants        map[uuid.UUID][]store.CatalogGrant
-	approvals     map[string]store.CatalogApproval
-	confirmations map[string]confirmationRec
-	idempotency   map[string]store.IdempotencyRecord
+	entries              map[uuid.UUID]store.CatalogEntry
+	entryByName          map[string]uuid.UUID
+	grants               map[uuid.UUID][]store.CatalogGrant
+	approvals            map[string]store.CatalogApproval
+	confirmations        map[string]confirmationRec
+	serviceConfirmations map[string]serviceConfirmationRec
+	idempotency          map[string]store.IdempotencyRecord
 
 	envSets      map[string]envSetRec
 	envValues    map[string][]envValueRec
@@ -112,45 +113,46 @@ var _ store.Store = (*Mem)(nil)
 
 func New() *Mem {
 	return &Mem{
-		users:         map[uuid.UUID]store.User{},
-		byEmail:       map[string]uuid.UUID{},
-		idents:        map[uuid.UUID]store.Identity{},
-		bySubject:     map[string]uuid.UUID{},
-		sessions:      map[uuid.UUID]sessionRec{},
-		sessionByHash: map[string]uuid.UUID{},
-		oauthClients:  map[string]store.OAuthClient{},
-		oauthRequests: map[string]store.OAuthRequest{},
-		oauthCodes:    map[uuid.UUID]oauthCodeRec{},
-		codeByHash:    map[string]uuid.UUID{},
-		oauthGrants:   map[uuid.UUID]store.OAuthGrant{},
-		projects:      map[uuid.UUID]store.Project{},
-		bySlug:        map[string]uuid.UUID{},
-		members:       map[string]memberRec{},
-		tokens:        map[uuid.UUID]tokenRec{},
-		tokenByHash:   map[string]uuid.UUID{},
-		invites:       map[uuid.UUID]inviteRec{},
-		inviteByHash:  map[string]uuid.UUID{},
-		hosts:         map[uuid.UUID]store.Host{},
-		creds:         map[uuid.UUID]credRec{},
-		credByHash:    map[string]uuid.UUID{},
-		shares:        map[string]store.HostShare{},
-		services:      map[uuid.UUID]store.Service{},
-		checks:        map[uuid.UUID]store.HealthCheck{},
-		batches:       map[string]time.Time{},
-		devices:       map[uuid.UUID]store.Device{},
-		deviceByHash:  map[string]uuid.UUID{},
-		deviceByCode:  map[string]uuid.UUID{},
-		entries:       map[uuid.UUID]store.CatalogEntry{},
-		entryByName:   map[string]uuid.UUID{},
-		grants:        map[uuid.UUID][]store.CatalogGrant{},
-		approvals:     map[string]store.CatalogApproval{},
-		confirmations: map[string]confirmationRec{},
-		idempotency:   map[string]store.IdempotencyRecord{},
-		envSets:       map[string]envSetRec{},
-		envValues:     map[string][]envValueRec{},
-		registries:    map[string]registryRec{},
-		projectFiles:  map[string]fileRec{},
-		imageDeploys:  map[uuid.UUID]imageDeployRec{},
+		users:                map[uuid.UUID]store.User{},
+		byEmail:              map[string]uuid.UUID{},
+		idents:               map[uuid.UUID]store.Identity{},
+		bySubject:            map[string]uuid.UUID{},
+		sessions:             map[uuid.UUID]sessionRec{},
+		sessionByHash:        map[string]uuid.UUID{},
+		oauthClients:         map[string]store.OAuthClient{},
+		oauthRequests:        map[string]store.OAuthRequest{},
+		oauthCodes:           map[uuid.UUID]oauthCodeRec{},
+		codeByHash:           map[string]uuid.UUID{},
+		oauthGrants:          map[uuid.UUID]store.OAuthGrant{},
+		projects:             map[uuid.UUID]store.Project{},
+		bySlug:               map[string]uuid.UUID{},
+		members:              map[string]memberRec{},
+		tokens:               map[uuid.UUID]tokenRec{},
+		tokenByHash:          map[string]uuid.UUID{},
+		invites:              map[uuid.UUID]inviteRec{},
+		inviteByHash:         map[string]uuid.UUID{},
+		hosts:                map[uuid.UUID]store.Host{},
+		creds:                map[uuid.UUID]credRec{},
+		credByHash:           map[string]uuid.UUID{},
+		shares:               map[string]store.HostShare{},
+		services:             map[uuid.UUID]store.Service{},
+		checks:               map[uuid.UUID]store.HealthCheck{},
+		batches:              map[string]time.Time{},
+		devices:              map[uuid.UUID]store.Device{},
+		deviceByHash:         map[string]uuid.UUID{},
+		deviceByCode:         map[string]uuid.UUID{},
+		entries:              map[uuid.UUID]store.CatalogEntry{},
+		entryByName:          map[string]uuid.UUID{},
+		grants:               map[uuid.UUID][]store.CatalogGrant{},
+		approvals:            map[string]store.CatalogApproval{},
+		confirmations:        map[string]confirmationRec{},
+		serviceConfirmations: map[string]serviceConfirmationRec{},
+		idempotency:          map[string]store.IdempotencyRecord{},
+		envSets:              map[string]envSetRec{},
+		envValues:            map[string][]envValueRec{},
+		registries:           map[string]registryRec{},
+		projectFiles:         map[string]fileRec{},
+		imageDeploys:         map[uuid.UUID]imageDeployRec{},
 	}
 }
 

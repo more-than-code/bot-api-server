@@ -630,6 +630,18 @@ type Store interface {
 	// MarkConfirmationUsed sets used_at when the row is unused, unexpired, and owned by userID.
 	// Anything else is ErrNotFound.
 	MarkConfirmationUsed(ctx context.Context, hash []byte, userID uuid.UUID, at time.Time) error
+	// PutServiceConfirmation inserts one health-check plan. A duplicate token hash is ErrConflict.
+	PutServiceConfirmation(ctx context.Context, hash []byte, c ServiceConfirmation) error
+	GetServiceConfirmation(ctx context.Context, hash []byte) (ServiceConfirmation, error)
+	// MarkServiceConfirmationUsed sets used_at when the row is unused, unexpired, and owned by userID.
+	// Anything else is ErrNotFound. It does not read catalog_confirmations.
+	MarkServiceConfirmationUsed(ctx context.Context, hash []byte, userID uuid.UUID, at time.Time) error
+	// CommitHealthReplacement locks the service row, compares its check set
+	// with the confirmation's current hash, marks the plan used, and replaces
+	// the checks. A mismatch is ErrConflict and does not mark the plan.
+	// Unknown, used, expired, and foreign plans are ErrNotFound.
+	// The console ReplaceHealthChecks takes the same service lock.
+	CommitHealthReplacement(ctx context.Context, hash []byte, userID uuid.UUID, at time.Time) ([]HealthCheck, error)
 	// GetIdempotency returns ErrNotFound when the key is missing or older than IdempotencyTTL.
 	// A stale row is deleted. A claimed row with no response has Pending set.
 	GetIdempotency(ctx context.Context, userID uuid.UUID, key string, at time.Time) (IdempotencyRecord, error)

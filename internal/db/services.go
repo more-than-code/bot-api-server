@@ -391,13 +391,30 @@ func (d *DB) ReplaceHealthChecks(ctx context.Context, serviceID uuid.UUID, check
 		return nil, mapErr(err)
 	}
 	defer tx.Rollback(ctx)
-	var exists bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM app.services WHERE id = $1::uuid)`, serviceID.String()).Scan(&exists); err != nil {
+	if err := lockService(ctx, tx, serviceID); err != nil {
+		return nil, err
+	}
+	out, err := insertHealthChecks(ctx, tx, serviceID, checks)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return nil, mapErr(err)
 	}
-	if !exists {
-		return nil, store.ErrNotFound
-	}
+	return out, nil
+}
+
+// lockService locks one service row for the rest of the transaction.
+// A missing row is ErrNotFound. Console replace and confirm share this lock.
+func lockService(ctx context.Context, tx queryer, serviceID uuid.UUID) error {
+	var id string
+	err := tx.QueryRow(ctx, `
+SELECT id::text FROM app.services WHERE id = $1::uuid FOR UPDATE
+`, serviceID.String()).Scan(&id)
+	return mapErr(err)
+}
+
+func insertHealthChecks(ctx context.Context, tx queryer, serviceID uuid.UUID, checks []store.HealthCheckInput) ([]store.HealthCheck, error) {
 	if err := exec(ctx, tx, `DELETE FROM app.health_checks WHERE service_id = $1::uuid`, serviceID.String()); err != nil {
 		return nil, mapErr(err)
 	}
@@ -423,7 +440,29 @@ INSERT INTO app.health_checks (
 		}
 		out = append(out, c)
 	}
-	if err := tx.Commit(ctx); err != nil {
+	return out, nil
+}
+
+func listHealthChecksTx(ctx context.Context, tx queryer, serviceID uuid.UUID) ([]store.HealthCheck, error) {
+	rows, err := tx.Query(ctx, `
+SELECT id::text, service_id::text, protocol, port, path, interval_sec, expect_status_min, expect_status_max, enabled
+FROM app.health_checks
+WHERE service_id = $1::uuid
+ORDER BY id ASC
+`, serviceID.String())
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := []store.HealthCheck{}
+	for rows.Next() {
+		c, err := scanCheck(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
 		return nil, mapErr(err)
 	}
 	return out, nil

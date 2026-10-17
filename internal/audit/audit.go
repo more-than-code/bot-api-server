@@ -29,6 +29,7 @@ const (
 	ActionHostShareUpdate       = "host.share_update"
 	ActionHostUnshare           = "host.unshare"
 	ActionHealthChecks          = "health_checks.replace"
+	ActionHealthConfirmation    = "health_checks.confirmation_issued"
 	ActionServiceRename         = "service.rename"
 	ActionSnapshot              = "host.snapshot"
 	ActionProbe                 = "service.probe"

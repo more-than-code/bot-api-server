@@ -173,6 +173,24 @@ type CatalogConfirmation struct {
 	ImageForce  *bool
 }
 
+// ServiceConfirmation is a single-use delegated health-check replacement.
+// It is stored by token hash in app.service_confirmations, separate from
+// catalog confirmations. Checks is the normalized set to apply. RequestHash
+// binds the request. CurrentHash binds the check set at issue time.
+type ServiceConfirmation struct {
+	UserID         uuid.UUID
+	ProjectID      uuid.UUID
+	ServiceID      uuid.UUID
+	Action         string
+	RequestHash    []byte
+	CurrentHash    []byte
+	Checks         []HealthCheckInput
+	IdempotencyKey string
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
+	UsedAt         *time.Time
+}
+
 // IdempotencyRecord is one stored run, stop, or restart response.
 // Body is the full JSON envelope. Pending means the response is not stored yet.
 type IdempotencyRecord struct {

@@ -138,7 +138,9 @@ func (s *Server) handleConfirmation(w http.ResponseWriter, r *http.Request) {
 	c, err := s.Store.GetConfirmation(r.Context(), hash)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeCode(w, "not_found", "not found")
+			// v1.10: catalog plans win when both tables could match. They cannot:
+			// each id is a fresh 32-byte token. A miss falls through.
+			s.confirmServiceHealth(w, r, p, hash, body.Key)
 			return
 		}
 		s.fail(w, err)

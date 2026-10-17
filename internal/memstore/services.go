@@ -134,6 +134,10 @@ func (m *Mem) UpsertDiscovered(_ context.Context, hostID uuid.UUID, items []stor
 func (m *Mem) ReplaceHealthChecks(_ context.Context, serviceID uuid.UUID, checks []store.HealthCheckInput) ([]store.HealthCheck, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.replaceHealthChecksLocked(serviceID, checks)
+}
+
+func (m *Mem) replaceHealthChecksLocked(serviceID uuid.UUID, checks []store.HealthCheckInput) ([]store.HealthCheck, error) {
 	if _, ok := m.services[serviceID]; !ok {
 		return nil, store.ErrNotFound
 	}
@@ -164,6 +168,10 @@ func (m *Mem) ReplaceHealthChecks(_ context.Context, serviceID uuid.UUID, checks
 func (m *Mem) ListHealthChecks(_ context.Context, serviceID uuid.UUID) ([]store.HealthCheck, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.listHealthChecksLocked(serviceID), nil
+}
+
+func (m *Mem) listHealthChecksLocked(serviceID uuid.UUID) []store.HealthCheck {
 	var out []store.HealthCheck
 	for _, c := range m.checks {
 		if c.ServiceID == serviceID {
@@ -173,7 +181,7 @@ func (m *Mem) ListHealthChecks(_ context.Context, serviceID uuid.UUID) ([]store.
 	if out == nil {
 		out = []store.HealthCheck{}
 	}
-	return out, nil
+	return out
 }
 
 func (m *Mem) HealthChecksForHost(_ context.Context, hostID uuid.UUID) ([]store.AgentCheck, error) {

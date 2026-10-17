@@ -168,6 +168,7 @@ func (s *Server) handleHealthPut(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Checks *[]checkIn `json:"checks"`
+		Key    string     `json:"idempotency_key"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -189,23 +190,14 @@ func (s *Server) handleHealthPut(w http.ResponseWriter, r *http.Request) {
 		}
 		inputs = append(inputs, item)
 	}
-	checks, err := s.Store.ReplaceHealthChecks(r.Context(), svc.ID, inputs)
+	if p.Session.Kind == store.KindDelegated {
+		s.issueHealthConfirmation(w, r, p, svc, host, inputs, body.Key)
+		return
+	}
+	checks, err := s.replaceHealthChecks(r, p, host, svc, inputs)
 	if err != nil {
 		s.fail(w, err)
 		return
-	}
-	if s.Hub != nil {
-		s.Hub.PushConfig(r.Context(), host.ID)
-	}
-	s.auditOK(r.Context(), p, store.AuditRow{
-		ProjectID: idPtr(host.ProjectID),
-		HostID:    idPtr(host.ID),
-		ServiceID: idPtr(svc.ID),
-		Action:    audit.ActionHealthChecks,
-		Detail:    map[string]any{"count": len(checks)},
-	})
-	if checks == nil {
-		checks = []store.HealthCheck{}
 	}
 	writeOK(w, http.StatusOK, map[string]any{"checks": checks})
 }

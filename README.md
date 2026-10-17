@@ -62,6 +62,16 @@ DELETE FROM app.schema_migrations WHERE name = '0004_service_names.sql';
 DELETE FROM app.schema_migrations WHERE name = '0008_service_gone.sql';
 ```
 
+## Health checks over MCP
+
+`PUT /v1/services/{id}/health-checks` still replaces the set immediately for a console session and pushes `config_update`. That replace locks the service row. A console session ignores `idempotency_key`. An `api_delegated` session must send one. After the same permission, share, and body checks, that call changes nothing and returns 202 `{"confirmation_id","plan","expires_at"}`. The plan names the service label (the display name, or the discovered name) and the host. The label and every HTTP path are Go-quoted (`strconv.Quote`). The host name is not quoted. A tcp check is `tcp <port>`. An http check is `http <port> <quoted path> every <interval> s`. A check with `enabled` false ends with ` (disabled)`. A tcp check that shares a port with an http check adds `(tcp <port> is redundant with http <port>)`. The set is still applied as given, including that tcp check. `POST /v1/confirmations/{confirmation_id}` reads `catalog_confirmations` first, then `app.service_confirmations`. Confirm compares the current set, marks the plan used, and replaces the checks in one transaction that locks `app.services` (`SELECT … FOR UPDATE`). A set that changed before that transaction commits is `conflict`, and the plan stays unused. Unknown, used, expired, and foreign ids are `not_found`. A matching confirm pushes `config_update` and returns `{"checks":[...]}`. Audit rows are `health_checks.confirmation_issued` (service, host, and check count) and `health_checks.replace` with `via` `mcp`. The audit `service` value is the raw label, not the quoted plan text.
+
+`migrations/0011_service_confirmations.sql` creates that table. The row stores the normalized checks, because the confirm body does not send them again. `deploybot_api` may select, insert, and delete, and may update only `used_at`. `--migrate` does not apply `migrations/0011_service_confirmations.down.sql`. That script drops the table. Pending plans are lost. Nothing they named was applied yet. After a hand run, delete the applied row before `--migrate` will apply 0011 again:
+
+```sql
+DELETE FROM app.schema_migrations WHERE name = '0011_service_confirmations.sql';
+```
+
 ## MCP OAuth
 
 This process is the OAuth authorization server MCP clients use (`docs/contracts/oauth-v1.md`, api-v1 v1.4). A public client registers at `POST /oauth/register`. The person approves at the console. `POST /oauth/token` then issues an MCP access token (one hour) and a rotating refresh token (30 days). A second use of that code revokes the whole grant family, including later refreshes and delegated API tokens. `bot-mcp-server` exchanges a live MCP access token for a five-minute API token. Those exchanges are not counted against the token endpoint's per-IP limit; a missing or wrong client secret is. An MCP access token, an MCP refresh token, or a legacy `mcp` session presented to any `/v1/*` route is `401` with code `invalid_token`. The device flow (`POST /v1/auth/device/token`) issues an MCP access token for 30 days, in a grant family for the pseudo-client `deploybot-cli`. Looking up, approving, or denying a device code needs a console session.
