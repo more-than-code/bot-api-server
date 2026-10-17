@@ -1701,7 +1701,7 @@ func (s *Server) auditImageOK(ctx context.Context, p principal, projectID uuid.U
 	if digest != nil {
 		detail["digest"] = *digest
 	}
-	s.recordAudit(ctx, store.AuditRow{
+	row := store.AuditRow{
 		ActorUserID: idPtr(p.User.ID),
 		Via:         viaKind(p.Session.Kind),
 		ProjectID:   idPtr(projectID),
@@ -1710,7 +1710,11 @@ func (s *Server) auditImageOK(ctx context.Context, p principal, projectID uuid.U
 		Decision:    audit.DecisionAllowed,
 		Result:      &result,
 		Detail:      redactDetail(detail, forms),
-	})
+	}
+	if outcome != "succeeded" && outcome != "unchanged" {
+		row.ErrorCode = &result
+	}
+	s.recordAudit(ctx, row)
 }
 
 func catalogActionName(action string) string {

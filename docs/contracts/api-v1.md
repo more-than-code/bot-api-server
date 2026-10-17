@@ -423,7 +423,7 @@ Create/replace take `{"name","kind":"image","spec":ImageSpec}` (`name` on create
 - Secret values and tokens are AES-256-GCM encrypted with `BOT_SECRETS_KEY` (key_version), a random 96-bit nonce per ciphertext, associated data `project_id|set|key` (or `project_id|registry|host`); they are decrypted only to build an `image_deploy`/`image_rollback` task for a host of the entry's project (or an approved shared host), and only the registry whose host equals the image reference's registry host is attached.
 - No MCP-facing route returns env values; there are no MCP tools for env sets or registries.
 
-**Audit:** `catalog.deploy`, `catalog.rollback`, `catalog.remove` (entry, host, digest, outcome, `via`), `env_set.replace`, `env_set.key_visibility`, `env_set.delete`, `registry.put`, `registry.delete` — key names, set names and registry hosts only.
+**Audit:** `catalog.deploy`, `catalog.rollback`, `catalog.remove` (entry, host, digest, outcome, `via`; *v1.9.1, 2026-10-17: the row's `error_code` is the outcome when it is not `succeeded` or `unchanged`*), `env_set.replace`, `env_set.key_visibility`, `env_set.delete`, `registry.put`, `registry.delete` — key names, set names and registry hosts only.
 
 ### v1.8.1 amendment (2026-10-16, Joe approved; from the wave 2a browser smoke)
 
