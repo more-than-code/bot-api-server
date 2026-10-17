@@ -322,15 +322,16 @@ SET updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by
 `, projectID.String(), name, at, actor.String()); err != nil {
 		return store.EnvSet{}, mapErr(err)
 	}
+	kept, err := envVisibility(ctx, tx, projectID, name)
+	if err != nil {
+		return store.EnvSet{}, err
+	}
 	if err := exec(ctx, tx, `DELETE FROM app.env_values WHERE project_id = $1::uuid AND set_name = $2`, projectID.String(), name); err != nil {
 		return store.EnvSet{}, mapErr(err)
 	}
 	for _, key := range keys {
-		if err := exec(ctx, tx, `
-INSERT INTO app.env_values (project_id, set_name, key, is_secret, value, nonce, ciphertext, key_version)
-VALUES ($1::uuid, $2, $3, true, NULL, $4, $5, $6)
-`, projectID.String(), name, key.Key, key.Nonce, key.Ciphertext, key.KeyVersion); err != nil {
-			return store.EnvSet{}, mapErr(err)
+		if err := insertEnvValue(ctx, tx, projectID, name, key, kept); err != nil {
+			return store.EnvSet{}, err
 		}
 	}
 	if err := d.rehashTx(ctx, tx, projectID, name, at); err != nil {
@@ -348,6 +349,16 @@ func (d *DB) PatchEnvKey(ctx context.Context, projectID uuid.UUID, name, key str
 		return store.EnvSet{}, mapErr(err)
 	}
 	defer tx.Rollback(ctx)
+	// Lock the set before its values. PutEnvSet takes the same order.
+	var locked string
+	err = tx.QueryRow(ctx, `
+SELECT name FROM app.env_sets
+WHERE project_id = $1::uuid AND name = $2
+FOR UPDATE
+`, projectID.String(), name).Scan(&locked)
+	if err != nil {
+		return store.EnvSet{}, mapErr(err)
+	}
 	var tag string
 	if in.IsSecret {
 		tag, err = execTag(ctx, tx, `
@@ -378,6 +389,48 @@ WHERE project_id = $1::uuid AND name = $2
 		return store.EnvSet{}, mapErr(err)
 	}
 	return d.GetEnvSet(ctx, projectID, name)
+}
+
+func envVisibility(ctx context.Context, tx pgx.Tx, projectID uuid.UUID, name string) (map[string]bool, error) {
+	rows, err := tx.Query(ctx, `
+SELECT key, is_secret FROM app.env_values
+WHERE project_id = $1::uuid AND set_name = $2
+FOR UPDATE
+`, projectID.String(), name)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var key string
+		var secret bool
+		if err := rows.Scan(&key, &secret); err != nil {
+			return nil, mapErr(err)
+		}
+		out[key] = secret
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapErr(err)
+	}
+	return out, nil
+}
+
+func insertEnvValue(ctx context.Context, tx pgx.Tx, projectID uuid.UUID, name string, key store.EnvSecret, kept map[string]bool) error {
+	secret := true
+	if was, ok := kept[key.Key]; ok {
+		secret = was
+	}
+	if secret {
+		return mapErr(exec(ctx, tx, `
+INSERT INTO app.env_values (project_id, set_name, key, is_secret, value, nonce, ciphertext, key_version)
+VALUES ($1::uuid, $2, $3, true, NULL, $4, $5, $6)
+`, projectID.String(), name, key.Key, key.Nonce, key.Ciphertext, key.KeyVersion))
+	}
+	return mapErr(exec(ctx, tx, `
+INSERT INTO app.env_values (project_id, set_name, key, is_secret, value, nonce, ciphertext, key_version)
+VALUES ($1::uuid, $2, $3, false, $4, NULL, NULL, NULL)
+`, projectID.String(), name, key.Key, key.Plain))
 }
 
 func execTag(ctx context.Context, q queryer, sql string, args ...any) (string, error) {

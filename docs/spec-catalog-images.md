@@ -215,14 +215,14 @@ run/stop/restart/logs/status reuse the wave 1 routes and dispatch by kind. Check
   - duplicate keys → `bad_request`;
   - limits: 256 keys, 4096 bytes per value, 256 KiB per file.
 
-  Errors list line numbers and keys, never values. Every value is stored as a secret.
+  Errors list line numbers and keys, never values. A key that already exists keeps its `is_secret`. A key new to the set is stored as a secret. A key left out of the body is removed.
 - `PATCH …/keys/{key}` `{is_secret}`.
 - `GET` returns names, keys and flags, plus plain values only.
 - `DELETE` is refused while an entry references the set.
 
 **Registry credentials:** `PUT /v1/projects/{id}/registries/{host}` `{username, token}`, plus `GET` (hosts and usernames) and `DELETE`. The credential is sent only inside `image_deploy`/`image_rollback` frames whose image's parsed registry host equals `{host}`.
 
-**Encryption:** `BOT_SECRETS_KEY` (api env file, 600), AES-256-GCM with `key_version`. Postgres (pi4 for dev) holds ciphertext only.
+**Encryption:** `BOT_SECRETS_KEY` (api env file, 600), AES-256-GCM with `key_version`. Postgres (pi4 for dev) stores a secret value as ciphertext only. A plain value is stored as text.
 
 **Never via MCP:** no tool reads or writes env sets or registries.
 

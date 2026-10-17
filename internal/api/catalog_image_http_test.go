@@ -778,6 +778,59 @@ func TestEnvRegistryRoutes(t *testing.T) {
 	}
 }
 
+func TestEnvReplaceKeepsVisibility(t *testing.T) {
+	w := newWorld(t)
+	w.srv.Secrets = testBox(t)
+	owner := w.user("owner@ex.com", "Owner")
+	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
+	tok := w.token(owner.ID)
+	project := sc.project.ID.String()
+	putEnv(t, w, tok, project, "svc", "A=alpha-old\nB=bravo-old\n")
+	status, env, _ := mustCall(t, w, tok, http.MethodPatch, envPath(project, "svc")+"/keys/A", `{"is_secret":false}`)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+
+	check := func(payload map[string]any, raw string) {
+		t.Helper()
+		keys, _ := payload["keys"].([]any)
+		by := map[string]map[string]any{}
+		for _, item := range keys {
+			row, _ := item.(map[string]any)
+			name, _ := row["key"].(string)
+			by[name] = row
+		}
+		if len(by) != 3 || by["A"]["is_secret"] != false || by["A"]["value"] != "alpha-next" || by["B"]["is_secret"] != true || by["B"]["value"] != nil || by["C"]["is_secret"] != true || by["C"]["value"] != nil {
+			t.Fatalf("visibility %#v", payload["keys"])
+		}
+		if strings.Contains(raw, "bravo-next") || strings.Contains(raw, "charlie-new") || strings.Contains(raw, "bravo-old") || !strings.Contains(raw, "alpha-next") {
+			t.Fatal("response hid the plain value or returned a secret")
+		}
+	}
+
+	status, env, raw := mustCall(t, w, tok, http.MethodPut, envPath(project, "svc"), `{"dotenv":"A=alpha-next\nB=bravo-next\nC=charlie-new\n"}`)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	check(objectPayload(t, env), raw)
+	status, env, raw = mustCall(t, w, tok, http.MethodGet, "/v1/projects/"+project+"/env-sets", "")
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	check(findItem(t, listItems(t, env), "name", "svc"), raw)
+
+	var saw bool
+	for _, row := range auditRows(t, w, sc.project.ID) {
+		if row.Action != "env_set.replace" {
+			continue
+		}
+		detail := string(row.Detail)
+		if strings.Contains(detail, "alpha-") || strings.Contains(detail, "bravo-") || strings.Contains(detail, "charlie-") || strings.Contains(detail, "is_secret") {
+			t.Fatalf("replace audit %s", detail)
+		}
+		if strings.Contains(detail, `"set":"svc"`) && strings.Contains(detail, `"A"`) && strings.Contains(detail, `"B"`) && strings.Contains(detail, `"C"`) {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatal("missing env_set.replace for the kept keys")
+	}
+}
+
 func TestEnvRegistryConsoleOnly(t *testing.T) {
 	w := newWorld(t)
 	w.srv.Secrets = testBoxByte(t, 9)

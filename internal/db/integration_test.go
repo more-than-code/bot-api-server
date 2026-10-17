@@ -256,6 +256,7 @@ WHERE id = $1::uuid
 	assertInvites(t, d, ctx)
 	assertCatalog(t, d, ctx, at)
 	assertImages(t, d, ctx, at)
+	assertEnvReplaceKeepsVisibility(t, d, ctx, at)
 }
 
 // sharedHostsIntegration is the Postgres half of spec §6: backfill shape,

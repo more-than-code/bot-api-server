@@ -661,7 +661,8 @@ type Store interface {
 	ListEnvKeyNames(ctx context.Context, projectID uuid.UUID) (map[string][]string, error)
 	ListEnvSets(ctx context.Context, projectID uuid.UUID) ([]EnvSet, error)
 	GetEnvSet(ctx context.Context, projectID uuid.UUID, name string) (EnvSet, error)
-	// PutEnvSet replaces the set. Every key is stored as a secret.
+	// PutEnvSet replaces the set. A key already in the set keeps is_secret.
+	// A key new to the set is stored as a secret. Keys left out are removed.
 	// Referencing image entries are rehashed. A changed hash voids approvals.
 	PutEnvSet(ctx context.Context, projectID uuid.UUID, name string, keys []EnvSecret, actor uuid.UUID, at time.Time) (EnvSet, error)
 	// PatchEnvKey flips visibility. It does not change spec hashes.

@@ -269,17 +269,30 @@ func (m *Mem) PutEnvSet(_ context.Context, projectID uuid.UUID, name string, key
 	if !catalog.ValidName(name) {
 		return store.EnvSet{}, store.ErrInvalid
 	}
+	id := envKey(projectID, name)
+	kept := map[string]bool{}
+	for _, v := range m.envValues[id] {
+		kept[v.Key] = v.IsSecret
+	}
 	rec := envSetRec{Name: name, UpdatedAt: at, UpdatedBy: actor}
-	m.envSets[envKey(projectID, name)] = rec
+	m.envSets[id] = rec
 	values := make([]envValueRec, 0, len(keys))
 	for _, k := range keys {
-		values = append(values, envValueRec{
-			Key: k.Key, IsSecret: true,
-			Nonce: append([]byte(nil), k.Nonce...), Ciphertext: append([]byte(nil), k.Ciphertext...),
-			KeyVersion: k.KeyVersion,
-		})
+		secret := true
+		if was, ok := kept[k.Key]; ok {
+			secret = was
+		}
+		row := envValueRec{Key: k.Key, IsSecret: secret}
+		if secret {
+			row.Nonce = append([]byte(nil), k.Nonce...)
+			row.Ciphertext = append([]byte(nil), k.Ciphertext...)
+			row.KeyVersion = k.KeyVersion
+		} else {
+			row.Plain = k.Plain
+		}
+		values = append(values, row)
 	}
-	m.envValues[envKey(projectID, name)] = values
+	m.envValues[id] = values
 	m.rehashSetLocked(projectID, name, at)
 	return m.envSetViewLocked(projectID, rec), nil
 }

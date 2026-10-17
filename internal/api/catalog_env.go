@@ -105,11 +105,14 @@ func (s *Server) handleEnvSetPut(w http.ResponseWriter, r *http.Request) {
 	keys := make([]store.EnvSecret, 0, len(pairs))
 	names := make([]string, 0, len(pairs))
 	for _, pair := range pairs {
+		// Seal every key. PutEnvSet keeps an existing key's visibility
+		// inside its transaction and stores this seal only when the key is secret.
 		sealed, err := s.sealValue(id, name, pair.Key, pair.Value)
 		if err != nil {
 			s.secretWriteErr(w, err)
 			return
 		}
+		sealed.Plain = pair.Value
 		keys = append(keys, sealed)
 		names = append(names, pair.Key)
 	}
