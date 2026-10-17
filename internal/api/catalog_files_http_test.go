@@ -152,7 +152,7 @@ func TestFileContentRules(t *testing.T) {
 				t.Fatalf("put audit %s", detail)
 			}
 		case "file.delete":
-			if strings.Contains(detail, `"name":"null.json"`) && !strings.Contains(detail, "sekret") {
+			if strings.Contains(detail, `"name":"null.json"`) && strings.Contains(detail, `"outcome":"deleted"`) && !strings.Contains(detail, "sekret") && !strings.Contains(detail, "sha256") {
 				sawDelete = true
 			}
 		}
@@ -219,6 +219,140 @@ func TestFileGates(t *testing.T) {
 	}
 }
 
+func TestFileDeleteAudit(t *testing.T) {
+	const content = "exact-delete-audit-body-9f3a"
+	sum := sha256.Sum256([]byte(content))
+	contentHash := hex.EncodeToString(sum[:])
+	w := newWorld(t)
+	w.srv.Secrets = testBox(t)
+	owner := w.user("owner@ex.com", "Owner")
+	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
+	tok := w.token(owner.ID)
+	project := sc.project.ID.String()
+	base := "/v1/projects/" + project + "/files"
+	putFile(t, w, tok, project, "key.json", content, nil)
+	createImage(t, w, tok, sc.project.ID, "web", `{"kind":"service","image":"nginx","files":[{"file":"key.json","target":"/run/secrets/key.json"}]}`)
+
+	status, env, raw := mustCall(t, w, tok, http.MethodDelete, base+"/missing.conf", "")
+	mustHTTP(t, status, env, http.StatusNotFound, "not_found", "not found")
+	if deletes := fileDeleteDetails(t, w, sc.project.ID); len(deletes) != 0 {
+		t.Fatalf("missing name audited %#v", deletes)
+	}
+
+	status, env, raw = mustCall(t, w, tok, http.MethodDelete, base+"/key.json", "")
+	mustHTTP(t, status, env, http.StatusConflict, "conflict", "referenced by web")
+	if strings.Contains(raw, content) || strings.Contains(raw, contentHash) {
+		t.Fatal("conflict echoed the file")
+	}
+	status, env, raw = mustCall(t, w, tok, http.MethodGet, base, "")
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	if !strings.Contains(raw, `"name":"key.json"`) {
+		t.Fatal("conflict removed the file")
+	}
+	deletes := fileDeleteDetails(t, w, sc.project.ID)
+	if len(deletes) != 1 || !fileDeleteDetail(deletes[0], "key.json", "conflict", content, contentHash) {
+		t.Fatalf("conflict audit %#v", deletes)
+	}
+
+	status, env, _ = mustCall(t, w, tok, http.MethodDelete, "/v1/projects/"+project+"/catalog/web", "")
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	status, env, raw = mustCall(t, w, tok, http.MethodDelete, base+"/key.json", "")
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	if env.Payload != nil || strings.Contains(raw, content) || strings.Contains(raw, contentHash) {
+		t.Fatalf("delete echoed the file %s", raw)
+	}
+	deletes = fileDeleteDetails(t, w, sc.project.ID)
+	if len(deletes) != 2 || !fileDeleteDetail(findFileDelete(deletes, "conflict"), "key.json", "conflict", content, contentHash) || !fileDeleteDetail(findFileDelete(deletes, "deleted"), "key.json", "deleted", content, contentHash) {
+		t.Fatalf("delete audit %#v", deletes)
+	}
+	status, env, _ = mustCall(t, w, tok, http.MethodDelete, base+"/key.json", "")
+	mustHTTP(t, status, env, http.StatusNotFound, "not_found", "not found")
+	if again := fileDeleteDetails(t, w, sc.project.ID); len(again) != 2 {
+		t.Fatalf("missing name after delete audited %#v", again)
+	}
+}
+
+func TestExactValueMarker(t *testing.T) {
+	const secret = "exact-value-marker-9f3a"
+	w := newWorld(t)
+	w.srv.Secrets = testBox(t)
+	owner := w.user("owner@ex.com", "Owner")
+	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
+	tok := w.token(owner.ID)
+	project := sc.project.ID.String()
+	putFile(t, w, tok, project, "key.json", secret, nil)
+	createImage(t, w, tok, sc.project.ID, "web", `{"kind":"service","image":"nginx","files":[{"file":"key.json","target":"/run/secrets/key.json"}]}`)
+	programs := allowImages()
+	programs["files"] = true
+	conn := helloAgent(t, w, sc.host, sc.credPlain, sc.credID, programs, nil)
+	line := "saw " + secret + " tail"
+	log := watchTasks(t, conn, func(msg map[string]any) map[string]any {
+		kind, _ := msg["kind"].(string)
+		if kind == "image_logs" {
+			return map[string]any{
+				"v": 1, "type": "task_result", "task_id": msg["task_id"], "state": "succeeded",
+				"payload": map[string]any{"container": "web", "lines": []string{line}, "truncated": false},
+			}
+		}
+		reply := imageDeployReply(msg, shaDigest(8))
+		reply["payload"].(map[string]any)["lines"] = []string{line}
+		return reply
+	})
+	host := sc.host.ID.String()
+	status, env, raw := postImage(t, w, tok, project, "web", "deploy", host, "marker-1", nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	assertExactMarker(t, "deploy", env, raw, secret)
+	status, env, raw = postImage(t, w, tok, project, "web", "logs", host, "", nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	assertExactMarker(t, "logs", env, raw, secret)
+	if log.count() != 2 {
+		t.Fatalf("tasks %d", log.count())
+	}
+}
+
+func fileDeleteDetails(t *testing.T, w *world, projectID uuid.UUID) []string {
+	t.Helper()
+	var out []string
+	for _, row := range auditRows(t, w, projectID) {
+		if row.Action != "file.delete" {
+			continue
+		}
+		if row.Decision != "allowed" {
+			t.Fatalf("file.delete decision %s", row.Decision)
+		}
+		out = append(out, string(row.Detail))
+	}
+	return out
+}
+
+func findFileDelete(details []string, outcome string) string {
+	for _, detail := range details {
+		if strings.Contains(detail, `"outcome":"`+outcome+`"`) {
+			return detail
+		}
+	}
+	return ""
+}
+
+func fileDeleteDetail(detail, name, outcome, content, contentHash string) bool {
+	var row map[string]any
+	if json.Unmarshal([]byte(detail), &row) != nil || len(row) != 2 {
+		return false
+	}
+	if row["name"] != name || row["outcome"] != outcome {
+		return false
+	}
+	return !strings.Contains(detail, content) && !strings.Contains(detail, contentHash)
+}
+
+func assertExactMarker(t *testing.T, label string, env envelope, raw, secret string) {
+	t.Helper()
+	lines, _ := objectPayload(t, env)["lines"].([]any)
+	if len(lines) != 1 || lines[0] != "saw [REDACTED] tail" || strings.Contains(raw, secret) || strings.Contains(raw, "[redacted]") {
+		t.Fatalf("%s marker %#v %s", label, lines, raw)
+	}
+}
+
 func TestFileSecretLeak(t *testing.T) {
 	const secretLine = "LINE-OF-SECRET-do-not-leak-9f3a"
 	const secret = "SECRET<FILE>CONTENT-do-not-leak-9f3a\n" + secretLine
@@ -258,7 +392,7 @@ func TestFileSecretLeak(t *testing.T) {
 	assertSecretAbsent(t, "plan line", raw, secretLine)
 	status, env, raw = postImage(t, w, tok, project, "web", "deploy", host, "leak-run", nil)
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
-	if !strings.Contains(raw, "[redacted]") || log.count() != 1 {
+	if strings.Contains(raw, "[redacted]") || !strings.Contains(raw, "[REDACTED]") || log.count() != 1 {
 		t.Fatalf("deploy did not redact the echo or did not send one task: %s", raw)
 	}
 	assertSecretAbsent(t, "deploy", raw, secret)
@@ -277,7 +411,7 @@ func TestFileSecretLeak(t *testing.T) {
 	assertSecretAbsent(t, "history line", raw, secretLine)
 	status, env, raw = postImage(t, w, tok, project, "web", "logs", host, "", nil)
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
-	if !strings.Contains(raw, "[redacted]") {
+	if strings.Contains(raw, "[redacted]") || !strings.Contains(raw, "[REDACTED]") {
 		t.Fatal("logs did not redact the echo")
 	}
 	assertSecretAbsent(t, "logs", raw, secret)
@@ -737,7 +871,7 @@ func TestFileLogsRedactSkipsMissing(t *testing.T) {
 	host := sc.host.ID.String()
 	status, env, raw := postImage(t, w, tok, project, "web", "logs", host, "", nil)
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
-	if !strings.Contains(raw, "[redacted]") {
+	if strings.Contains(raw, "[redacted]") || !strings.Contains(raw, "[REDACTED]") {
 		t.Fatal("logs dropped the later secret")
 	}
 	assertSecretAbsent(t, "logs kept", raw, kept)
@@ -773,7 +907,7 @@ func TestFileLogsRedactWhenEnvDecryptFails(t *testing.T) {
 	if tasks.count() != 1 {
 		t.Fatal("env decrypt failure did not call the agent")
 	}
-	if !strings.Contains(raw, "[redacted]") || !strings.Contains(raw, envSecret) {
+	if strings.Contains(raw, "[redacted]") || !strings.Contains(raw, "[REDACTED]") || !strings.Contains(raw, envSecret) {
 		t.Fatalf("file line was not redacted beside the unopened env value: %s", raw)
 	}
 	assertSecretAbsent(t, "file line", raw, fileLine)
@@ -847,7 +981,7 @@ func TestFileLogsRedactTamperedSibling(t *testing.T) {
 	})
 	status, env, raw := postImage(t, w, tok, project, "web", "logs", sc.host.ID.String(), "", nil)
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
-	if tasks.count() != 1 || !strings.Contains(raw, "[redacted]") {
+	if tasks.count() != 1 || strings.Contains(raw, "[redacted]") || !strings.Contains(raw, "[REDACTED]") {
 		t.Fatalf("tampered sibling dropped the later line %s tasks %d", raw, tasks.count())
 	}
 	assertSecretAbsent(t, "later line", raw, later)
@@ -942,7 +1076,7 @@ func hasPiece(got []string, want string) bool {
 
 func assertPieceRedacted(t *testing.T, label, body, pemBody, pem, plain string) {
 	t.Helper()
-	if !strings.Contains(body, "[redacted]") || !strings.Contains(body, plain) {
+	if strings.Contains(body, "[redacted]") || !strings.Contains(body, "[REDACTED]") || !strings.Contains(body, plain) {
 		t.Fatalf("%s redaction %s", label, body)
 	}
 	assertSecretAbsent(t, label+" pem line", body, pemBody)

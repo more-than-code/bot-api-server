@@ -1508,12 +1508,15 @@ func secretForms(values []string) []string {
 	return out
 }
 
+// redactExact replaces each secret form with [REDACTED], the marker the agent
+// writes, then applies the keyword rule. A different case makes Logs and the
+// deploy tail disagree.
 func redactExact(s string, forms []string) string {
 	for _, form := range forms {
 		if form == "" {
 			continue
 		}
-		s = strings.ReplaceAll(s, form, "[redacted]")
+		s = strings.ReplaceAll(s, form, "[REDACTED]")
 	}
 	return ingest.RedactCmdline(s)
 }

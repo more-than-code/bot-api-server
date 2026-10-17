@@ -48,7 +48,7 @@ Access to the Docker socket equals root on the host. The design holds these line
 3. **Project scoping on the host.** `runner.toml` lists the project slugs this host may run containers for. The helper sets the labels `dev.deploybot.owner=bot-agent`, `dev.deploybot.host=<host id>`, `dev.deploybot.project=<slug>` and `dev.deploybot.entry=<entry>` itself. Every mutating verb acts only on a container whose four labels match the request. Volumes and the network are named and checked per project.
 4. **Secrets boundary, stated honestly.** Env values and registry tokens reach the agent in the task frame and are passed to the helper for that task. A compromised agent can therefore read the secrets of the tasks it receives. That is the same trust the agent already has for its host; sealing values to the helper is a later option (§10 O8).
    - The helper never returns them: list, status and inspect results are projections without env, command, mounts or host config.
-   - Results, logs and audit are redacted with the design §5.4 regex **and** exact-value matching (raw, base64 and JSON-escaped forms).
+   - Results, logs and audit are redacted with the design §5.4 regex **and** exact-value matching (raw, base64 and JSON-escaped forms). The exact-value marker is `[REDACTED]`.
 5. **A compromised API or agent can ask for anything the policy allows, but no more.** That means: the image patterns, the listed projects, project-scoped volumes and network, and no host bind mounts, privilege, devices, extra capabilities, host namespaces or public ports (unless the policy allows public ports).
 
 ## 4. Design

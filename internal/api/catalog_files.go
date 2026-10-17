@@ -140,9 +140,15 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Both rows carry name and outcome only. Content and sha256 stay out.
 	if err := s.Store.DeleteProjectFile(r.Context(), id, name); err != nil {
 		var used *store.FileInUse
 		if errors.As(err, &used) {
+			s.auditOK(r.Context(), p, store.AuditRow{
+				ProjectID: idPtr(id),
+				Action:    audit.ActionFileDelete,
+				Detail:    map[string]any{"name": name, "outcome": "conflict"},
+			})
 			writeCode(w, "conflict", "referenced by "+strings.Join(used.Entries, ", "))
 			return
 		}
@@ -152,7 +158,7 @@ func (s *Server) handleFileDelete(w http.ResponseWriter, r *http.Request) {
 	s.auditOK(r.Context(), p, store.AuditRow{
 		ProjectID: idPtr(id),
 		Action:    audit.ActionFileDelete,
-		Detail:    map[string]any{"name": name},
+		Detail:    map[string]any{"name": name, "outcome": "deleted"},
 	})
 	writeOK(w, http.StatusOK, nil)
 }

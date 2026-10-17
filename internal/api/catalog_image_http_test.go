@@ -1363,7 +1363,7 @@ func assertPlainKept(t *testing.T, env envelope, raw string, logs bool) {
 		}
 	}
 	lines, _ := payload["lines"].([]any)
-	if container != "mohiguide-web" || len(lines) != 2 || lines[0] != "db mohiguide ready" || lines[1] != "key [redacted] used" || strings.Contains(raw, "s3cret-value-1") {
+	if container != "mohiguide-web" || len(lines) != 2 || lines[0] != "db mohiguide ready" || lines[1] != "key [REDACTED] used" || strings.Contains(raw, "s3cret-value-1") || strings.Contains(raw, "[redacted]") {
 		t.Fatalf("redaction %#v %s", payload, raw)
 	}
 }
@@ -2005,7 +2005,7 @@ func TestImageSecretEnvRehash(t *testing.T) {
 func TestRedactExactBeforeKeyword(t *testing.T) {
 	secret := "s3cret token hunter22"
 	got := redactExact("line "+secret, secretForms([]string{secret}))
-	if strings.Contains(got, "s3cret") {
+	if got != "line [REDACTED]" || strings.Contains(got, "s3cret") || strings.Contains(got, "[redacted]") {
 		t.Fatalf("keyword regex hid the value from exact replace: %q", got)
 	}
 }
