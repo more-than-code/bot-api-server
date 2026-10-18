@@ -2,12 +2,12 @@
 
 Go service for deploybot: Google OAuth sign-in and sessions, projects and members, join tokens and host credentials, the bot-agent WebSocket, metrics ingest into Postgres `deploybot`, live probes, and the REST API used by bot-console and bot-mcp-server.
 
-- Design: `docs/design.md` (repo layout) and the umbrella `docs/design-bot-agent-deploy.md` §6 (server) and §3 (auth).
+- Design: `docs/design.md`
 - Contracts (frozen, do not edit here): `docs/contracts/api-v1.md`, `docs/contracts/oauth-v1.md`, and `docs/contracts/agent-protocol-v1.md`.
 
 ## Run locally
 
-Phase 1 needs Go 1.27 and a Postgres 18 database with TimescaleDB. The server does not create tables on startup. `--migrate` does not create roles, schemas, or the TimescaleDB extension.
+Requires Go 1.27+ and a PostgreSQL 18 database with TimescaleDB. The server does not create tables on startup. `--migrate` does not create roles, schemas, or the TimescaleDB extension.
 
 1. Copy `.env.example` to `.env` and replace every `CHANGE_ME` and `dummy-google-*` value. The example file is not a working configuration.
 2. Create empty databases named `deploybot` and, for integration tests, `deploybot_test`. Do not create the extension yourself.
