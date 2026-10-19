@@ -171,6 +171,20 @@ WHERE c.host_id = h.id AND h.project_id = $1::uuid AND c.revoked_at IS NULL
 `, id.String(), at); err != nil {
 		return nil, mapErr(err)
 	}
+	// Still-present rows of this project's hosts go gone at the host's
+	// revoke time. A row that is already gone keeps its time. Services on
+	// another project's host are left for the hand-back below.
+	if err := exec(ctx, tx, `
+UPDATE app.services AS s
+SET gone_at = h.revoked_at
+FROM app.hosts AS h
+WHERE s.host_id = h.id
+  AND h.project_id = $1::uuid
+  AND h.revoked_at IS NOT NULL
+  AND s.gone_at IS NULL
+`, id.String()); err != nil {
+		return nil, mapErr(err)
+	}
 	// Services this project owns on someone else's host go back to that host's owner.
 	if err := exec(ctx, tx, `
 UPDATE app.services s

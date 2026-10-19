@@ -230,7 +230,8 @@ AND (
 
 // deploybotRowsSQL is the v1.8.2 deploybot row set: declared rows, and owned
 // rows unless they are gone and their catalog entry was deleted (nothing can
-// start them again).
+// start them again). The revoked-host filter is applied in serviceViewSQL,
+// outside this expression, so it also covers discovered rows.
 const deploybotRowsSQL = `(s.source = 'declared' OR (s.source = 'owned' AND (
     s.gone_at IS NULL OR s.catalog_entry IS NULL OR EXISTS (
         SELECT 1 FROM app.catalog_entries c
@@ -238,12 +239,14 @@ const deploybotRowsSQL = `(s.source = 'declared' OR (s.source = 'owned' AND (
 
 // serviceViewSQL is a fixed fragment. view is allowlisted by the HTTP
 // handler. Anything else, including empty, is the v1.3 row set (all).
+// v1.10.1 excludes revoked hosts from both deploybot views. The predicate
+// is outside the OR so a discovered row on a revoked host is excluded too.
 func serviceViewSQL(view string) string {
 	switch view {
 	case "deploybot":
-		return deploybotRowsSQL
+		return deploybotRowsSQL + " AND h.revoked_at IS NULL"
 	case "deploybot_and_discovered":
-		return "(" + deploybotRowsSQL + " OR (s.source = 'discovered' AND s.gone_at IS NULL))"
+		return "(" + deploybotRowsSQL + " OR (s.source = 'discovered' AND s.gone_at IS NULL)) AND h.revoked_at IS NULL"
 	default:
 		return ""
 	}
@@ -345,14 +348,19 @@ ON CONFLICT (host_id, name) DO UPDATE SET
     source = CASE
         WHEN app.services.source = 'declared' THEN app.services.source
         WHEN EXCLUDED.source = 'owned' THEN 'owned'
+        WHEN app.services.source = 'owned' AND EXCLUDED.source = 'discovered' THEN 'discovered'
         ELSE app.services.source
     END,
     project_id = CASE
-        WHEN app.services.source <> 'declared' AND EXCLUDED.source = 'owned' THEN EXCLUDED.project_id
+        WHEN app.services.source = 'declared' THEN app.services.project_id
+        WHEN EXCLUDED.source = 'owned' THEN EXCLUDED.project_id
+        WHEN app.services.source = 'owned' AND EXCLUDED.source = 'discovered' THEN EXCLUDED.project_id
         ELSE app.services.project_id
     END,
     catalog_entry = CASE
-        WHEN app.services.source <> 'declared' AND EXCLUDED.source = 'owned' THEN EXCLUDED.catalog_entry
+        WHEN app.services.source = 'declared' THEN app.services.catalog_entry
+        WHEN EXCLUDED.source = 'owned' THEN EXCLUDED.catalog_entry
+        WHEN app.services.source = 'owned' AND EXCLUDED.source = 'discovered' THEN NULL::text
         ELSE app.services.catalog_entry
     END,
     kind = CASE WHEN app.services.source <> 'declared' THEN EXCLUDED.kind ELSE app.services.kind END,

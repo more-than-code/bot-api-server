@@ -22,6 +22,10 @@ func TestServicePresenceIntegration(t *testing.T) {
 	t.Run("filters", func(t *testing.T) { assertServiceViewFilters(t, d, ctx) })
 	t.Run("placed", func(t *testing.T) { assertPresencePlacedName(t, d, ctx) })
 	t.Run("backfill", func(t *testing.T) { assertServiceGoneBackfill(t, d, ctx) })
+	t.Run("revoked host", func(t *testing.T) { assertRevokedHostRows(t, d, ctx) })
+	t.Run("project delete gone", func(t *testing.T) { assertProjectDeleteMarksGone(t, d, ctx) })
+	t.Run("revoked backfill", func(t *testing.T) { assertRevokedHostBackfill(t, d, ctx) })
+	t.Run("ownership ends", func(t *testing.T) { assertOwnershipEnds(t, d, ctx) })
 }
 
 func openPresenceDB(t *testing.T) (*DB, context.Context) {
@@ -587,4 +591,362 @@ func findServiceDB(t *testing.T, d *DB, ctx context.Context, hostID uuid.UUID, n
 		}
 	}
 	return store.Service{}, false
+}
+
+func assertRevokedHostRows(t *testing.T, d *DB, ctx context.Context) {
+	t.Helper()
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	tag := strings.ReplaceAll(uuid.New().String(), "-", "")[:10]
+	user := mustSvcUser(t, d, ctx, "revoke-"+tag, at)
+	project := mustSvcProject(t, d, ctx, user.ID, "Revoke", "revoke-"+tag, at)
+	otherUser := mustSvcUser(t, d, ctx, "revoke-other-"+tag, at)
+	otherProject := mustSvcProject(t, d, ctx, otherUser.ID, "Other", "revokeother-"+tag, at)
+	revoked := enrollHostDB(t, d, ctx, project.ID, user.ID, "revoked-"+tag, at)
+	live := enrollHostDB(t, d, ctx, project.ID, user.ID, "live-"+tag, at)
+	outsider := enrollHostDB(t, d, ctx, otherProject.ID, otherUser.ID, "out-"+tag, at)
+	early := at.Add(-time.Hour)
+	revokedDeclared := insertPresenceRow(t, d, ctx, revoked.ID, project.ID, "revoked-declared", "declared", nil, at)
+	revokedFound := insertPresenceRow(t, d, ctx, revoked.ID, project.ID, "revoked-found", "discovered", nil, at)
+	revokedOld := insertPresenceRow(t, d, ctx, revoked.ID, project.ID, "revoked-old", "discovered", &early, at)
+	liveDeclared := insertPresenceRow(t, d, ctx, live.ID, project.ID, "live-declared", "declared", nil, at)
+	liveFound := insertPresenceRow(t, d, ctx, live.ID, project.ID, "live-found", "discovered", nil, at)
+	outside := insertPresenceRow(t, d, ctx, outsider.ID, otherProject.ID, "outside", "discovered", nil, at)
+
+	revokeAt := at.Add(time.Minute)
+	if err := d.RevokeHost(ctx, revoked.ID, revokeAt); err != nil {
+		t.Fatal(err)
+	}
+	assertGoneAt(t, d, ctx, revokedDeclared, &revokeAt)
+	assertGoneAt(t, d, ctx, revokedFound, &revokeAt)
+	assertGoneAt(t, d, ctx, revokedOld, &early)
+	assertGoneAt(t, d, ctx, liveDeclared, nil)
+	assertGoneAt(t, d, ctx, liveFound, nil)
+	assertGoneAt(t, d, ctx, outside, nil)
+	var hostRevoked *time.Time
+	if err := d.pool.QueryRow(ctx, `SELECT revoked_at FROM app.hosts WHERE id = $1::uuid`, revoked.ID.String()).Scan(&hostRevoked); err != nil {
+		t.Fatal(err)
+	}
+	if hostRevoked == nil || !hostRevoked.Equal(revokeAt) {
+		t.Fatalf("host revoked_at %v", hostRevoked)
+	}
+
+	later := revokeAt.Add(time.Minute)
+	if err := d.RevokeHost(ctx, revoked.ID, later); err != nil {
+		t.Fatal(err)
+	}
+	assertGoneAt(t, d, ctx, revokedDeclared, &revokeAt)
+	assertGoneAt(t, d, ctx, revokedOld, &early)
+	if err := d.pool.QueryRow(ctx, `SELECT revoked_at FROM app.hosts WHERE id = $1::uuid`, revoked.ID.String()).Scan(&hostRevoked); err != nil {
+		t.Fatal(err)
+	}
+	if hostRevoked == nil || !hostRevoked.Equal(revokeAt) {
+		t.Fatalf("second revoke moved host to %v", hostRevoked)
+	}
+
+	deploybot := projectPage(t, d, ctx, project.ID, "deploybot", revokeAt)
+	if deploybot.Total != 1 || !sameLive(pageNames(deploybot), []string{"live-declared"}) {
+		t.Fatalf("deploybot total %d %v", deploybot.Total, pageNames(deploybot))
+	}
+	both := projectPage(t, d, ctx, project.ID, "deploybot_and_discovered", revokeAt)
+	if both.Total != 2 || !sameLive(pageNames(both), []string{"live-declared", "live-found"}) {
+		t.Fatalf("both total %d %v", both.Total, pageNames(both))
+	}
+	wantAll := []string{"live-declared", "live-found", "revoked-declared", "revoked-found", "revoked-old"}
+	all := projectPage(t, d, ctx, project.ID, "all", revokeAt)
+	if all.Total != len(wantAll) || !sameLive(pageNames(all), wantAll) {
+		t.Fatalf("all total %d %v", all.Total, pageNames(all))
+	}
+	blank := projectPage(t, d, ctx, project.ID, "", revokeAt)
+	if blank.Total != all.Total || !sameLive(pageNames(blank), pageNames(all)) {
+		t.Fatalf("default view %d %v", blank.Total, pageNames(blank))
+	}
+	for _, item := range all.Items {
+		switch item.Name {
+		case "revoked-old":
+			if item.GoneAt == nil || !item.GoneAt.Equal(early) {
+				t.Fatalf("old gone %v", item.GoneAt)
+			}
+		case "revoked-declared", "revoked-found":
+			if item.GoneAt == nil || !item.GoneAt.Equal(revokeAt) {
+				t.Fatalf("%s gone %v", item.Name, item.GoneAt)
+			}
+		case "live-declared", "live-found":
+			if item.GoneAt != nil {
+				t.Fatalf("%s gone %v", item.Name, item.GoneAt)
+			}
+		default:
+			t.Fatalf("unexpected %s", item.Name)
+		}
+	}
+}
+
+func assertProjectDeleteMarksGone(t *testing.T, d *DB, ctx context.Context) {
+	t.Helper()
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	tag := strings.ReplaceAll(uuid.New().String(), "-", "")[:10]
+	user := mustSvcUser(t, d, ctx, "delgone-"+tag, at)
+	project := mustSvcProject(t, d, ctx, user.ID, "Del", "delgone-"+tag, at)
+	otherUser := mustSvcUser(t, d, ctx, "delother-"+tag, at)
+	other := mustSvcProject(t, d, ctx, otherUser.ID, "Other", "delother-"+tag, at)
+	host := enrollHostDB(t, d, ctx, project.ID, user.ID, "delhost-"+tag, at)
+	earlyHost := enrollHostDB(t, d, ctx, project.ID, user.ID, "delearly-"+tag, at)
+	foreignHost := enrollHostDB(t, d, ctx, other.ID, otherUser.ID, "delforeign-"+tag, at)
+	earlyRevoke := at.Add(-2 * time.Hour)
+	if _, err := d.pool.Exec(ctx, `UPDATE app.hosts SET revoked_at = $2 WHERE id = $1::uuid`, earlyHost.ID.String(), earlyRevoke); err != nil {
+		t.Fatal(err)
+	}
+	keptGone := at.Add(-time.Minute)
+	present := insertPresenceRow(t, d, ctx, host.ID, project.ID, "present", "discovered", nil, at)
+	already := insertPresenceRow(t, d, ctx, host.ID, project.ID, "already", "discovered", &keptGone, at)
+	straggler := insertPresenceRow(t, d, ctx, earlyHost.ID, project.ID, "straggler", "discovered", nil, at)
+	foreign := insertPresenceRow(t, d, ctx, foreignHost.ID, project.ID, "foreign", "discovered", nil, at)
+
+	deleteAt := at.Add(time.Minute)
+	if _, err := d.DeleteProject(ctx, project.ID, deleteAt); err != nil {
+		t.Fatal(err)
+	}
+	assertGoneAt(t, d, ctx, present, &deleteAt)
+	assertGoneAt(t, d, ctx, already, &keptGone)
+	assertGoneAt(t, d, ctx, straggler, &earlyRevoke)
+	assertGoneAt(t, d, ctx, foreign, nil)
+	var projectID string
+	if err := d.pool.QueryRow(ctx, `SELECT project_id::text FROM app.services WHERE id = $1::uuid`, foreign.String()).Scan(&projectID); err != nil {
+		t.Fatal(err)
+	}
+	if projectID != other.ID.String() {
+		t.Fatalf("foreign project %s", projectID)
+	}
+	var foreignRevoked, hostRevoked *time.Time
+	if err := d.pool.QueryRow(ctx, `SELECT revoked_at FROM app.hosts WHERE id = $1::uuid`, foreignHost.ID.String()).Scan(&foreignRevoked); err != nil {
+		t.Fatal(err)
+	}
+	if foreignRevoked != nil {
+		t.Fatal("foreign host revoked")
+	}
+	if err := d.pool.QueryRow(ctx, `SELECT revoked_at FROM app.hosts WHERE id = $1::uuid`, host.ID.String()).Scan(&hostRevoked); err != nil {
+		t.Fatal(err)
+	}
+	if hostRevoked == nil || !hostRevoked.Equal(deleteAt) {
+		t.Fatalf("deleted host revoked_at %v", hostRevoked)
+	}
+}
+
+func assertRevokedHostBackfill(t *testing.T, d *DB, ctx context.Context) {
+	t.Helper()
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	tag := strings.ReplaceAll(uuid.New().String(), "-", "")[:10]
+	user := mustSvcUser(t, d, ctx, "rback-"+tag, at)
+	project := mustSvcProject(t, d, ctx, user.ID, "Back", "rback-"+tag, at)
+	revokedA := enrollHostDB(t, d, ctx, project.ID, user.ID, "rback-a-"+tag, at)
+	revokedB := enrollHostDB(t, d, ctx, project.ID, user.ID, "rback-b-"+tag, at)
+	live := enrollHostDB(t, d, ctx, project.ID, user.ID, "rback-live-"+tag, at)
+	revokeA := at.Add(-3 * time.Hour)
+	revokeB := at.Add(-2 * time.Hour)
+	if _, err := d.pool.Exec(ctx, `UPDATE app.hosts SET revoked_at = $2 WHERE id = $1::uuid`, revokedA.ID.String(), revokeA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.pool.Exec(ctx, `UPDATE app.hosts SET revoked_at = $2 WHERE id = $1::uuid`, revokedB.ID.String(), revokeB); err != nil {
+		t.Fatal(err)
+	}
+	kept := at.Add(-time.Minute)
+	aOpen := insertPresenceRow(t, d, ctx, revokedA.ID, project.ID, "a-open", "owned", nil, at)
+	if _, err := d.pool.Exec(ctx, `UPDATE app.services SET catalog_entry = 'redis' WHERE id = $1::uuid`, aOpen.String()); err != nil {
+		t.Fatal(err)
+	}
+	aKept := insertPresenceRow(t, d, ctx, revokedA.ID, project.ID, "a-kept", "discovered", &kept, at)
+	bOpen := insertPresenceRow(t, d, ctx, revokedB.ID, project.ID, "b-open", "declared", nil, at)
+	liveOpen := insertPresenceRow(t, d, ctx, live.ID, project.ID, "live-open", "discovered", nil, at)
+	liveKept := insertPresenceRow(t, d, ctx, live.ID, project.ID, "live-kept", "discovered", &kept, at)
+	beforeSource, beforeCatalog, beforeSeen := serviceStamp(t, d, ctx, aOpen)
+	liveSource, _, liveSeen := serviceStamp(t, d, ctx, liveOpen)
+
+	stmt := revokedHostBackfillSQL(t)
+	if _, err := d.pool.Exec(ctx, stmt); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+	assertGoneAt(t, d, ctx, aOpen, &revokeA)
+	assertGoneAt(t, d, ctx, aKept, &kept)
+	assertGoneAt(t, d, ctx, bOpen, &revokeB)
+	assertGoneAt(t, d, ctx, liveOpen, nil)
+	assertGoneAt(t, d, ctx, liveKept, &kept)
+	source, catalog, seen := serviceStamp(t, d, ctx, aOpen)
+	if source != beforeSource || source != "owned" || catalog == nil || *catalog != "redis" || (beforeCatalog != nil && *beforeCatalog != "redis") || !seen.Equal(beforeSeen) {
+		t.Fatalf("backfill rewrote source %s catalog %v seen %s", source, catalog, seen)
+	}
+	source, _, seen = serviceStamp(t, d, ctx, liveOpen)
+	if source != liveSource || !seen.Equal(liveSeen) {
+		t.Fatalf("live row changed %s %s", source, seen)
+	}
+	tag2, err := d.pool.Exec(ctx, stmt)
+	if err != nil {
+		t.Fatalf("second backfill: %v", err)
+	}
+	if tag2.RowsAffected() != 0 {
+		t.Fatalf("second run changed %d rows", tag2.RowsAffected())
+	}
+	assertGoneAt(t, d, ctx, aOpen, &revokeA)
+	assertGoneAt(t, d, ctx, aKept, &kept)
+	assertGoneAt(t, d, ctx, bOpen, &revokeB)
+	assertGoneAt(t, d, ctx, liveOpen, nil)
+	assertGoneAt(t, d, ctx, liveKept, &kept)
+}
+
+func assertOwnershipEnds(t *testing.T, d *DB, ctx context.Context) {
+	t.Helper()
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	tag := strings.ReplaceAll(uuid.New().String(), "-", "")[:10]
+	owner := catalogUser(t, d, ctx, "ownend-"+tag, at)
+	boxOwner := catalogUser(t, d, ctx, "boxend-"+tag, at)
+	home := catalogProject(t, d, ctx, owner.ID, "Home", "ownend"+tag, at)
+	box := catalogProject(t, d, ctx, boxOwner.ID, "Box", "boxend"+tag, at)
+	host := enrollHostDB(t, d, ctx, box.ID, boxOwner.ID, "end-"+tag, at)
+	spec, hash, display := catalogSpec(t, "pnpm run dev")
+	for _, name := range []string{"redis", "kept"} {
+		if _, err := d.CreateCatalogEntry(ctx, home.ID, store.CatalogWrite{
+			Name: name, Spec: spec, SpecHash: hash, CommandDisplay: display, Actor: owner.ID, At: at,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	declared := insertPresenceRow(t, d, ctx, host.ID, box.ID, "kept", "declared", nil, at)
+	if _, err := d.pool.Exec(ctx, `UPDATE app.services SET ports = '{9}' WHERE id = $1::uuid`, declared.String()); err != nil {
+		t.Fatal(err)
+	}
+	label := "Kept"
+	if _, err := d.SetServiceDisplayName(ctx, declared, &label, at); err != nil {
+		t.Fatal(err)
+	}
+	declaredChecks, err := d.ReplaceHealthChecks(ctx, declared, []store.HealthCheckInput{{
+		Protocol: "tcp", Port: 9, IntervalSec: 30, ExpectStatusMin: 200, ExpectStatusMax: 299, Enabled: true,
+	}})
+	if err != nil || len(declaredChecks) != 1 {
+		t.Fatalf("declared checks %v %v", declaredChecks, err)
+	}
+	redisOwner := &store.DiscoveredOwner{Kind: "program", Project: home.Slug, Entry: "redis"}
+	keptOwner := &store.DiscoveredOwner{Kind: "program", Project: home.Slug, Entry: "kept"}
+	keptDiscovered := store.Discovered{Name: "kept", Kind: "container", Ports: []int{1}}
+	if err := d.UpsertDiscovered(ctx, host.ID, []store.Discovered{
+		{Name: "redis", Kind: "container", Ports: []int{6379}, Owner: redisOwner},
+		keptDiscovered,
+	}, at, true, true); err != nil {
+		t.Fatal(err)
+	}
+	redis := serviceByNameDB(t, d, ctx, host.ID, "redis", at)
+	if redis.Source != "owned" || redis.ProjectID != home.ID || redis.CatalogEntry == nil || *redis.CatalogEntry != "redis" {
+		t.Fatalf("owned %+v", redis)
+	}
+	assertDeclaredUnchangedDB(t, d, ctx, declared, box.ID, declaredChecks[0].ID, at)
+	shown := "Redis"
+	if _, err := d.SetServiceDisplayName(ctx, redis.ID, &shown, at); err != nil {
+		t.Fatal(err)
+	}
+	redisChecks, err := d.ReplaceHealthChecks(ctx, redis.ID, []store.HealthCheckInput{{
+		Protocol: "tcp", Port: 6379, IntervalSec: 30, ExpectStatusMin: 200, ExpectStatusMax: 299, Enabled: true,
+	}})
+	if err != nil || len(redisChecks) != 1 {
+		t.Fatalf("redis checks %v %v", redisChecks, err)
+	}
+	container := "redis"
+	t2 := at.Add(time.Minute)
+	if err := d.UpsertDiscovered(ctx, host.ID, []store.Discovered{
+		{Name: "redis", Kind: "container", Ports: []int{6379}, ContainerName: &container},
+		keptDiscovered,
+	}, t2, true, true); err != nil {
+		t.Fatal(err)
+	}
+	ended := mustServiceDB(t, d, ctx, redis.ID, t2)
+	if ended.ID != redis.ID || ended.Source != "discovered" || ended.CatalogEntry != nil || ended.ProjectID != box.ID {
+		t.Fatalf("ended %+v", ended)
+	}
+	if ended.DisplayName == nil || *ended.DisplayName != "Redis" || ended.ContainerName == nil || *ended.ContainerName != "redis" {
+		t.Fatalf("ended fields %+v", ended)
+	}
+	if got, err := d.ListHealthChecks(ctx, redis.ID); err != nil || len(got) != 1 || got[0].ID != redisChecks[0].ID {
+		t.Fatalf("ended checks %+v %v", got, err)
+	}
+	assertDeclaredUnchangedDB(t, d, ctx, declared, box.ID, declaredChecks[0].ID, t2)
+	t3 := t2.Add(time.Minute)
+	if err := d.UpsertDiscovered(ctx, host.ID, []store.Discovered{
+		{Name: "redis", Kind: "container", Ports: []int{6379}, ContainerName: &container, Owner: redisOwner},
+		{Name: "agent-kept", Kind: "container", Ports: []int{1}, Owner: keptOwner},
+	}, t3, true, true); err != nil {
+		t.Fatal(err)
+	}
+	again := mustServiceDB(t, d, ctx, redis.ID, t3)
+	if again.ID != redis.ID || again.Source != "owned" || again.ProjectID != home.ID || again.CatalogEntry == nil || *again.CatalogEntry != "redis" {
+		t.Fatalf("reowned %+v", again)
+	}
+	if again.DisplayName == nil || *again.DisplayName != "Redis" {
+		t.Fatalf("reowned display %+v", again.DisplayName)
+	}
+	if got, err := d.ListHealthChecks(ctx, redis.ID); err != nil || len(got) != 1 || got[0].ID != redisChecks[0].ID {
+		t.Fatalf("reowned checks %+v %v", got, err)
+	}
+	if _, ok := findServiceDB(t, d, ctx, host.ID, "agent-kept", t3); ok {
+		t.Fatal("declared row was stored under the agent name")
+	}
+	assertDeclaredUnchangedDB(t, d, ctx, declared, box.ID, declaredChecks[0].ID, t3)
+}
+
+func assertDeclaredUnchangedDB(t *testing.T, d *DB, ctx context.Context, id, project uuid.UUID, checkID uuid.UUID, at time.Time) {
+	t.Helper()
+	got := mustServiceDB(t, d, ctx, id, at)
+	if got.Source != "declared" || got.ProjectID != project || got.CatalogEntry != nil || got.Kind != "process" || got.GoneAt != nil || got.ContainerName != nil {
+		t.Fatalf("declared %+v", got)
+	}
+	if len(got.Ports) != 1 || got.Ports[0] != 9 {
+		t.Fatalf("declared ports %v", got.Ports)
+	}
+	if got.DisplayName == nil || *got.DisplayName != "Kept" {
+		t.Fatalf("declared display %+v", got.DisplayName)
+	}
+	checks, err := d.ListHealthChecks(ctx, id)
+	if err != nil || len(checks) != 1 || checks[0].ID != checkID {
+		t.Fatalf("declared checks %+v %v", checks, err)
+	}
+}
+
+func revokedHostBackfillSQL(t *testing.T) string {
+	t.Helper()
+	body, err := migrations.FS.ReadFile("0012_revoked_host_rows.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range splitSQL(string(body)) {
+		if strings.Contains(stmt, "SET gone_at") {
+			return stmt
+		}
+	}
+	t.Fatal("backfill UPDATE missing")
+	return ""
+}
+
+func serviceStamp(t *testing.T, d *DB, ctx context.Context, id uuid.UUID) (string, *string, time.Time) {
+	t.Helper()
+	var source string
+	var catalog *string
+	var seen time.Time
+	if err := d.pool.QueryRow(ctx, `SELECT source, catalog_entry, last_seen_at FROM app.services WHERE id = $1::uuid`, id.String()).Scan(&source, &catalog, &seen); err != nil {
+		t.Fatal(err)
+	}
+	return source, catalog, seen
+}
+
+func projectPage(t *testing.T, d *DB, ctx context.Context, project uuid.UUID, view string, at time.Time) store.ServicePage {
+	t.Helper()
+	page, err := d.ListProjectServices(ctx, project, store.ServiceListQuery{
+		Sort: "name", Dir: "asc", Limit: 50, View: view,
+	}, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return page
+}
+
+func pageNames(page store.ServicePage) []string {
+	out := make([]string, len(page.Items))
+	for i, item := range page.Items {
+		out[i] = item.Name
+	}
+	return out
 }

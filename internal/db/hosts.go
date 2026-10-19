@@ -344,6 +344,19 @@ WHERE host_id = $1::uuid AND revoked_at IS NULL
 `, hostID.String(), at); err != nil {
 		return mapErr(err)
 	}
+	// Still-present rows go gone at the host's revoke time. A row that is
+	// already gone keeps its time. A second revoke does not move it.
+	if err := exec(ctx, tx, `
+UPDATE app.services AS s
+SET gone_at = h.revoked_at
+FROM app.hosts AS h
+WHERE s.host_id = h.id
+  AND h.id = $1::uuid
+  AND h.revoked_at IS NOT NULL
+  AND s.gone_at IS NULL
+`, hostID.String()); err != nil {
+		return mapErr(err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return mapErr(err)
 	}

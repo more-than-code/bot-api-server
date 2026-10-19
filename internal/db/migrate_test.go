@@ -8,10 +8,10 @@ import (
 )
 
 func TestMigrationSkipsDownScript(t *testing.T) {
-	if numberedSQL("0003_shared_hosts.down.sql") || numberedSQL("0004_service_names.down.sql") || numberedSQL("0005_mcp_oauth.down.sql") || numberedSQL("0006_invites.down.sql") || numberedSQL("0007_catalog.down.sql") || numberedSQL("0008_service_gone.down.sql") || numberedSQL("0009_catalog_images.down.sql") || numberedSQL("0010_project_files.down.sql") || numberedSQL("0011_service_confirmations.down.sql") {
+	if numberedSQL("0003_shared_hosts.down.sql") || numberedSQL("0004_service_names.down.sql") || numberedSQL("0005_mcp_oauth.down.sql") || numberedSQL("0006_invites.down.sql") || numberedSQL("0007_catalog.down.sql") || numberedSQL("0008_service_gone.down.sql") || numberedSQL("0009_catalog_images.down.sql") || numberedSQL("0010_project_files.down.sql") || numberedSQL("0011_service_confirmations.down.sql") || numberedSQL("0012_revoked_host_rows.down.sql") {
 		t.Fatal("down script is numbered SQL")
 	}
-	if !numberedSQL("0003_shared_hosts.sql") || !numberedSQL("0004_service_names.sql") || !numberedSQL("0005_mcp_oauth.sql") || !numberedSQL("0006_invites.sql") || !numberedSQL("0007_catalog.sql") || !numberedSQL("0008_service_gone.sql") || !numberedSQL("0009_catalog_images.sql") || !numberedSQL("0010_project_files.sql") || !numberedSQL("0011_service_confirmations.sql") {
+	if !numberedSQL("0003_shared_hosts.sql") || !numberedSQL("0004_service_names.sql") || !numberedSQL("0005_mcp_oauth.sql") || !numberedSQL("0006_invites.sql") || !numberedSQL("0007_catalog.sql") || !numberedSQL("0008_service_gone.sql") || !numberedSQL("0009_catalog_images.sql") || !numberedSQL("0010_project_files.sql") || !numberedSQL("0011_service_confirmations.sql") || !numberedSQL("0012_revoked_host_rows.sql") {
 		t.Fatal("numbered migration was skipped")
 	}
 	names, err := migrationFiles()
@@ -19,7 +19,7 @@ func TestMigrationSkipsDownScript(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(names, ",")
-	for _, want := range []string{"0001_app.sql", "0002_metrics.sql", "0003_shared_hosts.sql", "0004_service_names.sql", "0005_mcp_oauth.sql", "0006_invites.sql", "0007_catalog.sql", "0008_service_gone.sql", "0009_catalog_images.sql", "0010_project_files.sql", "0011_service_confirmations.sql"} {
+	for _, want := range []string{"0001_app.sql", "0002_metrics.sql", "0003_shared_hosts.sql", "0004_service_names.sql", "0005_mcp_oauth.sql", "0006_invites.sql", "0007_catalog.sql", "0008_service_gone.sql", "0009_catalog_images.sql", "0010_project_files.sql", "0011_service_confirmations.sql", "0012_revoked_host_rows.sql"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("migrations = %s", got)
 		}
@@ -172,6 +172,51 @@ func TestServiceGoneMigrationText(t *testing.T) {
 		if !strings.Contains(downText, want) {
 			t.Fatalf("down script missing %s", want)
 		}
+	}
+}
+
+func TestRevokedHostRowsMigrationText(t *testing.T) {
+	body, err := migrations.FS.ReadFile("0012_revoked_host_rows.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	stmts := splitSQL(text)
+	if len(stmts) != 1 {
+		t.Fatalf("statements %d", len(stmts))
+	}
+	stmt := stmts[0]
+	for _, want := range []string{
+		"UPDATE app.services AS s",
+		"SET gone_at = h.revoked_at",
+		"FROM app.hosts AS h",
+		"s.host_id = h.id",
+		"h.revoked_at IS NOT NULL",
+		"s.gone_at IS NULL",
+	} {
+		if !strings.Contains(stmt, want) {
+			t.Fatalf("0012 missing %s", want)
+		}
+	}
+	if strings.Contains(text, "ALTER") || strings.Contains(text, "GRANT") || strings.Contains(text, "CREATE") {
+		t.Fatal("0012 changes schema or grants")
+	}
+	down, err := migrations.FS.ReadFile("0012_revoked_host_rows.down.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	downText := string(down)
+	for _, want := range []string{
+		"--migrate does not apply",
+		"No-op",
+		"DELETE FROM app.schema_migrations WHERE name = '0012_revoked_host_rows.sql'",
+	} {
+		if !strings.Contains(downText, want) {
+			t.Fatalf("down script missing %s", want)
+		}
+	}
+	if got := splitSQL(downText); len(got) != 0 {
+		t.Fatalf("down script is not a no-op: %v", got)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/more-than-code/bot-api-server/internal/store"
 )
@@ -240,5 +241,165 @@ func assertGoneJSON(t *testing.T, item map[string]any, want string) {
 	}
 	if got != want {
 		t.Fatalf("gone_at %#v", got)
+	}
+}
+
+func TestProjectServicesRevokedHost(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	owner := w.user("revoke-rows@ex.com", "Owner")
+	project, err := w.mem.CreateProject(ctx, owner.ID, "Revoke", "revokerows", w.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked := enrollAPIHost(t, w, project.ID, owner.ID, "revoked-host", true)
+	live := enrollAPIHost(t, w, project.ID, owner.ID, "live-host", true)
+	w.mem.PutDeclared(revoked.ID, "revoked-declared", "process", nil, w.now)
+	w.mem.PutDiscovered(revoked.ID, "revoked-found", "process", nil, nil, w.now)
+	old := w.mem.PutDiscovered(revoked.ID, "revoked-old", "process", nil, nil, w.now)
+	w.mem.PutDeclared(live.ID, "live-declared", "process", nil, w.now)
+	w.mem.PutDiscovered(live.ID, "live-found", "process", nil, nil, w.now)
+	early := w.now.Add(-time.Hour)
+	if err := w.mem.UpsertDiscovered(ctx, revoked.ID, []store.Discovered{
+		{Name: "revoked-declared", Kind: "process"},
+		{Name: "revoked-found", Kind: "process"},
+	}, early, true, true); err != nil {
+		t.Fatal(err)
+	}
+	tok := w.token(owner.ID)
+	code, env := w.do(tok, http.MethodDelete, "/v1/hosts/"+revoked.ID.String()+"/credential", "")
+	if code != http.StatusOK || env.Code != "ok" {
+		t.Fatalf("revoke %d %s %s", code, env.Code, env.Msg)
+	}
+	code, env = w.do(tok, http.MethodDelete, "/v1/hosts/"+revoked.ID.String()+"/credential", "")
+	if code != http.StatusOK || env.Code != "ok" {
+		t.Fatalf("second revoke %d %s %s", code, env.Code, env.Msg)
+	}
+
+	home := project.ID.String()
+	wantAll := []string{"live-declared", "live-found", "revoked-declared", "revoked-found", "revoked-old"}
+	for _, tc := range []struct {
+		view  string
+		want  []string
+		total int
+	}{
+		{"deploybot", []string{"live-declared"}, 1},
+		{"deploybot_and_discovered", []string{"live-declared", "live-found"}, 2},
+		{"all", wantAll, 5},
+		{"", wantAll, 5},
+	} {
+		q := url.Values{}
+		q.Set("sort", "name")
+		if tc.view != "" {
+			q.Set("view", tc.view)
+		}
+		page := listView(t, w, tok, home, q)
+		payload := objectPayload(t, page)
+		if int(payload["total"].(float64)) != tc.total {
+			t.Fatalf("view %q total %v", tc.view, payload["total"])
+		}
+		if got := itemNames(t, page); !sameStrings(got, tc.want) {
+			t.Fatalf("view %q %v", tc.view, got)
+		}
+	}
+	items := listItems(t, listView(t, w, tok, home, url.Values{"sort": {"name"}, "view": {"all"}}))
+	assertGoneJSON(t, findItem(t, items, "name", "revoked-declared"), "2026-10-13T12:00:00Z")
+	assertGoneJSON(t, findItem(t, items, "name", "revoked-found"), "2026-10-13T12:00:00Z")
+	assertGoneJSON(t, findItem(t, items, "name", "revoked-old"), "2026-10-13T11:00:00Z")
+	assertGoneJSON(t, findItem(t, items, "name", "live-declared"), "")
+	assertGoneJSON(t, findItem(t, items, "name", "live-found"), "")
+	if findItem(t, items, "name", "revoked-declared")["host_status"] != "revoked" {
+		t.Fatalf("host_status %v", findItem(t, items, "name", "revoked-declared")["host_status"])
+	}
+
+	limited := url.Values{}
+	limited.Set("view", "deploybot")
+	limited.Set("sort", "name")
+	limited.Set("limit", "1")
+	limitedPage := listView(t, w, tok, home, limited)
+	limitedPayload := objectPayload(t, limitedPage)
+	if int(limitedPayload["total"].(float64)) != 1 || limitedPayload["next_cursor"] != nil {
+		t.Fatalf("deploybot page total %v cursor %v", limitedPayload["total"], limitedPayload["next_cursor"])
+	}
+	if got := itemNames(t, limitedPage); !sameStrings(got, []string{"live-declared"}) {
+		t.Fatalf("deploybot page %v", got)
+	}
+
+	code, env = w.do(tok, http.MethodGet, "/v1/hosts/"+revoked.ID.String()+"/services", "")
+	if code != http.StatusOK {
+		t.Fatalf("host list %d %s", code, env.Msg)
+	}
+	hostItems := listItems(t, env)
+	if got := itemNames(t, env); !sameStrings(got, []string{"revoked-declared", "revoked-found", "revoked-old"}) {
+		t.Fatalf("host services %v", got)
+	}
+	assertGoneJSON(t, findItem(t, hostItems, "name", "revoked-declared"), "2026-10-13T12:00:00Z")
+	assertGoneJSON(t, findItem(t, hostItems, "name", "revoked-old"), "2026-10-13T11:00:00Z")
+	code, env = w.do(tok, http.MethodGet, "/v1/services/"+old.ID.String(), "")
+	if code != http.StatusOK {
+		t.Fatalf("get %d %s", code, env.Msg)
+	}
+	assertGoneJSON(t, objectPayload(t, env), "2026-10-13T11:00:00Z")
+	code, env = w.do(tok, http.MethodGet, "/v1/services/"+findItem(t, items, "name", "revoked-found")["id"].(string), "")
+	if code != http.StatusOK {
+		t.Fatalf("get found %d %s", code, env.Msg)
+	}
+	assertGoneJSON(t, objectPayload(t, env), "2026-10-13T12:00:00Z")
+}
+
+func TestProjectDeleteMarksHostRowsGone(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	owner := w.user("delgone@ex.com", "Owner")
+	otherUser := w.user("delother@ex.com", "Other")
+	project, err := w.mem.CreateProject(ctx, owner.ID, "Del", "delgone", w.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err := w.mem.CreateProject(ctx, otherUser.ID, "Other", "delother", w.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := enrollAPIHost(t, w, project.ID, owner.ID, "delhost", true)
+	earlyHost := enrollAPIHost(t, w, project.ID, owner.ID, "delearly", true)
+	foreignHost := enrollAPIHost(t, w, other.ID, otherUser.ID, "delforeign", true)
+	earlyRevoke := w.now.Add(-2 * time.Hour)
+	if err := w.mem.RevokeHost(ctx, earlyHost.ID, earlyRevoke); err != nil {
+		t.Fatal(err)
+	}
+	present := w.mem.PutDiscovered(host.ID, "present", "process", nil, nil, w.now)
+	already := w.mem.PutDiscovered(host.ID, "already", "process", nil, nil, w.now)
+	straggler := w.mem.PutDiscovered(earlyHost.ID, "straggler", "process", nil, nil, w.now)
+	foreign := w.mem.PutDiscovered(foreignHost.ID, "foreign", "process", nil, nil, w.now)
+	w.mem.SetServiceProject(foreign.ID, project.ID)
+	kept := w.now.Add(-time.Hour)
+	if err := w.mem.UpsertDiscovered(ctx, host.ID, []store.Discovered{
+		{Name: "present", Kind: "process"},
+	}, kept, true, true); err != nil {
+		t.Fatal(err)
+	}
+	code, env := w.do(w.token(owner.ID), http.MethodDelete, "/v1/projects/"+project.ID.String(), "")
+	if code != http.StatusOK || env.Code != "ok" {
+		t.Fatalf("delete %d %s %s", code, env.Code, env.Msg)
+	}
+	presentRow, err := w.mem.GetService(ctx, present.ID, w.now)
+	if err != nil || presentRow.GoneAt == nil || !presentRow.GoneAt.Equal(w.now) {
+		t.Fatalf("present %v %v", presentRow.GoneAt, err)
+	}
+	alreadyRow, err := w.mem.GetService(ctx, already.ID, w.now)
+	if err != nil || alreadyRow.GoneAt == nil || !alreadyRow.GoneAt.Equal(kept) {
+		t.Fatalf("already %v %v", alreadyRow.GoneAt, err)
+	}
+	stragglerRow, err := w.mem.GetService(ctx, straggler.ID, w.now)
+	if err != nil || stragglerRow.GoneAt == nil || !stragglerRow.GoneAt.Equal(earlyRevoke) {
+		t.Fatalf("straggler %v %v", stragglerRow.GoneAt, err)
+	}
+	foreignRow, err := w.mem.GetService(ctx, foreign.ID, w.now)
+	if err != nil || foreignRow.GoneAt != nil || foreignRow.ProjectID != other.ID {
+		t.Fatalf("foreign gone %v project %s err %v", foreignRow.GoneAt, foreignRow.ProjectID, err)
+	}
+	foreignHostRow, err := w.mem.GetHost(ctx, foreignHost.ID)
+	if err != nil || foreignHostRow.RevokedAt != nil {
+		t.Fatalf("foreign host %v %v", foreignHostRow.RevokedAt, err)
 	}
 }

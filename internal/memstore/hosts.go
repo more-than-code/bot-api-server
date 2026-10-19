@@ -221,6 +221,7 @@ func (m *Mem) RevokeHost(_ context.Context, hostID uuid.UUID, at time.Time) erro
 		m.hosts[hostID] = h
 	}
 	m.revokeCredsLocked(hostID, at)
+	m.markHostServicesGoneLocked(hostID)
 	return nil
 }
 

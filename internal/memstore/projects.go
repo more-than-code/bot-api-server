@@ -123,6 +123,7 @@ func (m *Mem) DeleteProject(_ context.Context, id uuid.UUID, at time.Time) ([]uu
 			m.hosts[hid] = h
 		}
 		m.revokeCredsLocked(hid, at)
+		m.markHostServicesGoneLocked(hid)
 	}
 	m.cascadeProjectLocked(id)
 	m.deleteInvitesLocked(id)
@@ -161,6 +162,23 @@ func (m *Mem) revokeCredsLocked(hostID uuid.UUID, at time.Time) {
 			c.RevokedAt = &t
 			m.creds[id] = c
 		}
+	}
+}
+
+// markHostServicesGoneLocked sets gone_at to the host's revoke time on rows
+// that are still present. An already-gone row keeps its time. The caller holds m.mu.
+func (m *Mem) markHostServicesGoneLocked(hostID uuid.UUID) {
+	h, ok := m.hosts[hostID]
+	if !ok || h.RevokedAt == nil {
+		return
+	}
+	for id, s := range m.services {
+		if s.HostID != hostID || s.GoneAt != nil {
+			continue
+		}
+		gone := *h.RevokedAt
+		s.GoneAt = &gone
+		m.services[id] = s
 	}
 }
 

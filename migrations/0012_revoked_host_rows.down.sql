@@ -1,0 +1,9 @@
+-- Hand-run rollback for 0012_revoked_host_rows.sql. --migrate does not apply this file.
+-- No-op. The up script only set gone_at on rows of revoked hosts. The
+-- previous value was NULL and carries no information, so it cannot be
+-- restored. Those rows stay gone. Nothing in the schema is undone.
+--
+-- Run as deploybot_owner. After this script, delete the applied row before
+-- --migrate will run 0012 again:
+--
+--   DELETE FROM app.schema_migrations WHERE name = '0012_revoked_host_rows.sql';

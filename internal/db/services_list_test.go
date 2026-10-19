@@ -5,6 +5,24 @@ import (
 	"testing"
 )
 
+func TestServiceViewExcludesRevokedHosts(t *testing.T) {
+	deploybot := serviceViewSQL("deploybot")
+	if deploybot != deploybotRowsSQL+" AND h.revoked_at IS NULL" {
+		t.Fatalf("deploybot %s", deploybot)
+	}
+	both := serviceViewSQL("deploybot_and_discovered")
+	wantBoth := "(" + deploybotRowsSQL + " OR (s.source = 'discovered' AND s.gone_at IS NULL)) AND h.revoked_at IS NULL"
+	if both != wantBoth {
+		t.Fatalf("both %s", both)
+	}
+	if strings.Contains(deploybotRowsSQL, "revoked_at") {
+		t.Fatal("revoked-host filter must wrap the discovered arm, not sit inside deploybotRowsSQL")
+	}
+	if serviceViewSQL("") != "" || serviceViewSQL("all") != "" || serviceViewSQL("bogus") != "" {
+		t.Fatal("all view gained a predicate")
+	}
+}
+
 func TestLikeContains(t *testing.T) {
 	if got := likeContains("plain"); got != "%plain%" {
 		t.Fatalf("plain %q", got)

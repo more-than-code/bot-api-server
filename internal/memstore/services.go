@@ -99,10 +99,17 @@ func (m *Mem) UpsertDiscovered(_ context.Context, hostID uuid.UUID, items []stor
 		existing.LastSeenAt = at
 		existing.GoneAt = nil
 		existing.OwnerUser = store.NormalizeOwnerUser(item.OwnerUser)
+		// An owned report adopts a discovered row. A discovered placement
+		// ends ownership. declared is left alone. id, display_name, and
+		// health checks are not written here.
 		if existing.Source != "declared" && source == "owned" {
 			existing.Source = "owned"
 			existing.ProjectID = projectID
 			existing.CatalogEntry = cloneString(catalogEntry)
+		} else if existing.Source == "owned" && source == "discovered" {
+			existing.Source = "discovered"
+			existing.ProjectID = projectID
+			existing.CatalogEntry = nil
 		}
 		if existing.Source != "declared" {
 			existing.Kind = item.Kind
@@ -265,7 +272,7 @@ func (m *Mem) ListProjectServices(_ context.Context, projectID uuid.UUID, q stor
 		if q.HostID != nil && svc.HostID != *q.HostID {
 			continue
 		}
-		if !m.serviceInViewLocked(svc, q.View) {
+		if !m.serviceInViewLocked(svc, host, q.View) {
 			continue
 		}
 		projectName := ""
@@ -358,11 +365,14 @@ func serviceOrder(row store.ProjectService) store.ServiceOrder {
 	}
 }
 
-func (m *Mem) serviceInViewLocked(svc store.Service, view string) bool {
+func (m *Mem) serviceInViewLocked(svc store.Service, host store.Host, view string) bool {
 	switch view {
 	case "deploybot":
-		return m.deploybotRowLocked(svc)
+		return host.RevokedAt == nil && m.deploybotRowLocked(svc)
 	case "deploybot_and_discovered":
+		if host.RevokedAt != nil {
+			return false
+		}
 		if m.deploybotRowLocked(svc) {
 			return true
 		}

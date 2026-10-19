@@ -485,6 +485,46 @@ func TestStaleStatusSort(t *testing.T) {
 	}
 }
 
+func TestRevokedHostLeavesDeploybotViews(t *testing.T) {
+	ctx := context.Background()
+	at := time.Date(2026, 10, 16, 15, 0, 0, 0, time.UTC)
+	mem := New()
+	owner := mustUser(t, mem, "revoked-view@ex.com", at)
+	project := makeProject(t, mem, owner.ID, "Revoked", "revokedview", at)
+	host := enrollMem(t, mem, project.ID, owner.ID, "revoked-view-host", at)
+	live := enrollMem(t, mem, project.ID, owner.ID, "live-view-host", at)
+	mem.PutDeclared(host.ID, "revoked-api", "process", nil, at)
+	mem.PutDiscovered(host.ID, "revoked-found", "process", nil, nil, at)
+	mem.PutDeclared(live.ID, "live-api", "process", nil, at)
+	if err := mem.RevokeHost(ctx, host.ID, at); err != nil {
+		t.Fatal(err)
+	}
+	q := func(view string) store.ServiceListQuery {
+		return store.ServiceListQuery{Sort: "name", Dir: "asc", Limit: 50, View: view}
+	}
+	if got := projectNames(t, mem, project.ID, q("deploybot"), at); !sameNames(got, []string{"live-api"}) {
+		t.Fatalf("deploybot %v", got)
+	}
+	if got := projectNames(t, mem, project.ID, q("deploybot_and_discovered"), at); !sameNames(got, []string{"live-api"}) {
+		t.Fatalf("both %v", got)
+	}
+	wantAll := []string{"live-api", "revoked-api", "revoked-found"}
+	if got := projectNames(t, mem, project.ID, q("all"), at); !sameNames(got, wantAll) {
+		t.Fatalf("all %v", got)
+	}
+	if got := projectNames(t, mem, project.ID, q(""), at); !sameNames(got, wantAll) {
+		t.Fatalf("default %v", got)
+	}
+	row := findRow(t, mem, project.ID, "revoked-api", at)
+	if row.GoneAt == nil || !row.GoneAt.Equal(at) {
+		t.Fatalf("revoked-api gone %v", row.GoneAt)
+	}
+	found := findRow(t, mem, project.ID, "revoked-found", at)
+	if found.GoneAt == nil || !found.GoneAt.Equal(at) {
+		t.Fatalf("revoked-found gone %v", found.GoneAt)
+	}
+}
+
 func samePtr(a, b *string) bool {
 	if a == nil || b == nil {
 		return a == b
