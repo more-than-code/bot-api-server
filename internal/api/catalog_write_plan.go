@@ -42,6 +42,9 @@ func catalogCreatePlan(project, name string, img catalog.Image) string {
 	if len(img.Command) > 0 {
 		parts = append(parts, "command "+argvPhrase(img.Command))
 	}
+	if img.Healthcheck != nil {
+		parts = append(parts, "healthcheck "+healthcheckPhrase(*img.Healthcheck))
+	}
 	if len(img.Entrypoint) > 0 {
 		parts = append(parts, "entrypoint "+argvPhrase(img.Entrypoint))
 	}
@@ -82,6 +85,7 @@ func catalogUpdatePlan(name string, old, next catalog.Image, voids int) string {
 	add("volumes", volumeOrNone(old.Volumes), volumeOrNone(next.Volumes))
 	add("files", fileOrNone(old.Files), fileOrNone(next.Files))
 	add("command", argvOrNone(old.Command), argvOrNone(next.Command))
+	add("healthcheck", healthOrNone(old.Healthcheck), healthOrNone(next.Healthcheck))
 	add("entrypoint", argvOrNone(old.Entrypoint), argvOrNone(next.Entrypoint))
 	add("restart", textOrNone(old.Restart), textOrNone(next.Restart))
 	add("user", textOrNone(old.User), textOrNone(next.User))
@@ -269,6 +273,21 @@ func argvOrNone(args []string) string {
 		return "none"
 	}
 	return argvPhrase(args)
+}
+
+func healthcheckPhrase(h catalog.Healthcheck) string {
+	return argvPhrase(h.Test) +
+		" interval " + strconv.Itoa(h.IntervalSec) +
+		" timeout " + strconv.Itoa(h.TimeoutSec) +
+		" retries " + strconv.Itoa(h.Retries) +
+		" start " + strconv.Itoa(h.StartPeriodSec)
+}
+
+func healthOrNone(h *catalog.Healthcheck) string {
+	if h == nil {
+		return "none"
+	}
+	return healthcheckPhrase(*h)
 }
 
 func textOrNone(s string) string {

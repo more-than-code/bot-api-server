@@ -73,8 +73,10 @@
   "host_programs": {
     "allow_shell": false,
     "docker": true,
+    "docker_health": false,
     "enabled": true,
     "files": true,
+    "healthcheck": false,
     "images": true,
     "policy_hash": "abc",
     "run_as": [

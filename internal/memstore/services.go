@@ -23,7 +23,7 @@ func (m *Mem) ListServices(_ context.Context, hostID uuid.UUID, projects []uuid.
 		if !projectVisible(s.ProjectID, projects) {
 			continue
 		}
-		s.Health = store.DeriveHealth(m.latestHealthLocked(s.ID), now)
+		s.Health = store.DeriveHealth(m.latestHealthLocked(s.ID, now), now)
 		s.Ports = copyInts(s.Ports)
 		items = append(items, s)
 	}
@@ -44,7 +44,7 @@ func (m *Mem) GetService(_ context.Context, id uuid.UUID, now time.Time) (store.
 	if !ok {
 		return store.Service{}, store.ErrNotFound
 	}
-	s.Health = store.DeriveHealth(m.latestHealthLocked(s.ID), now)
+	s.Health = store.DeriveHealth(m.latestHealthLocked(s.ID, now), now)
 	s.Ports = copyInts(s.Ports)
 	return s, nil
 }
@@ -335,7 +335,7 @@ func (m *Mem) projectRowLocked(svc store.Service, host store.Host, projectName s
 }
 
 func (m *Mem) serviceCopyLocked(svc store.Service, now time.Time) store.Service {
-	svc.Health = store.DeriveHealth(m.latestHealthLocked(svc.ID), now)
+	svc.Health = store.DeriveHealth(m.latestHealthLocked(svc.ID, now), now)
 	svc.Ports = copyInts(svc.Ports)
 	svc.DisplayName = cloneString(svc.DisplayName)
 	svc.OwnerUser = cloneString(svc.OwnerUser)

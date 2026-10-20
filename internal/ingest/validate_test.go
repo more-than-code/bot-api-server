@@ -12,7 +12,7 @@ import (
 func TestValidateAllowlist(t *testing.T) {
 	id := uuid.New().String()
 	ok := `[{"m":"cpu","t":"2026-10-13T00:00:00Z","tags":{"cpu":"cpu-total"},"f":{"usage_idle":90.5}}]`
-	if _, samples, err := ValidateBatch(id, json.RawMessage(ok)); err != nil || len(samples) != 1 {
+	if _, samples, err := ValidateBatch(id, json.RawMessage(ok), false); err != nil || len(samples) != 1 {
 		t.Fatalf("valid cpu: %v %#v", err, samples)
 	}
 	cases := []struct {
@@ -33,7 +33,7 @@ func TestValidateAllowlist(t *testing.T) {
 		{"numeric pid", `[{"m":"process","t":"2026-10-13T00:00:00Z","tags":{"pid":1,"process_name":"x","user":"u","cmdline":"x"},"f":{}}]`, "bad_tag_type"},
 	}
 	for _, tc := range cases {
-		_, _, err := ValidateBatch(id, json.RawMessage(tc.body))
+		_, _, err := ValidateBatch(id, json.RawMessage(tc.body), false)
 		if tc.want == "" {
 			if err != nil {
 				t.Fatalf("%s: %v", tc.name, err)
@@ -49,14 +49,14 @@ func TestValidateAllowlist(t *testing.T) {
 
 func TestHostIDInSampleIsIgnored(t *testing.T) {
 	body := `[{"m":"cpu","t":"2026-10-13T00:00:00Z","host_id":"11111111-1111-1111-1111-111111111111","tags":{"cpu":"cpu-total"},"f":{"usage_idle":1}}]`
-	if _, samples, err := ValidateBatch(uuid.New().String(), json.RawMessage(body)); err != nil || len(samples) != 1 {
+	if _, samples, err := ValidateBatch(uuid.New().String(), json.RawMessage(body), false); err != nil || len(samples) != 1 {
 		t.Fatalf("host_id in a sample must be acked: %v", err)
 	}
 }
 
 func TestCmdlineRedactedOnIngest(t *testing.T) {
 	body := `[{"m":"process","t":"2026-10-13T00:00:00Z","tags":{"pid":"7","process_name":"app","user":"bot","cmdline":"app --token=sekret --ok"},"f":{"cpu_usage":1}}]`
-	_, samples, err := ValidateBatch(uuid.New().String(), json.RawMessage(body))
+	_, samples, err := ValidateBatch(uuid.New().String(), json.RawMessage(body), false)
 	if err != nil || len(samples) != 1 {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestCmdlineRedactedOnIngest(t *testing.T) {
 func TestValidateBatchLimit(t *testing.T) {
 	one := `{"m":"mem","t":"2026-10-13T00:00:00Z","f":{"used":1}}`
 	body := "[" + strings.TrimRight(strings.Repeat(one+",", MaxSamples+1), ",") + "]"
-	_, _, err := ValidateBatch(uuid.New().String(), json.RawMessage(body))
+	_, _, err := ValidateBatch(uuid.New().String(), json.RawMessage(body), false)
 	var rej *Reject
 	if !errors.As(err, &rej) || rej.Reason != "too_many_samples" {
 		t.Fatalf("got %v", err)

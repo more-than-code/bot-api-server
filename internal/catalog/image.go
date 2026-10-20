@@ -29,6 +29,20 @@ const (
 	defaultTimeout = 600
 	minMemory      = 16
 	maxMemory      = 65536
+	maxHealthArgs  = 32
+	maxHealthArg   = 1024
+	minHealthEvery = 5
+	maxHealthEvery = 300
+	defHealthEvery = 30
+	minHealthWait  = 1
+	maxHealthWait  = 60
+	defHealthWait  = 5
+	minHealthTries = 1
+	maxHealthTries = 10
+	defHealthTries = 3
+	minHealthStart = 0
+	maxHealthStart = 600
+	defHealthStart = 0
 	pullSlackSec   = 300
 	taskSlackSec   = 60
 	shortTaskSec   = 60
@@ -39,6 +53,7 @@ var imageUserRe = runAsRe
 
 // Image is a normalised image entry spec. Empty command and entrypoint are
 // nil. Env, SecretEnv, EnvSets, Ports, Volumes, and Files are non-nil.
+// Healthcheck is nil when the spec omitted it.
 type Image struct {
 	Kind            string
 	Image           string
@@ -51,11 +66,21 @@ type Image struct {
 	SecretEnv       map[string]string
 	Volumes         []Volume
 	Files           []FileMount
+	Healthcheck     *Healthcheck
 	Restart         string
 	User            string
 	HealthyAfterSec int
 	MemoryMB        *int
 	TimeoutSec      int
+}
+
+// Healthcheck is a Docker CMD healthcheck. Numbers are filled in at write time.
+type Healthcheck struct {
+	Test           []string `json:"test"`
+	IntervalSec    int      `json:"interval_sec"`
+	TimeoutSec     int      `json:"timeout_sec"`
+	Retries        int      `json:"retries"`
+	StartPeriodSec int      `json:"start_period_sec"`
 }
 
 // Port is one published port.
@@ -109,6 +134,10 @@ func BuildImage(name string, raw []byte, sets SetKeys, files map[string]struct{}
 	}
 	if kind != "service" && kind != "job" {
 		return Image{}, fieldErr("invalid kind")
+	}
+	hc, err := decodeHealthcheck(fields["healthcheck"], kind)
+	if err != nil {
+		return Image{}, err
 	}
 	refRaw, err := decodeString(fields, "image")
 	if err != nil {
@@ -247,6 +276,7 @@ func BuildImage(name string, raw []byte, sets SetKeys, files map[string]struct{}
 		SecretEnv:       secretEnv,
 		Volumes:         volumes,
 		Files:           mounts,
+		Healthcheck:     hc,
 		Restart:         restart,
 		User:            user,
 		HealthyAfterSec: healthy,
@@ -261,18 +291,35 @@ func (img Image) ReferencesEnv() bool {
 }
 
 // DeployTimeoutSec is the image_deploy task timeout.
-// A job uses timeout_sec. A service uses healthy_after_sec.
+// A job uses timeout_sec. A service uses healthy_after_sec, or the
+// healthcheck wait when that is longer.
 func DeployTimeoutSec(img Image) int {
 	if img.Kind == "job" {
 		return pullSlackSec + img.TimeoutSec + taskSlackSec
 	}
-	return pullSlackSec + img.HealthyAfterSec + taskSlackSec
+	return serviceTimeoutSec(img)
 }
 
 // RollbackTimeoutSec is the image_rollback task timeout.
 // Jobs use the service formula, including a zero healthy_after_sec.
+// Pull slack stays. A healthcheck uses the same wait as a service deploy.
 func RollbackTimeoutSec(img Image) int {
-	return pullSlackSec + img.HealthyAfterSec + taskSlackSec
+	return serviceTimeoutSec(img)
+}
+
+// serviceTimeoutSec is pull slack, plus the longer of healthy_after_sec and
+// the Docker healthcheck wait, plus task slack. No healthcheck keeps
+// healthy_after_sec. The wait is start_period_sec + interval_sec × (retries + 1).
+func serviceTimeoutSec(img Image) int {
+	body := img.HealthyAfterSec
+	if img.Healthcheck != nil {
+		h := img.Healthcheck
+		wait := h.StartPeriodSec + h.IntervalSec*(h.Retries+1)
+		if wait > body {
+			body = wait
+		}
+	}
+	return pullSlackSec + body + taskSlackSec
 }
 
 // ShortTimeoutSec is the timeout for remove, start, stop, restart, status, and logs.
@@ -375,11 +422,16 @@ func specJSON(img Image, withFiles bool) string {
 	if withFiles {
 		files = `,"files":` + filesJSON(img.Files)
 	}
+	hc := ""
+	if img.Healthcheck != nil {
+		hc = `,"healthcheck":` + healthcheckJSON(*img.Healthcheck)
+	}
 	return `{"command":` + argvJSON(img.Command) +
 		`,"entrypoint":` + argvJSON(img.Entrypoint) +
 		`,"env":` + stringMapJSON(img.Env) +
 		`,"env_sets":` + stringArrayJSON(img.EnvSets) +
 		files +
+		hc +
 		`,"healthy_after_sec":` + strconv.Itoa(img.HealthyAfterSec) +
 		`,"image":` + jsonString(img.Image) +
 		`,"kind":` + jsonString(img.Kind) +
@@ -419,6 +471,7 @@ func ParseStored(raw []byte) (Image, error) {
 		SecretEnv:       nonNilMap(doc.SecretEnv),
 		Volumes:         doc.Volumes,
 		Files:           doc.Files,
+		Healthcheck:     doc.Healthcheck,
 		Restart:         doc.Restart,
 		User:            doc.User,
 		HealthyAfterSec: doc.HealthyAfterSec,
@@ -448,6 +501,7 @@ type storedImage struct {
 	SecretEnv       map[string]string `json:"secret_env"`
 	Volumes         []Volume          `json:"volumes"`
 	Files           []FileMount       `json:"files"`
+	Healthcheck     *Healthcheck      `json:"healthcheck"`
 	Restart         string            `json:"restart"`
 	User            string            `json:"user"`
 	HealthyAfterSec int               `json:"healthy_after_sec"`
@@ -505,7 +559,7 @@ func sortStrings(items []string) {
 
 var imageFields = map[string]struct{}{
 	"kind": {}, "image": {}, "command": {}, "entrypoint": {}, "ports": {},
-	"env": {}, "env_sets": {}, "secret_env": {}, "volumes": {}, "files": {}, "restart": {},
+	"env": {}, "env_sets": {}, "secret_env": {}, "volumes": {}, "files": {}, "healthcheck": {}, "restart": {},
 	"user": {}, "healthy_after_sec": {}, "memory_mb": {}, "timeout_sec": {},
 }
 
@@ -551,6 +605,107 @@ func decodeOptionalString(fields map[string]json.RawMessage, name string) (strin
 		return "", false, fieldErr("invalid " + name)
 	}
 	return s, true, nil
+}
+
+// decodeHealthcheck applies defaults and rejects a job before it inspects test.
+// Errors name the field and do not include argv.
+func decodeHealthcheck(raw json.RawMessage, kind string) (*Healthcheck, error) {
+	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		return nil, nil
+	}
+	if kind == "job" {
+		return nil, fieldErr("healthcheck applies to services")
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	var obj map[string]json.RawMessage
+	if err := dec.Decode(&obj); err != nil || obj == nil {
+		return nil, fieldErr("invalid healthcheck")
+	}
+	if err := dec.Decode(new(struct{})); err != io.EOF {
+		return nil, fieldErr("invalid healthcheck")
+	}
+	allowed := map[string]struct{}{
+		"test": {}, "interval_sec": {}, "timeout_sec": {}, "retries": {}, "start_period_sec": {},
+	}
+	for key := range obj {
+		if _, ok := allowed[key]; !ok {
+			return nil, fieldErr("invalid healthcheck")
+		}
+	}
+	test, err := decodeHealthTest(obj["test"])
+	if err != nil {
+		return nil, err
+	}
+	interval, err := decodeBoundedInt(obj["interval_sec"], "healthcheck.interval_sec", minHealthEvery, maxHealthEvery, defHealthEvery)
+	if err != nil {
+		return nil, err
+	}
+	timeout, err := decodeBoundedInt(obj["timeout_sec"], "healthcheck.timeout_sec", minHealthWait, maxHealthWait, defHealthWait)
+	if err != nil {
+		return nil, err
+	}
+	retries, err := decodeBoundedInt(obj["retries"], "healthcheck.retries", minHealthTries, maxHealthTries, defHealthTries)
+	if err != nil {
+		return nil, err
+	}
+	start, err := decodeBoundedInt(obj["start_period_sec"], "healthcheck.start_period_sec", minHealthStart, maxHealthStart, defHealthStart)
+	if err != nil {
+		return nil, err
+	}
+	if timeout >= interval {
+		return nil, fieldErr("invalid healthcheck.timeout_sec")
+	}
+	return &Healthcheck{
+		Test:           test,
+		IntervalSec:    interval,
+		TimeoutSec:     timeout,
+		Retries:        retries,
+		StartPeriodSec: start,
+	}, nil
+}
+
+func decodeHealthTest(raw json.RawMessage) ([]string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, fieldErr("invalid healthcheck.test")
+	}
+	var items []string
+	if err := json.Unmarshal(raw, &items); err != nil || len(items) < 1 || len(items) > maxHealthArgs {
+		return nil, fieldErr("invalid healthcheck.test")
+	}
+	for _, item := range items {
+		if len(item) < 1 || len(item) > maxHealthArg || strings.ContainsRune(item, 0) {
+			return nil, fieldErr("invalid healthcheck.test")
+		}
+	}
+	return items, nil
+}
+
+func decodeBoundedInt(raw json.RawMessage, name string, min, max, def int) (int, error) {
+	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		return def, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var n json.Number
+	if err := dec.Decode(&n); err != nil {
+		return 0, fieldErr("invalid " + name)
+	}
+	if err := dec.Decode(new(struct{})); err != io.EOF {
+		return 0, fieldErr("invalid " + name)
+	}
+	v, err := n.Int64()
+	if err != nil || v < int64(min) || v > int64(max) {
+		return 0, fieldErr("invalid " + name)
+	}
+	return int(v), nil
+}
+
+func healthcheckJSON(h Healthcheck) string {
+	return `{"interval_sec":` + strconv.Itoa(h.IntervalSec) +
+		`,"retries":` + strconv.Itoa(h.Retries) +
+		`,"start_period_sec":` + strconv.Itoa(h.StartPeriodSec) +
+		`,"test":` + argvJSON(h.Test) +
+		`,"timeout_sec":` + strconv.Itoa(h.TimeoutSec) + `}`
 }
 
 func decodeArgv(fields map[string]json.RawMessage, name string) ([]string, error) {

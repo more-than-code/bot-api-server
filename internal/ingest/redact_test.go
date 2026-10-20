@@ -46,7 +46,7 @@ func TestRedactionVectorsV102(t *testing.T) {
 				t.Fatal(err)
 			}
 			body := `[{"m":"process","t":"2026-10-13T00:00:00Z","tags":{"pid":"7","process_name":"app","user":"bot","cmdline":` + string(encoded) + `},"f":{"cpu_usage":1}}]`
-			_, samples, err := ValidateBatch(uuid.New().String(), json.RawMessage(body))
+			_, samples, err := ValidateBatch(uuid.New().String(), json.RawMessage(body), false)
 			if err != nil || len(samples) != 1 {
 				t.Fatalf("ingest: %v", err)
 			}

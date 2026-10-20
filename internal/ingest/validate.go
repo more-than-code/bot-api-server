@@ -84,7 +84,8 @@ var measurements = map[string]measurement{
 		},
 	},
 	"health": {
-		tags: []string{"service", "check_id", "protocol", "port"},
+		tags:     []string{"service", "check_id", "protocol", "port"},
+		optional: map[string]bool{"check_id": true, "port": true},
 		fields: []field{
 			{"result", kindString}, {"http_status", kindInt}, {"latency_ms", kindFloat},
 		},
@@ -107,8 +108,10 @@ type rawSample struct {
 }
 
 // ValidateBatch checks every sample. One bad sample rejects the batch.
-// Host identity is not read from the samples.
-func ValidateBatch(batchID string, raw json.RawMessage) (uuid.UUID, []store.Sample, error) {
+// Host identity is not read from the samples. dockerHealth is the host's
+// hello programs.docker_health flag. A valid docker sample from a host
+// that did not advertise it is rejected; the caller keeps the socket up.
+func ValidateBatch(batchID string, raw json.RawMessage, dockerHealth bool) (uuid.UUID, []store.Sample, error) {
 	id, err := uuid.Parse(batchID)
 	if err != nil {
 		return uuid.Nil, nil, &Reject{Reason: "bad_batch_id"}
@@ -125,7 +128,7 @@ func ValidateBatch(batchID string, raw json.RawMessage) (uuid.UUID, []store.Samp
 	}
 	out := make([]store.Sample, 0, len(items))
 	for _, item := range items {
-		sample, err := validateOne(item)
+		sample, err := validateOne(item, dockerHealth)
 		if err != nil {
 			return uuid.Nil, nil, err
 		}
@@ -134,7 +137,7 @@ func ValidateBatch(batchID string, raw json.RawMessage) (uuid.UUID, []store.Samp
 	return id, out, nil
 }
 
-func validateOne(raw json.RawMessage) (store.Sample, error) {
+func validateOne(raw json.RawMessage, dockerHealth bool) (store.Sample, error) {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
 	var in rawSample
@@ -197,7 +200,7 @@ func validateOne(raw json.RawMessage) (store.Sample, error) {
 			return store.Sample{}, &Reject{Reason: "unknown_field"}
 		}
 		if string(rawField) == "null" {
-			if in.M == "health" && name == "http_status" {
+			if in.M == "health" && (name == "http_status" || name == "latency_ms") {
 				sample.Nulls[name] = true
 				continue
 			}
@@ -224,13 +227,13 @@ func validateOne(raw json.RawMessage) (store.Sample, error) {
 			sample.Strs[name] = s
 		}
 	}
-	if err := extra(sample); err != nil {
+	if err := extra(sample, dockerHealth); err != nil {
 		return store.Sample{}, err
 	}
 	return sample, nil
 }
 
-func extra(s store.Sample) error {
+func extra(s store.Sample, dockerHealth bool) error {
 	switch s.M {
 	case "cpu":
 		if s.Tags["cpu"] != "cpu-total" {
@@ -282,22 +285,60 @@ func extra(s store.Sample) error {
 			}
 		}
 	case "health":
-		if _, err := uuid.Parse(s.Tags["check_id"]); err != nil {
-			return &Reject{Reason: "bad_check_id"}
+		if s.Tags["service"] == "" {
+			return &Reject{Reason: "bad_service"}
+		}
+		if s.Tags["protocol"] == "docker" {
+			return extraDockerHealth(s, dockerHealth)
 		}
 		if s.Tags["protocol"] != "http" && s.Tags["protocol"] != "tcp" {
 			return &Reject{Reason: "bad_protocol"}
+		}
+		if _, ok := s.Tags["check_id"]; !ok {
+			return &Reject{Reason: "missing_tag"}
+		}
+		if _, err := uuid.Parse(s.Tags["check_id"]); err != nil {
+			return &Reject{Reason: "bad_check_id"}
+		}
+		if _, ok := s.Tags["port"]; !ok {
+			return &Reject{Reason: "missing_tag"}
 		}
 		port, err := strconv.Atoi(s.Tags["port"])
 		if err != nil || port < 1 || port > 65535 {
 			return &Reject{Reason: "bad_port"}
 		}
-		if s.Tags["service"] == "" {
-			return &Reject{Reason: "bad_service"}
+		if s.Nulls["latency_ms"] {
+			return &Reject{Reason: "bad_type"}
+		}
+		if _, ok := s.Floats["latency_ms"]; !ok {
+			return &Reject{Reason: "bad_type"}
 		}
 		if result, ok := s.Strs["result"]; !ok || !healthResults[result] {
 			return &Reject{Reason: "bad_result"}
 		}
+	}
+	return nil
+}
+
+// extraDockerHealth accepts the v1.6 docker sample, then refuses it when
+// the host did not advertise docker_health. Form errors come first so an
+// invalid sample is not reported as a capability refusal.
+func extraDockerHealth(s store.Sample, allowed bool) error {
+	if _, ok := s.Tags["check_id"]; ok {
+		return &Reject{Reason: "bad_check_id"}
+	}
+	if _, ok := s.Tags["port"]; ok {
+		return &Reject{Reason: "bad_port"}
+	}
+	if !s.Nulls["http_status"] || !s.Nulls["latency_ms"] {
+		return &Reject{Reason: "bad_type"}
+	}
+	result := s.Strs["result"]
+	if result != "success" && result != "unhealthy" {
+		return &Reject{Reason: "bad_result"}
+	}
+	if !allowed {
+		return &Reject{Reason: "docker_health"}
 	}
 	return nil
 }

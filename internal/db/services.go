@@ -18,16 +18,25 @@ s.id::text, s.host_id::text, s.project_id::text, s.name, s.source, s.kind, s.por
 s.systemd_unit, s.systemd_scope, s.container_name, s.image_digest, s.process_match,
 s.display_name, s.owner_user, s.catalog_entry,
 s.first_seen_at, s.last_seen_at, s.gone_at,
-hr.time, hr.result, hr.latency_ms`
+hr.time, hr.result, hr.latency_ms, hr.protocol`
 
-const serviceHealthJoin = `
+// serviceHealthJoin chooses the health row for a service.
+// A docker row at or after the cutoff wins. Otherwise the latest non-docker
+// row wins, including a null protocol. A stale docker row is excluded.
+func serviceHealthJoin(cutoff string) string {
+	return `
 LEFT JOIN LATERAL (
-    SELECT time, result, latency_ms
+    SELECT time, result, latency_ms, protocol
     FROM metrics.health_results
     WHERE service_id = s.id
-    ORDER BY time DESC
+      AND (
+        (protocol = 'docker' AND time >= ` + cutoff + `)
+        OR protocol IS DISTINCT FROM 'docker'
+      )
+    ORDER BY CASE WHEN protocol = 'docker' THEN 0 ELSE 1 END, time DESC
     LIMIT 1
 ) hr ON true`
+}
 
 // projectIDsArg is nil when every project is visible. Otherwise it is a
 // text[] of ids. pgx sends a Go string slice as text[], and text[] does not
@@ -48,7 +57,7 @@ func (d *DB) ListServices(ctx context.Context, hostID uuid.UUID, projects []uuid
 	rows, err := d.pool.Query(ctx, `
 SELECT `+serviceColumns+`
 FROM app.services s
-`+serviceHealthJoin+`
+`+serviceHealthJoin("$3")+`
 WHERE s.host_id = $1::uuid
   AND (
     CAST($2 AS text[]) IS NULL
@@ -56,7 +65,7 @@ WHERE s.host_id = $1::uuid
   )
 ORDER BY s.name COLLATE "C" ASC
 LIMIT 500
-`, hostID.String(), projectIDsArg(projects))
+`, hostID.String(), projectIDsArg(projects), now.Add(-store.HealthStale))
 	if err != nil {
 		return nil, mapErr(err)
 	}
@@ -79,9 +88,9 @@ func (d *DB) GetService(ctx context.Context, id uuid.UUID, now time.Time) (store
 	return scanService(d.pool.QueryRow(ctx, `
 SELECT `+serviceColumns+`
 FROM app.services s
-`+serviceHealthJoin+`
+`+serviceHealthJoin("$2")+`
 WHERE s.id = $1::uuid
-`, id.String()), now)
+`, id.String(), now.Add(-store.HealthStale)), now)
 }
 
 func (d *DB) SetServiceDisplayName(ctx context.Context, id uuid.UUID, name *string, now time.Time) (store.Service, error) {
@@ -139,11 +148,11 @@ SELECT `+serviceColumns+`,
 FROM app.services s
 JOIN app.hosts h ON h.id = s.host_id
 JOIN app.projects sp ON sp.id = s.project_id
-`+serviceHealthJoin+`
+`+serviceHealthJoin("$%d")+`
 %s
 ORDER BY %s
 LIMIT $%d OFFSET $%d
-`, cutoff, cutoff, where, projectServiceOrder(q.Sort, q.Dir), cutoff+1, cutoff+2), pageArgs...)
+`, cutoff, cutoff, cutoff, where, projectServiceOrder(q.Sort, q.Dir), cutoff+1, cutoff+2), pageArgs...)
 	if err != nil {
 		return store.ServicePage{}, mapErr(err)
 	}
@@ -562,12 +571,13 @@ func scanServiceInto(row pgx.Row, now time.Time, extra *projectServiceExtra) (st
 	var checked *time.Time
 	var result *string
 	var latency *float64
+	var protocol *string
 	dest := []any{
 		&id, &hostID, &projectID, &s.Name, &s.Source, &s.Kind, &ports,
 		&s.SystemdUnit, &s.SystemdScope, &s.ContainerName, &s.ImageDigest, &s.ProcessName,
 		&s.DisplayName, &s.OwnerUser, &s.CatalogEntry,
 		&s.FirstSeenAt, &s.LastSeenAt, &s.GoneAt,
-		&checked, &result, &latency,
+		&checked, &result, &latency, &protocol,
 	}
 	if extra != nil {
 		dest = append(dest,
@@ -591,9 +601,12 @@ func scanServiceInto(row pgx.Row, now time.Time, extra *projectServiceExtra) (st
 	s.Ports = intsFrom32(ports)
 	var latest *store.HealthPoint
 	if checked != nil {
-		p := store.HealthPoint{T: *checked, LatencyMS: floatOrZero(latency)}
+		p := store.HealthPoint{T: *checked, LatencyMS: latency}
 		if result != nil {
 			p.Result = *result
+		}
+		if protocol != nil {
+			p.Protocol = *protocol
 		}
 		latest = &p
 	}

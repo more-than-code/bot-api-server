@@ -22,13 +22,15 @@ const ConfirmationTTL = 5 * time.Minute
 // HostPrograms is the agent hello programs object. A nil pointer on Host
 // means the agent reported no policy file.
 type HostPrograms struct {
-	Enabled    bool     `json:"enabled"`
-	RunAs      []string `json:"run_as"`
-	AllowShell bool     `json:"allow_shell"`
-	PolicyHash string   `json:"policy_hash"`
-	Images     bool     `json:"images"`
-	Docker     bool     `json:"docker"`
-	Files      bool     `json:"files"`
+	Enabled      bool     `json:"enabled"`
+	RunAs        []string `json:"run_as"`
+	AllowShell   bool     `json:"allow_shell"`
+	PolicyHash   string   `json:"policy_hash"`
+	Images       bool     `json:"images"`
+	Docker       bool     `json:"docker"`
+	Files        bool     `json:"files"`
+	DockerHealth bool     `json:"docker_health"`
+	Healthcheck  bool     `json:"healthcheck"`
 }
 
 // ProgramSpec is the stored program document. Env and Args are never nil

@@ -66,6 +66,9 @@ type configBody struct {
 	MetricsIntervalSec int         `json:"metrics_interval_sec"`
 	ProcessIntervalSec int         `json:"process_interval_sec"`
 	HealthChecks       []checkJSON `json:"health_checks"`
+	// DockerHealth is sent only when the host advertised programs.docker_health.
+	// Older agents refuse unknown config keys, so false is omitted.
+	DockerHealth bool `json:"docker_health,omitempty"`
 }
 
 type checkJSON struct {

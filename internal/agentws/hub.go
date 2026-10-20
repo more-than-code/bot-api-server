@@ -300,6 +300,10 @@ func (h *Hub) agentConfig(ctx context.Context, hostID uuid.UUID) (configBody, er
 			ExpectStatusMax: c.ExpectStatusMax,
 		})
 	}
+	// A host lookup failure still sends the checks. The flag stays omitted.
+	if host, err := h.st.GetHost(ctx, hostID); err == nil && host.Programs != nil && host.Programs.DockerHealth {
+		body.DockerHealth = true
+	}
 	return body, nil
 }
 

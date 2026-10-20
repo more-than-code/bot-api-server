@@ -524,7 +524,11 @@ func (h *Hub) onMetrics(ac *agentConn, f frame) error {
 		}
 		return nil
 	}
-	id, samples, err := ingest.ValidateBatch(f.BatchID, f.Samples)
+	dockerHealth := false
+	if host, err := h.st.GetHost(ac.parent, ac.hostID); err == nil && host.Programs != nil {
+		dockerHealth = host.Programs.DockerHealth
+	}
+	id, samples, err := ingest.ValidateBatch(f.BatchID, f.Samples, dockerHealth)
 	if err != nil {
 		reason := "invalid"
 		var rej *ingest.Reject

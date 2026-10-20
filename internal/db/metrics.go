@@ -664,7 +664,7 @@ func (d *DB) HealthHistory(ctx context.Context, serviceID uuid.UUID, from, to ti
 		limit = 1000
 	}
 	rows, err := d.pool.Query(ctx, `
-SELECT time, check_id::text, result, http_status, latency_ms
+SELECT time, check_id::text, protocol, port, result, http_status, latency_ms
 FROM metrics.health_results
 WHERE service_id = $1::uuid AND time >= $2 AND time < $3
 ORDER BY time DESC
@@ -677,16 +677,26 @@ LIMIT $4
 	out := []store.HealthPoint{}
 	for rows.Next() {
 		var p store.HealthPoint
-		var checkText, result *string
+		var checkText, protocol, result *string
+		var port *int32
 		var httpStatus *int32
 		var latency *float64
-		if err := rows.Scan(&p.T, &checkText, &result, &httpStatus, &latency); err != nil {
+		if err := rows.Scan(&p.T, &checkText, &protocol, &port, &result, &httpStatus, &latency); err != nil {
 			return nil, mapErr(err)
 		}
 		if checkText != nil {
-			if p.CheckID, err = parseID(*checkText); err != nil {
+			id, err := parseID(*checkText)
+			if err != nil {
 				return nil, err
 			}
+			p.CheckID = &id
+		}
+		if protocol != nil {
+			p.Protocol = *protocol
+		}
+		if port != nil {
+			n := int(*port)
+			p.Port = &n
 		}
 		if result != nil {
 			p.Result = *result
@@ -695,7 +705,7 @@ LIMIT $4
 			n := int(*httpStatus)
 			p.HTTPStatus = &n
 		}
-		p.LatencyMS = floatOrZero(latency)
+		p.LatencyMS = latency
 		out = append(out, p)
 	}
 	if err := rows.Err(); err != nil {

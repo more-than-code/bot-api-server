@@ -288,6 +288,8 @@ type Health struct {
 	Status        string     `json:"status"`
 	LastCheckedAt *time.Time `json:"last_checked_at"`
 	LatencyMS     *float64   `json:"latency_ms"`
+	// Source is "docker" or "check" for the chosen row, and null when there is no row.
+	Source *string `json:"source"`
 }
 
 type Discovered struct {
@@ -382,11 +384,13 @@ type ProcessItem struct {
 }
 
 type HealthPoint struct {
-	T          time.Time `json:"t"`
-	CheckID    uuid.UUID `json:"check_id"`
-	Result     string    `json:"result"`
-	HTTPStatus *int      `json:"http_status"`
-	LatencyMS  float64   `json:"latency_ms"`
+	T          time.Time  `json:"t"`
+	CheckID    *uuid.UUID `json:"check_id"`
+	Protocol   string     `json:"protocol"`
+	Port       *int       `json:"port"`
+	Result     string     `json:"result"`
+	HTTPStatus *int       `json:"http_status"`
+	LatencyMS  *float64   `json:"latency_ms"`
 }
 
 type AuditRow struct {

@@ -77,6 +77,23 @@ func TestCatalogWritePlanSentences(t *testing.T) {
 	}
 }
 
+func TestHealthcheckPlan(t *testing.T) {
+	img := mustPlanImage(t, "web", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD","hello world"]}}`, nil, nil)
+	got := catalogCreatePlan("Proj", "web", img)
+	want := `healthcheck CMD "hello world" interval 30 timeout 5 retries 3 start 0`
+	if !strings.Contains(got, want) {
+		t.Fatalf("create plan %s", got)
+	}
+	plain := mustPlanImage(t, "web", `{"kind":"service","image":"nginx"}`, nil, nil)
+	if strings.Contains(catalogCreatePlan("Proj", "web", plain), "healthcheck") {
+		t.Fatal("plan mentioned an absent healthcheck")
+	}
+	upd := catalogUpdatePlan("web", plain, img, 1)
+	if !strings.Contains(upd, "healthcheck: none → "+want[len("healthcheck "):]) {
+		t.Fatalf("update plan %s", upd)
+	}
+}
+
 func TestCatalogWritePlanQuotesControlledText(t *testing.T) {
 	nasty := "x; y\u2028\u202ez"
 	project := "Proj" + nasty

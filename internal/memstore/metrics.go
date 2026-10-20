@@ -142,19 +142,15 @@ func (m *Mem) HealthHistory(_ context.Context, serviceID uuid.UUID, from, to tim
 	return items, nil
 }
 
-func (m *Mem) latestHealthLocked(serviceID uuid.UUID) *store.HealthPoint {
-	var best *store.HealthPoint
+func (m *Mem) latestHealthLocked(serviceID uuid.UUID, now time.Time) *store.HealthPoint {
+	var points []store.HealthPoint
 	for _, s := range m.samples {
 		if s.M != "health" || s.ServiceID == nil || *s.ServiceID != serviceID {
 			continue
 		}
-		p := healthPoint(s)
-		if best == nil || p.T.After(best.T) {
-			cp := p
-			best = &cp
-		}
+		points = append(points, healthPoint(s))
 	}
-	return best
+	return store.SelectHealth(points, now)
 }
 
 func (m *Mem) serviceIDLocked(hostID uuid.UUID, name string) (uuid.UUID, bool) {
@@ -269,12 +265,25 @@ func processItem(s store.Sample) store.ProcessItem {
 }
 
 func healthPoint(s store.Sample) store.HealthPoint {
-	id, _ := uuid.Parse(s.Tags["check_id"])
 	p := store.HealthPoint{
-		T:         s.T,
-		CheckID:   id,
-		Result:    s.Strs["result"],
-		LatencyMS: s.Floats["latency_ms"],
+		T:        s.T,
+		Protocol: s.Tags["protocol"],
+		Result:   s.Strs["result"],
+	}
+	if raw := s.Tags["check_id"]; raw != "" {
+		if id, err := uuid.Parse(raw); err == nil {
+			p.CheckID = &id
+		}
+	}
+	if raw := s.Tags["port"]; raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			p.Port = &n
+		}
+	}
+	if !s.Nulls["latency_ms"] {
+		if v, ok := s.Floats["latency_ms"]; ok {
+			p.LatencyMS = &v
+		}
 	}
 	if !s.Nulls["http_status"] {
 		if v, ok := s.Ints["http_status"]; ok {
