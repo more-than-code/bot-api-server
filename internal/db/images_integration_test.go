@@ -82,11 +82,13 @@ func assertEnvReplaceKeepsVisibility(t *testing.T, d *DB, ctx context.Context, a
 	}
 	if _, err := d.PutEnvSet(ctx, home.ID, "svc", []store.EnvSecret{
 		sealOf("A", "alpha-old"),
-		sealOf("B", "bravo-old"),
-	}, owner.ID, at); err != nil {
+	}, owner.ID, at, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.PatchEnvKey(ctx, home.ID, "svc", "A", store.EnvKeyPatch{IsSecret: false, Plain: "alpha-old"}, owner.ID, at); err != nil {
+	if _, err := d.PutEnvSet(ctx, home.ID, "svc", []store.EnvSecret{
+		sealOf("A", "alpha-old"),
+		sealOf("B", "bravo-old"),
+	}, owner.ID, at, true); err != nil {
 		t.Fatal(err)
 	}
 	before := envRows(t, d, ctx, home.ID, "svc")
@@ -97,7 +99,7 @@ func assertEnvReplaceKeepsVisibility(t *testing.T, d *DB, ctx context.Context, a
 		sealOf("A", "alpha-next"),
 		sealOf("B", "bravo-next"),
 		sealOf("C", "charlie-new"),
-	}, owner.ID, at.Add(time.Second)); err != nil {
+	}, owner.ID, at.Add(time.Second), true); err != nil {
 		t.Fatal(err)
 	}
 	got := envRows(t, d, ctx, home.ID, "svc")
@@ -138,7 +140,7 @@ func assertEnvReplaceKeepsVisibility(t *testing.T, d *DB, ctx context.Context, a
 	if _, err := d.PutEnvSet(ctx, home.ID, "svc", []store.EnvSecret{
 		sealOf("A", "alpha-next"),
 		sealOf("C", "charlie-new"),
-	}, owner.ID, at.Add(2*time.Second)); err != nil {
+	}, owner.ID, at.Add(2*time.Second), true); err != nil {
 		t.Fatal(err)
 	}
 	got = envRows(t, d, ctx, home.ID, "svc")
@@ -149,7 +151,7 @@ func assertEnvReplaceKeepsVisibility(t *testing.T, d *DB, ctx context.Context, a
 		sealOf("A", "alpha-next"),
 		sealOf("B", "bravo-back"),
 		sealOf("C", "charlie-new"),
-	}, owner.ID, at.Add(3*time.Second)); err != nil {
+	}, owner.ID, at.Add(3*time.Second), true); err != nil {
 		t.Fatal(err)
 	}
 	got = envRows(t, d, ctx, home.ID, "svc")
@@ -163,7 +165,7 @@ func assertEnvReplaceKeepsVisibility(t *testing.T, d *DB, ctx context.Context, a
 	if _, err := d.PutEnvSet(ctx, home.ID, "svc", []store.EnvSecret{
 		sealOf("B", "bravo-back"),
 		sealOf("C", "charlie-new"),
-	}, owner.ID, at.Add(4*time.Second)); err != nil {
+	}, owner.ID, at.Add(4*time.Second), true); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := envRows(t, d, ctx, home.ID, "svc")["A"]; ok {
@@ -173,7 +175,7 @@ func assertEnvReplaceKeepsVisibility(t *testing.T, d *DB, ctx context.Context, a
 		sealOf("A", "alpha-again"),
 		sealOf("B", "bravo-back"),
 		sealOf("C", "charlie-new"),
-	}, owner.ID, at.Add(5*time.Second)); err != nil {
+	}, owner.ID, at.Add(5*time.Second), true); err != nil {
 		t.Fatal(err)
 	}
 	got = envRows(t, d, ctx, home.ID, "svc")
@@ -183,6 +185,155 @@ func assertEnvReplaceKeepsVisibility(t *testing.T, d *DB, ctx context.Context, a
 	opened, err = box.Open(seal.EnvAAD(pid, "svc", "A"), got["A"].Nonce, got["A"].Ciphertext)
 	if err != nil || string(opened) != "alpha-again" {
 		t.Fatalf("re-added A opened %q %v", opened, err)
+	}
+}
+
+func assertEnvKeyUpsertDelete(t *testing.T, d *DB, ctx context.Context, at time.Time) {
+	t.Helper()
+	owner := catalogUser(t, d, ctx, "env-key", at)
+	home := catalogProject(t, d, ctx, owner.ID, "Keys", "envkey", at)
+	host := enrollHostDB(t, d, ctx, home.ID, owner.ID, "key-host", at)
+	box, err := seal.New(bytes.Repeat([]byte{4}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := home.ID.String()
+	sealOf := func(set, key, plain string) store.EnvKeyPut {
+		t.Helper()
+		nonce, ciphertext, err := box.Seal(seal.EnvAAD(pid, set, key), []byte(plain))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store.EnvKeyPut{Key: key, Plain: plain, Nonce: nonce, Ciphertext: ciphertext, KeyVersion: seal.KeyVersion}
+	}
+	stored, created, err := d.PutEnvKey(ctx, home.ID, "svc", sealOf("svc", "TOKEN", "one"), owner.ID, at)
+	if err != nil || !created || !stored.IsSecret || stored.Value != nil {
+		t.Fatalf("create %#v %v %v", stored, created, err)
+	}
+	plainFlag := false
+	visible := sealOf("svc", "NOTE", "visible")
+	visible.Secret = &plainFlag
+	stored, created, err = d.PutEnvKey(ctx, home.ID, "svc", visible, owner.ID, at)
+	if err != nil || !created || stored.IsSecret || stored.Value == nil || *stored.Value != "visible" {
+		t.Fatalf("plain %#v %v %v", stored, created, err)
+	}
+	img, err := catalog.BuildImage("web", []byte(`{"kind":"service","image":"nginx","env_sets":["svc"]}`), catalog.SetKeys{"svc": {"NOTE", "TOKEN"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := catalog.ImageHash(img, map[string]string{"svc": catalog.EnvKeyDigest([]string{"NOTE", "TOKEN"})})
+	entry, err := d.CreateCatalogEntry(ctx, home.ID, store.CatalogWrite{
+		Name: "web", Kind: "image", ImageRaw: []byte(catalog.SpecJSON(img)),
+		SpecHash: hash, CommandDisplay: img.Image, Actor: owner.ID, At: at,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ApproveCatalog(ctx, host.ID, entry.ID, hash, owner.ID, at); err != nil {
+		t.Fatal(err)
+	}
+	before := envRows(t, d, ctx, home.ID, "svc")
+	next := sealOf("svc", "TOKEN", "two")
+	stored, created, err = d.PutEnvKey(ctx, home.ID, "svc", next, owner.ID, at.Add(time.Minute))
+	if err != nil || created || !stored.IsSecret {
+		t.Fatalf("value %#v %v %v", stored, created, err)
+	}
+	got, err := d.GetCatalogEntry(ctx, home.ID, "web")
+	view, err2 := d.GetEnvSet(ctx, home.ID, "svc")
+	if err != nil || err2 != nil || got.SpecHash != hash || catalogApprovalCount(t, d, ctx, entry.ID) != 1 || !view.UpdatedAt.Equal(at.Add(time.Minute)) {
+		t.Fatalf("value-only hash %s approvals %d at %s %v", got.SpecHash, catalogApprovalCount(t, d, ctx, entry.ID), view.UpdatedAt, err)
+	}
+	token := envRows(t, d, ctx, home.ID, "svc")["TOKEN"]
+	if bytes.Equal(token.Nonce, before["TOKEN"].Nonce) || token.Plain != "" {
+		t.Fatal("value update reused the nonce or stored the plain value")
+	}
+	opened, err := box.Open(seal.EnvAAD(pid, "svc", "TOKEN"), token.Nonce, token.Ciphertext)
+	if err != nil || string(opened) != "two" {
+		t.Fatalf("opened %q %v", opened, err)
+	}
+	secretFlag := true
+	same := sealOf("svc", "TOKEN", "two")
+	same.Secret = &secretFlag
+	if _, _, err := d.PutEnvKey(ctx, home.ID, "svc", same, owner.ID, at.Add(2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	flipped := sealOf("svc", "TOKEN", "nope")
+	flipped.Secret = &plainFlag
+	if _, _, err := d.PutEnvKey(ctx, home.ID, "svc", flipped, owner.ID, at.Add(3*time.Minute)); !errors.Is(err, store.ErrSecretFixed) {
+		t.Fatalf("flag %v", err)
+	}
+	view, err = d.GetEnvSet(ctx, home.ID, "svc")
+	token = envRows(t, d, ctx, home.ID, "svc")["TOKEN"]
+	if err != nil || !view.UpdatedAt.Equal(at.Add(2*time.Minute)) || !token.IsSecret {
+		t.Fatalf("flag mismatch wrote the set %#v %v", view.UpdatedAt, err)
+	}
+	opened, err = box.Open(seal.EnvAAD(pid, "svc", "TOKEN"), token.Nonce, token.Ciphertext)
+	if err != nil || string(opened) != "two" {
+		t.Fatalf("flag mismatch changed the value %q %v", opened, err)
+	}
+	extra, created, err := d.PutEnvKey(ctx, home.ID, "svc", sealOf("svc", "EXTRA", "three"), owner.ID, at.Add(4*time.Minute))
+	if err != nil || !created || !extra.IsSecret {
+		t.Fatalf("add %#v %v %v", extra, created, err)
+	}
+	got, err = d.GetCatalogEntry(ctx, home.ID, "web")
+	if err != nil || got.SpecHash == hash || catalogApprovalCount(t, d, ctx, entry.ID) != 0 {
+		t.Fatalf("add hash %s approvals %d %v", got.SpecHash, catalogApprovalCount(t, d, ctx, entry.ID), err)
+	}
+	if _, err := d.ApproveCatalog(ctx, host.ID, entry.ID, got.SpecHash, owner.ID, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DeleteEnvKey(ctx, home.ID, "svc", "EXTRA", owner.ID, at.Add(5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	got, err = d.GetCatalogEntry(ctx, home.ID, "web")
+	if err != nil || got.SpecHash != hash || catalogApprovalCount(t, d, ctx, entry.ID) != 0 {
+		t.Fatalf("delete hash %s approvals %d %v", got.SpecHash, catalogApprovalCount(t, d, ctx, entry.ID), err)
+	}
+	if err := d.DeleteEnvKey(ctx, home.ID, "svc", "GONE", owner.ID, at); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing key %v", err)
+	}
+	if err := d.DeleteEnvKey(ctx, home.ID, "missing", "TOKEN", owner.ID, at); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("missing set %v", err)
+	}
+	if err := d.DeleteEnvKey(ctx, home.ID, "svc", "TOKEN", owner.ID, at); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.DeleteEnvKey(ctx, home.ID, "svc", "NOTE", owner.ID, at); err != nil {
+		t.Fatal(err)
+	}
+	view, err = d.GetEnvSet(ctx, home.ID, "svc")
+	if err != nil || len(view.Keys) != 0 || view.Name != "svc" {
+		t.Fatalf("empty set %#v %v", view, err)
+	}
+	stored, created, err = d.PutEnvKey(ctx, home.ID, "svc", sealOf("svc", "TOKEN", "again"), owner.ID, at)
+	if err != nil || !created || !stored.IsSecret {
+		t.Fatalf("re-add %#v %v %v", stored, created, err)
+	}
+	again := envRows(t, d, ctx, home.ID, "svc")["TOKEN"]
+	opened, err = box.Open(seal.EnvAAD(pid, "svc", "TOKEN"), again.Nonce, again.Ciphertext)
+	if err != nil || string(opened) != "again" || again.Plain != "" {
+		t.Fatalf("re-add opened %q plain %q %v", opened, again.Plain, err)
+	}
+	plainKey := store.EnvSecret{Key: "A", Plain: "alpha", Nonce: again.Nonce, Ciphertext: again.Ciphertext, KeyVersion: seal.KeyVersion}
+	if _, err := d.PutEnvSet(ctx, home.ID, "plain", []store.EnvSecret{plainKey}, owner.ID, at, false); err != nil {
+		t.Fatal(err)
+	}
+	secretKey := store.EnvSecret{Key: "B", Plain: "bravo", Nonce: again.Nonce, Ciphertext: again.Ciphertext, KeyVersion: seal.KeyVersion}
+	nonce, ciphertext, err := box.Seal(seal.EnvAAD(pid, "plain", "B"), []byte("bravo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secretKey.Nonce, secretKey.Ciphertext = nonce, ciphertext
+	if _, err := d.PutEnvSet(ctx, home.ID, "plain", []store.EnvSecret{plainKey, secretKey}, owner.ID, at, true); err != nil {
+		t.Fatal(err)
+	}
+	rows := envRows(t, d, ctx, home.ID, "plain")
+	if rows["A"].IsSecret || rows["A"].Plain != "alpha" || len(rows["A"].Nonce) != 0 || !rows["B"].IsSecret || rows["B"].Plain != "" {
+		t.Fatalf("new_keys_secret A %#v B %#v", rows["A"], rows["B"])
+	}
+	opened, err = box.Open(seal.EnvAAD(pid, "plain", "B"), rows["B"].Nonce, rows["B"].Ciphertext)
+	if err != nil || string(opened) != "bravo" {
+		t.Fatalf("B opened %q %v", opened, err)
 	}
 }
 
@@ -231,7 +382,7 @@ func assertImages(t *testing.T, d *DB, ctx context.Context, at time.Time) {
 	}
 	if _, err := d.PutEnvSet(ctx, home.ID, "svc", []store.EnvSecret{{
 		Key: "TOKEN", Nonce: nonce, Ciphertext: ciphertext, KeyVersion: seal.KeyVersion,
-	}}, owner.ID, at); err != nil {
+	}}, owner.ID, at, true); err != nil {
 		t.Fatal(err)
 	}
 	set, err := d.GetEnvSet(ctx, home.ID, "svc")
@@ -258,7 +409,7 @@ WHERE project_id = $1::uuid AND set_name = 'svc' AND key = 'TOKEN'
 	}
 	if _, err := d.PutEnvSet(ctx, home.ID, "svc", []store.EnvSecret{{
 		Key: "TOKEN", Nonce: nonce2, Ciphertext: ct2, KeyVersion: seal.KeyVersion,
-	}}, owner.ID, at.Add(time.Second)); err != nil {
+	}}, owner.ID, at.Add(time.Second), true); err != nil {
 		t.Fatal(err)
 	}
 	same, err := d.GetCatalogEntry(ctx, home.ID, "web")
@@ -276,7 +427,7 @@ WHERE project_id = $1::uuid AND set_name = 'svc' AND key = 'TOKEN'
 	if _, err := d.PutEnvSet(ctx, home.ID, "svc", []store.EnvSecret{
 		{Key: "TOKEN", Nonce: nA, Ciphertext: cA, KeyVersion: seal.KeyVersion},
 		{Key: "ADDED", Nonce: nB, Ciphertext: cB, KeyVersion: seal.KeyVersion},
-	}, owner.ID, at.Add(2*time.Second)); err != nil {
+	}, owner.ID, at.Add(2*time.Second), true); err != nil {
 		t.Fatal(err)
 	}
 	changed, err := d.GetCatalogEntry(ctx, home.ID, "web")

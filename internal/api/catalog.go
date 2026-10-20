@@ -197,7 +197,7 @@ func (s *Server) handleCatalogPut(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if err := authz.Authorize(r.Context(), p.User.ID, id, authz.CapProjectWrite); err != nil {
+	if err := authz.Authorize(r.Context(), p.User.ID, id, authz.CapCatalogEdit); err != nil {
 		s.deny(w, r, p, idPtr(id), nil, nil, audit.ActionCatalogUpdate, err)
 		return
 	}
@@ -709,6 +709,18 @@ func myActions(held map[string]bool) []string {
 	}
 	out = append(out, "status")
 	return out
+}
+
+func (s *Server) callerActions(r *http.Request, projectID, userID uuid.UUID, entry store.CatalogEntry) ([]string, error) {
+	role, err := s.Store.Role(r.Context(), projectID, userID)
+	if err != nil {
+		return nil, err
+	}
+	grants, err := s.Store.ListCatalogGrants(r.Context(), entry.ID)
+	if err != nil {
+		return nil, err
+	}
+	return myActions(heldActions(entry.Kind, role, userID, grants)), nil
 }
 
 func allowsAction(held map[string]bool, action string) bool {

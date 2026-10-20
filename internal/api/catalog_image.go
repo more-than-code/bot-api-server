@@ -34,6 +34,7 @@ const (
 	maxAgentLineTotal  = 64 << 10
 	maxStatusBytes     = 2048
 	secretRedactMin    = 6
+	redactedMarker     = "[REDACTED]"
 	secretLineMin      = 16
 	secretPieceMax     = 4096
 )
@@ -120,6 +121,16 @@ func (s *Server) handleCatalogDeploys(w http.ResponseWriter, r *http.Request) {
 	}
 	if items == nil {
 		items = []store.ImageDeploy{}
+	}
+	img, err := catalog.ParseStored(entry.ImageRaw)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	// The stored digest stays so rollback can match it. This is a copy.
+	forms := s.redactValues(r.Context(), projectID, img)
+	for i := range items {
+		items[i] = redactImageDeploy(items[i], forms)
 	}
 	writeOK(w, http.StatusOK, map[string]any{"items": items})
 }
@@ -372,18 +383,17 @@ func (s *Server) performImage(w http.ResponseWriter, r *http.Request, p principa
 			}
 		}()
 	}
-	spec, secrets, err := s.imageTask(ctx, projectID, host, entry, img, action, force, digest, lines)
+	spec, forms, err := s.imageTask(ctx, projectID, host, entry, img, action, force, digest, lines)
 	if err != nil {
 		s.auditDecrypt(ctx, p, projectID, host, entry.Name, action, err)
-		s.imageFail(ctx, w, p.User.ID, key, err, secretForms(secrets))
+		s.imageFail(ctx, w, p.User.ID, key, err, forms)
 		return
 	}
-	// Deploy and rollback already returned the values they put in the frame.
-	// Other actions keep that frame and use the values only for redaction.
+	// Deploy and rollback already returned the forms of the values they put
+	// in the frame. Other actions keep that frame and load forms only to redact.
 	if action != "deploy" && action != "rollback" {
-		secrets = s.redactValues(ctx, projectID, img)
+		forms = s.redactValues(ctx, projectID, img)
 	}
-	forms := secretForms(secrets)
 	if s.Hub == nil {
 		s.imageFail(ctx, w, p.User.ID, key, &agentws.CallError{Code: "error", Msg: "internal error"}, forms)
 		return
@@ -401,8 +411,13 @@ func (s *Server) performImage(w http.ResponseWriter, r *http.Request, p principa
 	}
 	if got.request {
 		// An oversized deploy frame is not a deploy. The row is released by the defer.
+		// Audit keeps the fixed phrase when the HTTP msg was redacted in place.
 		if got.msg != agentws.EnvFrameTooLarge {
-			s.auditImageDeny(ctx, p, projectID, host, entry.Name, action, got.code, got.msg, forms)
+			reason := got.reason
+			if reason == "" {
+				reason = got.msg
+			}
+			s.auditImageDeny(ctx, p, projectID, host, entry.Name, action, got.code, reason, forms)
 		}
 		s.imageFail(ctx, w, p.User.ID, key, &agentws.CallError{Code: got.code, Msg: got.msg}, forms)
 		return
@@ -437,7 +452,7 @@ func (s *Server) performImage(w http.ResponseWriter, r *http.Request, p principa
 	hold = false
 	s.auditImageOK(ctx, p, projectID, host, entry.Name, action, finished.Outcome, finished.Digest, forms)
 	s.imageDone(w, p.User.ID, key, map[string]any{
-		"deploy": finished,
+		"deploy": redactImageDeploy(finished, forms),
 		"status": got.status,
 		"lines":  got.lines,
 	})
@@ -482,7 +497,12 @@ func (s *Server) writeImage(w http.ResponseWriter, r *http.Request, p principal,
 		s.fail(w, err)
 		return
 	}
-	entry.MyActions = myActions(heldActions(entry.Kind, authz.RoleOwner, p.User.ID, nil))
+	actions, err := s.callerActions(r, projectID, p.User.ID, entry)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	entry.MyActions = actions
 	detail := map[string]any{"name": entry.Name, "spec_hash": entry.SpecHash}
 	action := audit.ActionCatalogCreate
 	status := http.StatusCreated
@@ -607,7 +627,7 @@ func (s *Server) imageNeedsKey(ctx context.Context, projectID uuid.UUID, img cat
 	return true, nil
 }
 
-func (s *Server) imageTask(ctx context.Context, projectID uuid.UUID, host store.Host, entry store.CatalogEntry, img catalog.Image, action string, force bool, digest string, lines int) (map[string]any, []string, error) {
+func (s *Server) imageTask(ctx context.Context, projectID uuid.UUID, host store.Host, entry store.CatalogEntry, img catalog.Image, action string, force bool, digest string, lines int) (map[string]any, []secretForm, error) {
 	project, err := s.Store.GetProject(ctx, projectID)
 	if err != nil {
 		return nil, nil, err
@@ -627,10 +647,12 @@ func (s *Server) imageTask(ctx context.Context, projectID uuid.UUID, host store.
 			return nil, nil, err
 		}
 		files, fileSecrets, err := s.resolveFiles(ctx, projectID, img)
+		other := append([]string{}, fileSecrets...)
+		other = append(other, secretValues(nil, nil, reg)...)
+		forms := mergeSecretForms(envValueForms(secretValues(env, secretKeys, nil)), redactedValueForms(other))
 		if err != nil {
-			return nil, append(fileSecrets, secretValues(env, secretKeys, reg)...), err
+			return nil, forms, err
 		}
-		secrets := append(secretValues(env, secretKeys, reg), fileSecrets...)
 		out := map[string]any{
 			"project":       project.Slug,
 			"entry":         entry.Name,
@@ -652,7 +674,7 @@ func (s *Server) imageTask(ctx context.Context, projectID uuid.UUID, host store.
 		if action == "rollback" {
 			out["digest"] = digest
 		}
-		return out, secrets, nil
+		return out, forms, nil
 	case "logs":
 		return map[string]any{"project": project.Slug, "entry": entry.Name, "lines": lines}, nil, nil
 	default:
@@ -669,18 +691,19 @@ func (s *Server) imageTask(ctx context.Context, projectID uuid.UUID, host store.
 // decrypt failure logs once, with no value. A missing or undecryptable file
 // is skipped; every secret that opened is still returned. The same set is
 // used whether or not the frame sends secret_keys.
-func (s *Server) redactValues(ctx context.Context, projectID uuid.UUID, img catalog.Image) []string {
-	var secrets []string
+func (s *Server) redactValues(ctx context.Context, projectID uuid.UUID, img catalog.Image) []secretForm {
+	var envVals []string
+	var other []string
 	failed := false
 	if s.Secrets != nil {
 		envSecrets, envFailed := s.redactEnvValues(ctx, projectID, img)
-		secrets = append(secrets, envSecrets...)
+		envVals = append(envVals, envSecrets...)
 		failed = envFailed
 		reg, err := s.registryAuth(ctx, projectID, img.RegistryHost)
 		if errors.Is(err, errDecrypt) {
 			failed = true
 		} else if err == nil {
-			secrets = append(secrets, secretValues(nil, nil, reg)...)
+			other = append(other, secretValues(nil, nil, reg)...)
 		}
 	}
 	more, ferr := s.secretFileValues(ctx, projectID, img)
@@ -690,7 +713,8 @@ func (s *Server) redactValues(ctx context.Context, projectID uuid.UUID, img cata
 	if failed {
 		s.logger().Error("decrypt failed")
 	}
-	return append(secrets, more...)
+	other = append(other, more...)
+	return mergeSecretForms(envValueForms(envVals), redactedValueForms(other))
 }
 
 // redactEnvValues returns secret env values whose winning material opened.
@@ -1149,6 +1173,8 @@ type imageCall struct {
 	request bool
 	code    string
 	msg     string
+	// reason is what an audit row stores. It is the fixed phrase when msg was redacted.
+	reason  string
 	outcome string
 	digest  *string
 	exit    *int
@@ -1157,7 +1183,7 @@ type imageCall struct {
 	logs    imageLogsBody
 }
 
-func takeImage(action string, res agentws.LiveResult, err error, forms []string) imageCall {
+func takeImage(action string, res agentws.LiveResult, err error, forms []secretForm) imageCall {
 	if action == "logs" {
 		return takeLogs(res, err, forms)
 	}
@@ -1167,7 +1193,7 @@ func takeImage(action string, res agentws.LiveResult, err error, forms []string)
 	return takeDeploy(res, err, forms)
 }
 
-func takeDeploy(res agentws.LiveResult, err error, forms []string) imageCall {
+func takeDeploy(res agentws.LiveResult, err error, forms []secretForm) imageCall {
 	if err == nil {
 		if got, ok := acceptedDeploy(res.Payload, forms); ok {
 			return got
@@ -1190,14 +1216,14 @@ func takeDeploy(res agentws.LiveResult, err error, forms []string) imageCall {
 	return failedFixed()
 }
 
-func takeStatus(remove bool, res agentws.LiveResult, err error, forms []string) imageCall {
+func takeStatus(remove bool, res agentws.LiveResult, err error, forms []secretForm) imageCall {
 	if err == nil {
 		p, ok := parseAgentImage(res.Payload)
 		st, stOK := normalizeStatus(p.Status)
 		if !ok || !stOK {
 			return imageCall{request: true, code: "error", msg: invalidAgentResult}
 		}
-		return imageCall{outcome: "succeeded", status: st, lines: []string{}}
+		return imageCall{outcome: "succeeded", status: redactStatus(st, forms), lines: []string{}}
 	}
 	var call *agentws.CallError
 	if !errors.As(err, &call) {
@@ -1215,13 +1241,13 @@ func takeStatus(remove bool, res agentws.LiveResult, err error, forms []string) 
 			if imageOutcomeOK(call.Msg) && call.Msg != "succeeded" {
 				outcome = call.Msg
 			}
-			return imageCall{outcome: outcome, status: st, lines: []string{}}
+			return imageCall{outcome: outcome, status: redactStatus(st, forms), lines: []string{}}
 		}
 	}
-	return imageCall{request: true, code: "error", msg: invalidAgentResult}
+	return agentError(call, forms)
 }
 
-func takeLogs(res agentws.LiveResult, err error, forms []string) imageCall {
+func takeLogs(res agentws.LiveResult, err error, forms []secretForm) imageCall {
 	if err != nil {
 		var call *agentws.CallError
 		if !errors.As(err, &call) {
@@ -1233,14 +1259,14 @@ func takeLogs(res agentws.LiveResult, err error, forms []string) imageCall {
 		if hostRejection(call.Code) {
 			return requestCall(call, forms)
 		}
-		return imageCall{request: true, code: "error", msg: invalidAgentResult}
+		return agentError(call, forms)
 	}
 	p, ok := parseAgentImage(res.Payload)
 	lines, linesOK := boundLines(p.Lines, maxLogLines)
 	if !ok || !linesOK || !statusTextOK(p.Container) {
 		return imageCall{request: true, code: "error", msg: invalidAgentResult}
 	}
-	return imageCall{logs: imageLogsBody{Container: p.Container, Lines: redactLines(lines, forms), Truncated: p.Truncated}}
+	return imageCall{logs: imageLogsBody{Container: redactText(p.Container, forms), Lines: redactLines(lines, forms), Truncated: p.Truncated}}
 }
 
 func hostRejection(code string) bool {
@@ -1252,22 +1278,33 @@ func hostRejection(code string) bool {
 	}
 }
 
-func requestCall(call *agentws.CallError, forms []string) imageCall {
-	msg := call.Msg
-	if msg == "" {
-		msg = phrase(call.Code)
+func requestCall(call *agentws.CallError, forms []secretForm) imageCall {
+	original := call.Msg
+	if original == "" {
+		original = phrase(call.Code)
 	}
-	if redactExact(msg, forms) != msg {
-		msg = phrase(call.Code)
+	shown := redactExact(original, forms)
+	reason := shown
+	if shown != original {
+		reason = phrase(call.Code)
 	}
 	code := call.Code
 	if code == "" {
 		code = "error"
 	}
-	return imageCall{request: true, code: code, msg: msg}
+	return imageCall{request: true, code: code, msg: shown, reason: reason}
 }
 
-func acceptedDeploy(raw json.RawMessage, forms []string) (imageCall, bool) {
+// agentError returns the redacted agent message when it contains a known secret.
+// Anything else stays the fixed invalid-result line and is not echoed.
+func agentError(call *agentws.CallError, forms []secretForm) imageCall {
+	if call != nil && call.Msg != "" && redactExact(call.Msg, forms) != call.Msg {
+		return requestCall(call, forms)
+	}
+	return imageCall{request: true, code: "error", msg: invalidAgentResult}
+}
+
+func acceptedDeploy(raw json.RawMessage, forms []secretForm) (imageCall, bool) {
 	p, ok := parseAgentImage(raw)
 	if !ok || !imageOutcomeOK(p.Outcome) {
 		return imageCall{}, false
@@ -1287,7 +1324,7 @@ func acceptedDeploy(raw json.RawMessage, forms []string) (imageCall, bool) {
 		outcome: p.Outcome,
 		digest:  cleanDigest(p.Digest),
 		exit:    p.ExitCode,
-		status:  st,
+		status:  redactStatus(st, forms),
 		lines:   redactLines(lines, forms),
 	}, true
 }
@@ -1472,7 +1509,7 @@ func jsonSecretPieces(v any) []string {
 	return out
 }
 
-func redactLines(lines []string, forms []string) []string {
+func redactLines(lines []string, forms []secretForm) []string {
 	out := make([]string, len(lines))
 	for i, line := range lines {
 		out[i] = redactExact(line, forms)
@@ -1480,53 +1517,143 @@ func redactLines(lines []string, forms []string) []string {
 	return out
 }
 
-func secretForms(values []string) []string {
-	seen := map[string]bool{}
-	out := make([]string, 0)
+// secretForm is one exact string and the text that replaces it.
+// An env-set secret uses catalog.SecretPreview. A registry token or a
+// secret-file piece uses redactedMarker. Forms are longest-first.
+// The same form from both sources keeps redactedMarker.
+type secretForm struct {
+	form string
+	with string
+}
+
+func secretForms(values []string) []secretForm {
+	return redactedValueForms(values)
+}
+
+func envValueForms(values []string) []secretForm {
+	return valueForms(values, "")
+}
+
+func redactedValueForms(values []string) []secretForm {
+	return valueForms(values, redactedMarker)
+}
+
+func valueForms(values []string, with string) []secretForm {
+	var out []secretForm
+	for _, value := range values {
+		repl := with
+		if repl == "" {
+			repl = catalog.SecretPreview(value)
+		}
+		out = append(out, expandForms(value, repl)...)
+	}
+	return mergeSecretForms(out)
+}
+
+func expandForms(value, with string) []secretForm {
+	if len(value) < secretRedactMin {
+		return nil
+	}
+	var out []secretForm
 	add := func(form string) {
-		if len(form) < secretRedactMin || seen[form] {
+		if len(form) < secretRedactMin {
 			return
 		}
-		seen[form] = true
-		out = append(out, form)
+		out = append(out, secretForm{form: form, with: with})
 	}
-	for _, value := range values {
-		if len(value) < secretRedactMin {
-			continue
-		}
-		add(value)
-		add(base64.StdEncoding.EncodeToString([]byte(value)))
-		add(base64.RawStdEncoding.EncodeToString([]byte(value)))
-		add(base64.URLEncoding.EncodeToString([]byte(value)))
-		add(base64.RawURLEncoding.EncodeToString([]byte(value)))
-		quoted, err := json.Marshal(value)
-		if err == nil && len(quoted) >= 2 {
-			add(string(quoted[1 : len(quoted)-1]))
-		}
+	add(value)
+	add(base64.StdEncoding.EncodeToString([]byte(value)))
+	add(base64.RawStdEncoding.EncodeToString([]byte(value)))
+	add(base64.URLEncoding.EncodeToString([]byte(value)))
+	add(base64.RawURLEncoding.EncodeToString([]byte(value)))
+	quoted, err := json.Marshal(value)
+	if err == nil && len(quoted) >= 2 {
+		add(string(quoted[1 : len(quoted)-1]))
 	}
-	sort.Slice(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
 	return out
 }
 
-// redactExact replaces each secret form with [REDACTED], the marker the agent
-// writes, then applies the keyword rule. A different case makes Logs and the
-// deploy tail disagree.
-func redactExact(s string, forms []string) string {
-	for _, form := range forms {
-		if form == "" {
+func mergeSecretForms(groups ...[]secretForm) []secretForm {
+	with := map[string]string{}
+	order := []string{}
+	for _, group := range groups {
+		for _, item := range group {
+			if len(item.form) < secretRedactMin {
+				continue
+			}
+			prev, ok := with[item.form]
+			if !ok {
+				with[item.form] = item.with
+				order = append(order, item.form)
+				continue
+			}
+			if prev != redactedMarker && item.with == redactedMarker {
+				with[item.form] = redactedMarker
+			}
+		}
+	}
+	sort.Slice(order, func(i, j int) bool { return len(order[i]) > len(order[j]) })
+	out := make([]secretForm, 0, len(order))
+	for _, form := range order {
+		out = append(out, secretForm{form: form, with: with[form]})
+	}
+	return out
+}
+
+// redactExact replaces each secret form, then applies the keyword rule.
+// Env-set secrets use their preview. Registry tokens and secret-file pieces
+// use [REDACTED], the marker the agent writes. A different case makes Logs
+// and the deploy tail disagree.
+func redactExact(s string, forms []secretForm) string {
+	for _, item := range forms {
+		if item.form == "" {
 			continue
 		}
-		s = strings.ReplaceAll(s, form, "[REDACTED]")
+		repl := item.with
+		if repl == "" {
+			repl = redactedMarker
+		}
+		s = strings.ReplaceAll(s, item.form, repl)
 	}
 	return ingest.RedactCmdline(s)
 }
 
+func redactText(s *string, forms []secretForm) *string {
+	if s == nil {
+		return nil
+	}
+	out := redactExact(*s, forms)
+	return &out
+}
+
+// redactStatus runs after statusTextOK. Preview markers are not ASCII, so
+// they must not be applied before that check.
+func redactStatus(st imageStatusBody, forms []secretForm) imageStatusBody {
+	st.Container = redactText(st.Container, forms)
+	st.State = redactExact(st.State, forms)
+	st.StartedAt = redactText(st.StartedAt, forms)
+	st.FinishedAt = redactText(st.FinishedAt, forms)
+	st.Digest = redactText(st.Digest, forms)
+	return st
+}
+
+// redactImageDeploy redacts an HTTP copy. FinishImageDeploy stores the digest
+// unchanged. History redacts another copy on read.
+func redactImageDeploy(d store.ImageDeploy, forms []secretForm) store.ImageDeploy {
+	d.Digest = redactText(d.Digest, forms)
+	d.SpecHash = redactExact(d.SpecHash, forms)
+	d.Outcome = redactExact(d.Outcome, forms)
+	d.Via = redactExact(d.Via, forms)
+	return d
+}
+
 // redactBody applies exact and keyword redaction to each JSON string of an
-// error envelope. Success bodies do not use it: lines are already redacted,
-// and outcome, digest, exit_code, and status fields pass through. The
-// keyword rule treats every following non-space byte as the value, so
-// running it on the raw document would swallow the rest of the object.
-func redactBody(body []byte, forms []string) []byte {
+// error envelope. Success bodies are redacted before they are stored: lines,
+// and every string field of ImageStatus and ImageDeploy, after the agent
+// text has passed statusTextOK. The keyword rule treats every following
+// non-space byte as the value, so running it on the raw document would
+// swallow the rest of the object.
+func redactBody(body []byte, forms []secretForm) []byte {
 	if len(body) == 0 {
 		return body
 	}
@@ -1541,7 +1668,7 @@ func redactBody(body []byte, forms []string) []byte {
 	return out
 }
 
-func redactJSON(v any, forms []string) any {
+func redactJSON(v any, forms []secretForm) any {
 	switch t := v.(type) {
 	case string:
 		return redactExact(t, forms)
@@ -1560,7 +1687,7 @@ func redactJSON(v any, forms []string) any {
 	}
 }
 
-func redactDetail(detail map[string]any, forms []string) map[string]any {
+func redactDetail(detail map[string]any, forms []secretForm) map[string]any {
 	if len(forms) == 0 || detail == nil {
 		return detail
 	}
@@ -1616,7 +1743,7 @@ func (s *Server) imageDone(w http.ResponseWriter, userID uuid.UUID, key string, 
 	writeJSON(w, http.StatusOK, body)
 }
 
-func (s *Server) imageFail(ctx context.Context, w http.ResponseWriter, userID uuid.UUID, key string, err error, forms []string) {
+func (s *Server) imageFail(ctx context.Context, w http.ResponseWriter, userID uuid.UUID, key string, err error, forms []secretForm) {
 	var call *agentws.CallError
 	switch {
 	case errors.Is(err, errDecrypt):
@@ -1636,9 +1763,7 @@ func (s *Server) imageFail(ctx context.Context, w http.ResponseWriter, userID uu
 	if call.Msg == "" {
 		call.Msg = phrase(call.Code)
 	}
-	if redactExact(call.Msg, forms) != call.Msg {
-		call.Msg = phrase(call.Code)
-	}
+	call.Msg = redactExact(call.Msg, forms)
 	status, body, _ := liveEnvelope(agentws.LiveResult{}, call)
 	body = redactBody(body, forms)
 	s.finishImageKey(userID, key, status, body)
@@ -1659,7 +1784,7 @@ func (s *Server) auditDecrypt(ctx context.Context, p principal, projectID uuid.U
 	}
 }
 
-func (s *Server) auditImageDeny(ctx context.Context, p principal, projectID uuid.UUID, host store.Host, entry, action, code, msg string, forms []string) {
+func (s *Server) auditImageDeny(ctx context.Context, p principal, projectID uuid.UUID, host store.Host, entry, action, code, msg string, forms []secretForm) {
 	name := catalogActionName(action)
 	if name == "" {
 		return
@@ -1686,7 +1811,7 @@ func (s *Server) auditImageDeny(ctx context.Context, p principal, projectID uuid
 	})
 }
 
-func (s *Server) auditImageOK(ctx context.Context, p principal, projectID uuid.UUID, host store.Host, entry, action, outcome string, digest *string, forms []string) {
+func (s *Server) auditImageOK(ctx context.Context, p principal, projectID uuid.UUID, host store.Host, entry, action, outcome string, digest *string, forms []secretForm) {
 	name := catalogActionName(action)
 	if name == "" {
 		return

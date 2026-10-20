@@ -397,3 +397,9 @@ A content-only change could not be rolled back: `image_rollback` redeployed the 
 4. **Refusal codes:** a helper refusal for a bad file slot or store (v1.5 rule 6) is `bad_spec`, and the `max_containers` cap is `policy_denied`; the agent maps both to outcome `forbidden_spec` (`task_result.error_code` = `forbidden_spec`). They are never reported as a bare `failed`.
 5. **Diagnostics:** the helper writes one line per refusal to the journal (`bot-agent-runner: refuse <verb> <reason>`; `StandardError=journal` in its unit, because stdout is the socket), and the agent logs a failed helper call as task kind, verb and reason or `transport`. Neither logs request data.
 6. **Overlapping projects (Joe 2026-10-17, from the wave 2b files review):** container and slot names are `<project>-<entry>`, which is ambiguous when one listed project is another plus `-` (`acme` and `acme-web`). The policy is then not valid for images: `images:false` in `hello.programs`, every image verb is refused `policy_denied`, and the helper logs `bot-agent-runner: policy: overlapping projects <a> <b>` once per connection. Program verbs are unaffected.
+
+## v1.7 secret previews in task output (2026-10-20, approved spec `docs/spec-env-editing.md` rev 1; no wire change)
+
+1. In image task output (log tails, error text) the agent replaces an env secret value from the task (raw, base64 and JSON-escaped forms, values of at least 6 bytes as before) with `preview(v)`: the first 4 runes followed by `…` when `v` has at least 16 runes, otherwise `••••`.
+2. Secret-file pieces keep `[REDACTED]`. The keyword rule is unchanged.
+3. The task frame is unchanged. An agent before v1.7 keeps writing `[REDACTED]`; the API accepts both.

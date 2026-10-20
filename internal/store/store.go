@@ -24,6 +24,8 @@ var (
 	ErrState        = errors.New("invalid state")
 	// ErrInvalid is a rejected write, such as sharing a host with its owner.
 	ErrInvalid = errors.New("invalid")
+	// ErrSecretFixed is a key PUT whose is_secret differs from the stored flag.
+	ErrSecretFixed = errors.New("secret flag is fixed; delete and re-add the key")
 	// ErrTooManyFiles is a new file name when the project already has MaxProjectFiles.
 	ErrTooManyFiles = errors.New("too many files")
 	// ErrReuse is a second redemption of an authorization code or a rotated refresh token.
@@ -689,11 +691,17 @@ type Store interface {
 	ListEnvSets(ctx context.Context, projectID uuid.UUID) ([]EnvSet, error)
 	GetEnvSet(ctx context.Context, projectID uuid.UUID, name string) (EnvSet, error)
 	// PutEnvSet replaces the set. A key already in the set keeps is_secret.
-	// A key new to the set is stored as a secret. Keys left out are removed.
+	// A key new to the set is secret when newKeysSecret is true.
+	// Keys left out are removed.
 	// Referencing image entries are rehashed. A changed hash voids approvals.
-	PutEnvSet(ctx context.Context, projectID uuid.UUID, name string, keys []EnvSecret, actor uuid.UUID, at time.Time) (EnvSet, error)
-	// PatchEnvKey flips visibility. It does not change spec hashes.
-	PatchEnvKey(ctx context.Context, projectID uuid.UUID, name, key string, in EnvKeyPatch, actor uuid.UUID, at time.Time) (EnvSet, error)
+	PutEnvSet(ctx context.Context, projectID uuid.UUID, name string, keys []EnvSecret, actor uuid.UUID, at time.Time, newKeysSecret bool) (EnvSet, error)
+	// PutEnvKey creates the set when it is absent and upserts one key.
+	// A Secret that differs from the stored flag is ErrSecretFixed.
+	// The bool is true when the key was created. Only a created key rehashes.
+	PutEnvKey(ctx context.Context, projectID uuid.UUID, name string, in EnvKeyPut, actor uuid.UUID, at time.Time) (EnvKey, bool, error)
+	// DeleteEnvKey removes one key and leaves the set, including an empty set.
+	// A missing set or key is ErrNotFound. Referencing entries are rehashed.
+	DeleteEnvKey(ctx context.Context, projectID uuid.UUID, name, key string, actor uuid.UUID, at time.Time) error
 	// DeleteEnvSet returns ErrConflict when an image entry references the set.
 	DeleteEnvSet(ctx context.Context, projectID uuid.UUID, name string) error
 	// ListEnvMaterial returns plaintext and ciphertext for one set. It is not an HTTP body.

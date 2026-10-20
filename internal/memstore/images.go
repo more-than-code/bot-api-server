@@ -260,7 +260,7 @@ func (m *Mem) envSetViewLocked(projectID uuid.UUID, set envSetRec) store.EnvSet 
 	return store.EnvSet{Name: set.Name, Keys: keys, UpdatedAt: set.UpdatedAt, UpdatedBy: set.UpdatedBy}
 }
 
-func (m *Mem) PutEnvSet(_ context.Context, projectID uuid.UUID, name string, keys []store.EnvSecret, actor uuid.UUID, at time.Time) (store.EnvSet, error) {
+func (m *Mem) PutEnvSet(_ context.Context, projectID uuid.UUID, name string, keys []store.EnvSecret, actor uuid.UUID, at time.Time, newKeysSecret bool) (store.EnvSet, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if !m.projectAliveLocked(projectID) {
@@ -278,7 +278,7 @@ func (m *Mem) PutEnvSet(_ context.Context, projectID uuid.UUID, name string, key
 	m.envSets[id] = rec
 	values := make([]envValueRec, 0, len(keys))
 	for _, k := range keys {
-		secret := true
+		secret := newKeysSecret
 		if was, ok := kept[k.Key]; ok {
 			secret = was
 		}
@@ -297,41 +297,102 @@ func (m *Mem) PutEnvSet(_ context.Context, projectID uuid.UUID, name string, key
 	return m.envSetViewLocked(projectID, rec), nil
 }
 
-func (m *Mem) PatchEnvKey(_ context.Context, projectID uuid.UUID, name, key string, in store.EnvKeyPatch, actor uuid.UUID, at time.Time) (store.EnvSet, error) {
+func (m *Mem) PutEnvKey(_ context.Context, projectID uuid.UUID, name string, in store.EnvKeyPut, actor uuid.UUID, at time.Time) (store.EnvKey, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	set, ok := m.envSets[envKey(projectID, name)]
-	if !ok {
-		return store.EnvSet{}, store.ErrNotFound
+	if !m.projectAliveLocked(projectID) {
+		return store.EnvKey{}, false, store.ErrNotFound
 	}
-	values := m.envValues[envKey(projectID, name)]
-	found := false
-	for i := range values {
-		if values[i].Key != key {
-			continue
-		}
-		found = true
-		values[i].IsSecret = in.IsSecret
-		if in.IsSecret {
-			values[i].Plain = ""
-			values[i].Nonce = append([]byte(nil), in.Nonce...)
-			values[i].Ciphertext = append([]byte(nil), in.Ciphertext...)
-			values[i].KeyVersion = in.KeyVersion
-		} else {
-			values[i].Plain = in.Plain
-			values[i].Nonce = nil
-			values[i].Ciphertext = nil
-			values[i].KeyVersion = 0
-		}
+	if !catalog.ValidName(name) {
+		return store.EnvKey{}, false, store.ErrInvalid
 	}
-	if !found {
-		return store.EnvSet{}, store.ErrNotFound
+	if err := catalog.ValidateEnvKey(in.Key); err != nil {
+		return store.EnvKey{}, false, store.ErrInvalid
 	}
-	m.envValues[envKey(projectID, name)] = values
+	id := envKey(projectID, name)
+	set, exists := m.envSets[id]
+	if !exists {
+		set = envSetRec{Name: name}
+	}
 	set.UpdatedAt = at
 	set.UpdatedBy = actor
-	m.envSets[envKey(projectID, name)] = set
-	return m.envSetViewLocked(projectID, set), nil
+	values := append([]envValueRec(nil), m.envValues[id]...)
+	idx := -1
+	for i := range values {
+		if values[i].Key == in.Key {
+			idx = i
+			break
+		}
+	}
+	created := idx < 0
+	secret := true
+	if created {
+		if in.Secret != nil {
+			secret = *in.Secret
+		}
+	} else {
+		secret = values[idx].IsSecret
+		if in.Secret != nil && *in.Secret != secret {
+			return store.EnvKey{}, false, store.ErrSecretFixed
+		}
+	}
+	row := envValueRec{Key: in.Key, IsSecret: secret}
+	if secret {
+		row.Nonce = append([]byte(nil), in.Nonce...)
+		row.Ciphertext = append([]byte(nil), in.Ciphertext...)
+		row.KeyVersion = in.KeyVersion
+	} else {
+		row.Plain = in.Plain
+	}
+	if created {
+		values = append(values, row)
+	} else {
+		values[idx] = row
+	}
+	m.envSets[id] = set
+	m.envValues[id] = values
+	if created {
+		m.rehashSetLocked(projectID, name, at)
+	}
+	return storedEnvKey(in.Key, secret, in.Plain), created, nil
+}
+
+func (m *Mem) DeleteEnvKey(_ context.Context, projectID uuid.UUID, name, key string, actor uuid.UUID, at time.Time) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := envKey(projectID, name)
+	set, ok := m.envSets[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	values := m.envValues[id]
+	idx := -1
+	for i := range values {
+		if values[i].Key == key {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return store.ErrNotFound
+	}
+	next := append([]envValueRec(nil), values[:idx]...)
+	next = append(next, values[idx+1:]...)
+	m.envValues[id] = next
+	set.UpdatedAt = at
+	set.UpdatedBy = actor
+	m.envSets[id] = set
+	m.rehashSetLocked(projectID, name, at)
+	return nil
+}
+
+func storedEnvKey(key string, secret bool, plain string) store.EnvKey {
+	item := store.EnvKey{Key: key, IsSecret: secret}
+	if !secret {
+		value := plain
+		item.Value = &value
+	}
+	return item
 }
 
 func (m *Mem) DeleteEnvSet(_ context.Context, projectID uuid.UUID, name string) error {

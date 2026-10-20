@@ -3,10 +3,10 @@ package api
 import (
 	"errors"
 	"net/http"
-	"regexp"
 	"sort"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/more-than-code/bot-api-server/internal/audit"
 	"github.com/more-than-code/bot-api-server/internal/authz"
 	"github.com/more-than-code/bot-api-server/internal/catalog"
@@ -19,8 +19,6 @@ const (
 	maxRegistryToken = 4096
 	envPutLimit      = 2 << 20
 )
-
-var envKeyPathRe = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,63}$`)
 
 func (s *Server) handleEnvSetList(w http.ResponseWriter, r *http.Request) {
 	p, id, ok := s.catalogProject(w, r)
@@ -39,7 +37,15 @@ func (s *Server) handleEnvSetList(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err, false)
 		return
 	}
-	writeOK(w, http.StatusOK, map[string]any{"items": fillEnvSets(items)})
+	out := make([]store.EnvSet, 0, len(items))
+	for _, item := range items {
+		filled, ok := s.withPreviews(w, r, id, item)
+		if !ok {
+			return
+		}
+		out = append(out, filled)
+	}
+	writeOK(w, http.StatusOK, map[string]any{"items": out})
 }
 
 func (s *Server) handleEnvSetGet(w http.ResponseWriter, r *http.Request) {
@@ -63,7 +69,11 @@ func (s *Server) handleEnvSetGet(w http.ResponseWriter, r *http.Request) {
 		s.writeErr(w, err, false)
 		return
 	}
-	writeOK(w, http.StatusOK, fillEnvSet(set))
+	filled, ok := s.withPreviews(w, r, id, set)
+	if !ok {
+		return
+	}
+	writeOK(w, http.StatusOK, filled)
 }
 
 func (s *Server) handleEnvSetPut(w http.ResponseWriter, r *http.Request) {
@@ -87,10 +97,15 @@ func (s *Server) handleEnvSetPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Dotenv string `json:"dotenv"`
+		Dotenv        string `json:"dotenv"`
+		NewKeysSecret *bool  `json:"new_keys_secret"`
 	}
 	if !decodeRaw(w, raw, &body) {
 		return
+	}
+	newKeysSecret := true
+	if body.NewKeysSecret != nil {
+		newKeysSecret = *body.NewKeysSecret
 	}
 	pairs, err := catalog.ParseDotenv([]byte(body.Dotenv))
 	if err != nil {
@@ -116,11 +131,12 @@ func (s *Server) handleEnvSetPut(w http.ResponseWriter, r *http.Request) {
 		keys = append(keys, sealed)
 		names = append(names, pair.Key)
 	}
-	set, err := s.Store.PutEnvSet(r.Context(), id, name, keys, p.User.ID, s.now())
+	set, err := s.Store.PutEnvSet(r.Context(), id, name, keys, p.User.ID, s.now(), newKeysSecret)
 	if err != nil {
 		s.writeErr(w, err, false)
 		return
 	}
+	set = fillPreviews(set, keys)
 	sort.Strings(names)
 	s.auditOK(r.Context(), p, store.AuditRow{
 		ProjectID: idPtr(id),
@@ -158,7 +174,7 @@ func (s *Server) handleEnvSetDelete(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, http.StatusOK, map[string]any{})
 }
 
-func (s *Server) handleEnvKeyPatch(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleEnvKeyPut(w http.ResponseWriter, r *http.Request) {
 	p, id, ok := s.catalogProject(w, r)
 	if !ok {
 		return
@@ -167,7 +183,7 @@ func (s *Server) handleEnvKeyPatch(w http.ResponseWriter, r *http.Request) {
 		s.writeAuth(w, err)
 		return
 	}
-	if s.refuseDelegated(w, r, p, idPtr(id), nil, audit.ActionEnvSetVisibility) || !requireConsole(w, p) {
+	if s.refuseDelegated(w, r, p, idPtr(id), nil, audit.ActionEnvSetKeyPut) || !requireConsole(w, p) {
 		return
 	}
 	name, ok := envSetName(w, r)
@@ -179,69 +195,80 @@ func (s *Server) handleEnvKeyPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		IsSecret *bool `json:"is_secret"`
+		Value    string `json:"value"`
+		IsSecret *bool  `json:"is_secret"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	if body.IsSecret == nil {
-		writeCode(w, "bad_request", "invalid json")
+	if err := catalog.ValidateEnvValue(body.Value); err != nil {
+		s.writeField(w, err)
 		return
 	}
-	mats, err := s.Store.ListEnvMaterial(r.Context(), id, name)
+	if s.Secrets == nil {
+		s.logger().Error("secrets key not configured")
+		writeCode(w, "unavailable", errSecretsKey.Error())
+		return
+	}
+	sealed, err := s.sealValue(id, name, key, body.Value)
 	if err != nil {
-		s.writeErr(w, err, false)
+		s.secretWriteErr(w, err)
 		return
 	}
-	var mat *store.EnvMaterial
-	for i := range mats {
-		if mats[i].Key == key {
-			mat = &mats[i]
-			break
-		}
-	}
-	if mat == nil {
-		writeCode(w, "not_found", "not found")
+	stored, created, err := s.Store.PutEnvKey(r.Context(), id, name, store.EnvKeyPut{
+		Key:        key,
+		Plain:      body.Value,
+		Secret:     body.IsSecret,
+		Nonce:      sealed.Nonce,
+		Ciphertext: sealed.Ciphertext,
+		KeyVersion: sealed.KeyVersion,
+	}, p.User.ID, s.now())
+	if errors.Is(err, store.ErrSecretFixed) {
+		writeCode(w, "bad_request", store.ErrSecretFixed.Error())
 		return
 	}
-	want := *body.IsSecret
-	patch := store.EnvKeyPatch{IsSecret: want}
-	if mat.IsSecret == want {
-		if want {
-			patch.Nonce = mat.Nonce
-			patch.Ciphertext = mat.Ciphertext
-			patch.KeyVersion = mat.KeyVersion
-		} else {
-			patch.Plain = mat.Plain
-		}
-	} else if want {
-		sealed, err := s.sealValue(id, name, key, mat.Plain)
-		if err != nil {
-			s.secretWriteErr(w, err)
-			return
-		}
-		patch.Nonce = sealed.Nonce
-		patch.Ciphertext = sealed.Ciphertext
-		patch.KeyVersion = sealed.KeyVersion
-	} else {
-		plain, err := s.openEnv(id, name, *mat)
-		if err != nil {
-			s.secretWriteErr(w, err)
-			return
-		}
-		patch.Plain = plain
-	}
-	set, err := s.Store.PatchEnvKey(r.Context(), id, name, key, patch, p.User.ID, s.now())
 	if err != nil {
 		s.writeErr(w, err, false)
 		return
 	}
 	s.auditOK(r.Context(), p, store.AuditRow{
 		ProjectID: idPtr(id),
-		Action:    audit.ActionEnvSetVisibility,
-		Detail:    map[string]any{"set": name, "key": key, "is_secret": want},
+		Action:    audit.ActionEnvSetKeyPut,
+		Detail:    map[string]any{"set": name, "key": key, "created": created},
 	})
-	writeOK(w, http.StatusOK, fillEnvSet(set))
+	writeOK(w, http.StatusOK, envKeyBody(stored.Key, stored.IsSecret, body.Value))
+}
+
+func (s *Server) handleEnvKeyDelete(w http.ResponseWriter, r *http.Request) {
+	p, id, ok := s.catalogProject(w, r)
+	if !ok {
+		return
+	}
+	if err := authz.Authorize(r.Context(), p.User.ID, id, authz.CapMembers); err != nil {
+		s.writeAuth(w, err)
+		return
+	}
+	if s.refuseDelegated(w, r, p, idPtr(id), nil, audit.ActionEnvSetKeyDelete) || !requireConsole(w, p) {
+		return
+	}
+	name, ok := envSetName(w, r)
+	if !ok {
+		return
+	}
+	key, ok := envKeyName(w, r)
+	if !ok {
+		return
+	}
+	if err := s.Store.DeleteEnvKey(r.Context(), id, name, key, p.User.ID, s.now()); err != nil {
+		s.writeErr(w, err, false)
+		return
+	}
+	s.auditOK(r.Context(), p, store.AuditRow{
+		ProjectID: idPtr(id),
+		Action:    audit.ActionEnvSetKeyDelete,
+		Detail:    map[string]any{"set": name, "key": key},
+	})
+	writeOK(w, http.StatusOK, map[string]any{})
 }
 
 func (s *Server) handleRegistryList(w http.ResponseWriter, r *http.Request) {
@@ -374,7 +401,12 @@ func envSetName(w http.ResponseWriter, r *http.Request) (string, bool) {
 
 func envKeyName(w http.ResponseWriter, r *http.Request) (string, bool) {
 	key := r.PathValue("key")
-	if !envKeyPathRe.MatchString(key) {
+	if err := catalog.ValidateEnvKey(key); err != nil {
+		var field *catalog.FieldError
+		if errors.As(err, &field) {
+			writeCode(w, field.Code, field.Msg)
+			return "", false
+		}
 		writeCode(w, "bad_request", "invalid env key")
 		return "", false
 	}
@@ -408,19 +440,85 @@ func (s *Server) secretWriteErr(w http.ResponseWriter, err error) {
 	}
 }
 
-func fillEnvSets(items []store.EnvSet) []store.EnvSet {
-	if items == nil {
-		return []store.EnvSet{}
-	}
-	for i := range items {
-		items[i] = fillEnvSet(items[i])
-	}
-	return items
-}
-
 func fillEnvSet(set store.EnvSet) store.EnvSet {
 	if set.Keys == nil {
 		set.Keys = []store.EnvKey{}
 	}
 	return set
+}
+
+func fillPreviews(set store.EnvSet, sealed []store.EnvSecret) store.EnvSet {
+	set = fillEnvSet(set)
+	plain := map[string]string{}
+	for _, key := range sealed {
+		plain[key.Key] = key.Plain
+	}
+	for i := range set.Keys {
+		if !set.Keys[i].IsSecret {
+			continue
+		}
+		preview := catalog.SecretPreview(plain[set.Keys[i].Key])
+		set.Keys[i].Preview = &preview
+		set.Keys[i].Value = nil
+	}
+	return set
+}
+
+func envKeyBody(key string, secret bool, plain string) store.EnvKey {
+	item := store.EnvKey{Key: key, IsSecret: secret}
+	if secret {
+		preview := catalog.SecretPreview(plain)
+		item.Preview = &preview
+		return item
+	}
+	value := plain
+	item.Value = &value
+	return item
+}
+
+func (s *Server) withPreviews(w http.ResponseWriter, r *http.Request, projectID uuid.UUID, set store.EnvSet) (store.EnvSet, bool) {
+	set = fillEnvSet(set)
+	need := false
+	for _, key := range set.Keys {
+		if key.IsSecret {
+			need = true
+			break
+		}
+	}
+	if !need {
+		return set, true
+	}
+	if s.Secrets == nil {
+		s.logger().Error("secrets key not configured")
+		writeCode(w, "unavailable", errSecretsKey.Error())
+		return store.EnvSet{}, false
+	}
+	mats, err := s.Store.ListEnvMaterial(r.Context(), projectID, set.Name)
+	if err != nil {
+		s.writeErr(w, err, false)
+		return store.EnvSet{}, false
+	}
+	byKey := map[string]store.EnvMaterial{}
+	for _, mat := range mats {
+		byKey[mat.Key] = mat
+	}
+	for i := range set.Keys {
+		if !set.Keys[i].IsSecret {
+			continue
+		}
+		mat, ok := byKey[set.Keys[i].Key]
+		if !ok {
+			s.secretWriteErr(w, errDecrypt)
+			return store.EnvSet{}, false
+		}
+		plain, err := s.openEnv(projectID, set.Name, mat)
+		if err != nil {
+			s.secretWriteErr(w, err)
+			return store.EnvSet{}, false
+		}
+		preview := catalog.SecretPreview(plain)
+		set.Keys[i].Preview = &preview
+		set.Keys[i].Value = nil
+	}
+	return set, true
 }

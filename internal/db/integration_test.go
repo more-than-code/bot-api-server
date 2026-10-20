@@ -22,7 +22,7 @@ func TestIntegration(t *testing.T) {
 	if url == "" {
 		t.Skip()
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second) // one context for every assertion below, over the network to the test database
 	defer cancel()
 
 	d, err := Open(ctx, url)
@@ -259,6 +259,7 @@ WHERE id = $1::uuid
 	assertCatalog(t, d, ctx, at)
 	assertImages(t, d, ctx, at)
 	assertEnvReplaceKeepsVisibility(t, d, ctx, at)
+	assertEnvKeyUpsertDelete(t, d, ctx, at)
 }
 
 // sharedHostsIntegration is the Postgres half of spec §6: backfill shape,

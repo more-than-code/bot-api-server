@@ -110,7 +110,7 @@ func TestCatalogValidation(t *testing.T) {
 	}{
 		{adminTok, http.MethodPost, path, programBody("zz", "pnpm", false), http.StatusForbidden, "forbidden", "forbidden"},
 		{extraTok, http.MethodPost, path, programBody("zz", "pnpm", false), http.StatusNotFound, "not_found", "not found"},
-		{adminTok, http.MethodPut, path + "/tra", programBody("", "pnpm", false), http.StatusForbidden, "forbidden", "forbidden"},
+		{adminTok, http.MethodPut, path + "/tra", `{"kind":"program","command":"pnpm","shell":false,"dir":"/home/joe/app","run_as":"joe"}`, http.StatusOK, "ok", "ok"},
 		{extraTok, http.MethodPut, path + "/tra", programBody("", "pnpm", false), http.StatusNotFound, "not_found", "not found"},
 		{adminTok, http.MethodDelete, path + "/tra", "", http.StatusForbidden, "forbidden", "forbidden"},
 		{extraTok, http.MethodDelete, path + "/tra", "", http.StatusNotFound, "not_found", "not found"},

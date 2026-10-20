@@ -25,10 +25,25 @@ type ImageDeploy struct {
 }
 
 // EnvKey is one env-set key in an HTTP body. Value is null when the key is secret.
+// Preview is the v1.13 preview of a secret and null for a plain key.
+// The store leaves Preview nil. The HTTP handler fills it and never puts the secret in Value.
 type EnvKey struct {
 	Key      string  `json:"key"`
 	IsSecret bool    `json:"is_secret"`
 	Value    *string `json:"value"`
+	Preview  *string `json:"preview"`
+}
+
+// EnvKeyPut is one key for PutEnvKey.
+// Secret nil stores a new key as secret and leaves an existing flag unchanged.
+// Nonce and Ciphertext seal Plain when the stored flag is secret.
+type EnvKeyPut struct {
+	Key        string
+	Plain      string
+	Secret     *bool
+	Nonce      []byte
+	Ciphertext []byte
+	KeyVersion int
 }
 
 // EnvSet is one project env set.
@@ -45,15 +60,6 @@ type EnvSet struct {
 // A new key, and a key that stays secret, store the seal and not Plain.
 type EnvSecret struct {
 	Key        string
-	Plain      string
-	Nonce      []byte
-	Ciphertext []byte
-	KeyVersion int
-}
-
-// EnvKeyPatch is a visibility change. Exactly one form is set.
-type EnvKeyPatch struct {
-	IsSecret   bool
 	Plain      string
 	Nonce      []byte
 	Ciphertext []byte

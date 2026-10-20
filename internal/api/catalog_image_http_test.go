@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/more-than-code/bot-api-server/internal/catalog"
 	"github.com/more-than-code/bot-api-server/internal/seal"
 	"github.com/more-than-code/bot-api-server/internal/secret"
 	"github.com/more-than-code/bot-api-server/internal/store"
@@ -669,38 +670,35 @@ func TestEnvRegistryRoutes(t *testing.T) {
 	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
 	tok := w.token(owner.ID)
 	project := sc.project.ID.String()
-	putEnv(t, w, tok, project, "svc", "VISIBLE=visible-plain\nSECRET=hidden-value\nPLAIN=still-plain\n")
-	status, env, raw := mustCall(t, w, tok, http.MethodPatch, envPath(project, "svc")+"/keys/VISIBLE", `{"is_secret":false}`)
+	putEnvFlag(t, w, tok, project, "svc", "VISIBLE=visible-plain\nPLAIN=still-plain\n", false)
+	putEnv(t, w, tok, project, "svc", "VISIBLE=visible-plain\nPLAIN=still-plain\nSECRET=hidden-value\n")
+	status, env, raw := mustCall(t, w, tok, http.MethodGet, envPath(project, "svc"), "")
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
-	if !strings.Contains(raw, "visible-plain") {
-		t.Fatal("plain value was hidden from the admin")
+	if !strings.Contains(raw, "visible-plain") || !strings.Contains(raw, "still-plain") || strings.Contains(raw, "hidden-value") {
+		t.Fatal("get hid a plain value or returned a secret")
 	}
-	for _, row := range auditRows(t, w, sc.project.ID) {
-		if row.Action == "env_set.key_visibility" && strings.Contains(string(row.Detail), "visible-plain") {
-			t.Fatal("visibility audit stored the value")
-		}
-	}
-	status, env, raw = mustCall(t, w, tok, http.MethodPatch, envPath(project, "svc")+"/keys/VISIBLE", `{"is_secret":true}`)
+	status, env, raw = mustCall(t, w, tok, http.MethodPut, envPath(project, "svc")+"/keys/EXTRA", `{"value":"extra-plain","is_secret":false}`)
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
-	if strings.Contains(raw, "visible-plain") {
-		t.Fatal("secret value returned after the flip")
+	if !strings.Contains(raw, "extra-plain") {
+		t.Fatal("new plain key hid its value")
 	}
-	status, env, raw = mustCall(t, w, tok, http.MethodPatch, envPath(project, "svc")+"/keys/PLAIN", `{"is_secret":false}`)
-	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
-	if !strings.Contains(raw, "still-plain") {
-		t.Fatal("plain value was hidden from the admin")
+	status, env, raw = mustCall(t, w, tok, http.MethodPut, envPath(project, "svc")+"/keys/VISIBLE", `{"value":"other-value","is_secret":true}`)
+	mustHTTP(t, status, env, http.StatusBadRequest, "bad_request", "secret flag is fixed; delete and re-add the key")
+	if strings.Contains(raw, "other-value") || strings.Contains(raw, "visible-plain") {
+		t.Fatal("flag error echoed a value")
 	}
 	w.srv.Secrets = nil
-	status, env, _ = mustCall(t, w, tok, http.MethodPatch, envPath(project, "svc")+"/keys/SECRET", `{"is_secret":true}`)
-	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
-	status, env, raw = mustCall(t, w, tok, http.MethodPatch, envPath(project, "svc")+"/keys/PLAIN", `{"is_secret":true}`)
+	status, env, raw = mustCall(t, w, tok, http.MethodPut, envPath(project, "svc")+"/keys/SECRET", `{"value":"nope-secret"}`)
 	mustHTTP(t, status, env, http.StatusServiceUnavailable, "unavailable", "secrets key not configured")
+	if strings.Contains(raw, "nope-secret") || strings.Contains(raw, "hidden-value") {
+		t.Fatal("missing key echoed a value")
+	}
 	status, env, raw = mustCall(t, w, tok, http.MethodPut, envPath(project, "svc"), `{"dotenv":""}`)
 	mustHTTP(t, status, env, http.StatusServiceUnavailable, "unavailable", "secrets key not configured")
 	w.srv.Secrets = testBox(t)
 	status, env, raw = mustCall(t, w, tok, http.MethodGet, envPath(project, "svc"), "")
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
-	if !strings.Contains(raw, "still-plain") || !strings.Contains(raw, "SECRET") || !strings.Contains(raw, "VISIBLE") {
+	if !strings.Contains(raw, "still-plain") || !strings.Contains(raw, "SECRET") || !strings.Contains(raw, "VISIBLE") || !strings.Contains(raw, "EXTRA") || strings.Contains(raw, "hidden-value") || strings.Contains(raw, "nope-secret") {
 		t.Fatal("nil key changed the env set")
 	}
 	createImage(t, w, tok, sc.project.ID, "web", `{"kind":"service","image":"nginx","env_sets":["svc"]}`)
@@ -748,12 +746,12 @@ func TestEnvRegistryRoutes(t *testing.T) {
 	putRegistry(t, w, tok, project, "localhost:5000", "bot", "tok")
 	status, env, _ = mustCall(t, w, tok, http.MethodDelete, regPath(project, "localhost:5000"), "")
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
-	gotAudit := map[string]bool{"env_set.key_visibility": false, "env_set.delete": false, "registry.delete": false}
+	gotAudit := map[string]bool{"env_set.key_put": false, "env_set.delete": false, "registry.delete": false}
 	for _, row := range auditRows(t, w, sc.project.ID) {
 		detail := string(row.Detail)
 		switch row.Action {
-		case "env_set.key_visibility":
-			if strings.Contains(detail, `"set":"svc"`) && strings.Contains(detail, `"key":"VISIBLE"`) {
+		case "env_set.key_put":
+			if strings.Contains(detail, `"set":"svc"`) && strings.Contains(detail, `"key":"EXTRA"`) && strings.Contains(detail, `"created":true`) {
 				gotAudit[row.Action] = true
 			}
 		case "env_set.delete":
@@ -765,7 +763,7 @@ func TestEnvRegistryRoutes(t *testing.T) {
 				gotAudit[row.Action] = true
 			}
 		}
-		if row.Action == "env_set.key_visibility" || row.Action == "env_set.delete" || row.Action == "registry.delete" {
+		if row.Action == "env_set.key_put" || row.Action == "env_set.delete" || row.Action == "registry.delete" {
 			if strings.Contains(detail, "visible-plain") || strings.Contains(detail, "hidden-value") || strings.Contains(detail, "still-plain") || strings.Contains(detail, `"token"`) {
 				t.Fatalf("%s stored a secret %s", row.Action, detail)
 			}
@@ -785,9 +783,8 @@ func TestEnvReplaceKeepsVisibility(t *testing.T) {
 	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
 	tok := w.token(owner.ID)
 	project := sc.project.ID.String()
+	putEnvFlag(t, w, tok, project, "svc", "A=alpha-old\n", false)
 	putEnv(t, w, tok, project, "svc", "A=alpha-old\nB=bravo-old\n")
-	status, env, _ := mustCall(t, w, tok, http.MethodPatch, envPath(project, "svc")+"/keys/A", `{"is_secret":false}`)
-	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
 
 	check := func(payload map[string]any, raw string) {
 		t.Helper()
@@ -798,7 +795,7 @@ func TestEnvReplaceKeepsVisibility(t *testing.T) {
 			name, _ := row["key"].(string)
 			by[name] = row
 		}
-		if len(by) != 3 || by["A"]["is_secret"] != false || by["A"]["value"] != "alpha-next" || by["B"]["is_secret"] != true || by["B"]["value"] != nil || by["C"]["is_secret"] != true || by["C"]["value"] != nil {
+		if len(by) != 3 || by["A"]["is_secret"] != false || by["A"]["value"] != "alpha-next" || by["A"]["preview"] != nil || by["B"]["is_secret"] != true || by["B"]["value"] != nil || by["B"]["preview"] != "••••" || by["C"]["is_secret"] != true || by["C"]["value"] != nil || by["C"]["preview"] != "••••" {
 			t.Fatalf("visibility %#v", payload["keys"])
 		}
 		if strings.Contains(raw, "bravo-next") || strings.Contains(raw, "charlie-new") || strings.Contains(raw, "bravo-old") || !strings.Contains(raw, "alpha-next") {
@@ -851,7 +848,8 @@ func TestEnvRegistryConsoleOnly(t *testing.T) {
 		{http.MethodGet, envPath(project, "svc"), ""},
 		{http.MethodPut, envPath(project, "svc"), `{"dotenv":"FOO=next\n"}`},
 		{http.MethodDelete, envPath(project, "svc"), ""},
-		{http.MethodPatch, envPath(project, "svc") + "/keys/FOO", `{"is_secret":false}`},
+		{http.MethodPut, envPath(project, "svc") + "/keys/FOO", `{"value":"next"}`},
+		{http.MethodDelete, envPath(project, "svc") + "/keys/FOO", ""},
 		{http.MethodGet, "/v1/projects/" + project + "/registries", ""},
 		{http.MethodPut, regPath(project, "ghcr.io"), `{"username":"bot","token":"next-token-value"}`},
 		{http.MethodDelete, regPath(project, "ghcr.io"), ""},
@@ -868,8 +866,8 @@ func TestEnvRegistryConsoleOnly(t *testing.T) {
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
 	keys, _ := objectPayload(t, env)["keys"].([]any)
 	key0, _ := keys[0].(map[string]any)
-	if len(keys) != 1 || key0["is_secret"] != true || key0["value"] != nil {
-		t.Fatalf("delegated patch changed the key %#v", keys)
+	if len(keys) != 1 || key0["is_secret"] != true || key0["value"] != nil || key0["preview"] != catalog.SecretPreview(envSecret) {
+		t.Fatalf("delegated key call changed the key %#v", keys)
 	}
 	if strings.Contains(raw, envSecret) {
 		t.Fatal("secret value returned")
@@ -1278,9 +1276,8 @@ func TestImageSecretKeys(t *testing.T) {
 	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
 	tok := w.token(owner.ID)
 	project := sc.project.ID.String()
+	putEnvFlag(t, w, tok, project, "services", "DB_NAME=mohiguide\n", false)
 	putEnv(t, w, tok, project, "services", "DB_NAME=mohiguide\nBETA=beta-secret-value\nZED=zed-secret-value\n")
-	status, env, _ := mustCall(t, w, tok, http.MethodPatch, envPath(project, "services")+"/keys/DB_NAME", `{"is_secret":false}`)
-	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
 	createImage(t, w, tok, sc.project.ID, "web", `{"kind":"service","image":"nginx","env_sets":["services"],"secret_env":{"FROM_SECRET":"services.BETA","FROM_PLAIN":"services.DB_NAME"},"env":{"BETA":"inline-not-secret"}}`)
 	createImage(t, w, tok, sc.project.ID, "plain", `{"kind":"service","image":"nginx","env":{"ONLY":"inline-only"}}`)
 	conn := helloAgent(t, w, sc.host, sc.credPlain, sc.credID, allowImages(), nil)
@@ -1288,7 +1285,7 @@ func TestImageSecretKeys(t *testing.T) {
 		return imageDeployReply(msg, shaDigest(5))
 	})
 	host := sc.host.ID.String()
-	status, env, _ = postImage(t, w, tok, project, "web", "deploy", host, "off-1", nil)
+	status, env, _ := postImage(t, w, tok, project, "web", "deploy", host, "off-1", nil)
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
 	spec, _ := log.raw(0)["spec"].(map[string]any)
 	_, hasKeys := spec["secret_keys"]
@@ -1347,9 +1344,8 @@ func TestImagePlainEnvNotRedacted(t *testing.T) {
 	}
 	tok := w.token(owner.ID)
 	pid := project.ID.String()
+	putEnvFlag(t, w, tok, pid, "services", "DB_NAME="+plain+"\n", false)
 	putEnv(t, w, tok, pid, "services", "DB_NAME="+plain+"\nAPI_KEY="+secretVal+"\n")
-	status, env, _ := mustCall(t, w, tok, http.MethodPatch, envPath(pid, "services")+"/keys/DB_NAME", `{"is_secret":false}`)
-	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
 	createImage(t, w, tok, project.ID, "web", `{"kind":"service","image":"nginx","env_sets":["services"]}`)
 	conn := helloAgent(t, w, host, credPlain, credID, allowImages(), nil)
 	lines := []string{"db " + plain + " ready", "key " + secretVal + " used"}
@@ -1416,7 +1412,7 @@ func assertPlainKept(t *testing.T, env envelope, raw string, logs bool) {
 		}
 	}
 	lines, _ := payload["lines"].([]any)
-	if container != "mohiguide-web" || len(lines) != 2 || lines[0] != "db mohiguide ready" || lines[1] != "key [REDACTED] used" || strings.Contains(raw, "s3cret-value-1") || strings.Contains(raw, "[redacted]") {
+	if container != "mohiguide-web" || len(lines) != 2 || lines[0] != "db mohiguide ready" || lines[1] != "key •••• used" || strings.Contains(raw, "s3cret-value-1") || strings.Contains(raw, "[redacted]") {
 		t.Fatalf("redaction %#v %s", payload, raw)
 	}
 }
@@ -1428,7 +1424,7 @@ func TestDotenvLiteralResolved(t *testing.T) {
 	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
 	tok := w.token(owner.ID)
 	project := sc.project.ID.String()
-	putEnv(t, w, tok, project, "literals", "DOLLAR=$HOME/bin\nSLASH=C:\\temp\nESCAPED=a\\nb\n")
+	putEnvFlag(t, w, tok, project, "literals", "DOLLAR=$HOME/bin\nSLASH=C:\\temp\nESCAPED=a\\nb\n", false)
 	createImage(t, w, tok, sc.project.ID, "web", `{"kind":"service","image":"nginx","env_sets":["literals"]}`)
 	conn := helloAgent(t, w, sc.host, sc.credPlain, sc.credID, allowImages(), nil)
 	log := watchTasks(t, conn, func(msg map[string]any) map[string]any {
@@ -1440,10 +1436,6 @@ func TestDotenvLiteralResolved(t *testing.T) {
 	envMap, _ := spec["env"].(map[string]any)
 	if envMap["DOLLAR"] != "$HOME/bin" || envMap["SLASH"] != `C:\temp` || envMap["ESCAPED"] != `a\nb` || len(envMap) != 3 {
 		t.Fatalf("resolved %#v", envMap)
-	}
-	for _, key := range []string{"DOLLAR", "SLASH", "ESCAPED"} {
-		status, env, _ = mustCall(t, w, tok, http.MethodPatch, envPath(project, "literals")+"/keys/"+key, `{"is_secret":false}`)
-		mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
 	}
 	status, env, _ = mustCall(t, w, tok, http.MethodGet, envPath(project, "literals"), "")
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
@@ -1589,19 +1581,19 @@ func TestImageShortActionsRedactEcho(t *testing.T) {
 		mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
 		payload := objectPayload(t, env)
 		if action == "logs" {
-			if payload["container"] != echo {
-				t.Fatalf("logs container %#v", payload["container"])
-			}
+			assertRedactedEcho(t, payload["container"])
 			assertNoSecret(t, mustText(payload["lines"]))
 		} else {
 			statusBody := payload
 			if action == "remove" {
 				statusBody, _ = payload["status"].(map[string]any)
 			}
-			if statusBody["container"] != echo || statusBody["started_at"] != envSecret || statusBody["finished_at"] != regSecret {
+			assertRedactedEcho(t, statusBody["container"])
+			if statusBody["started_at"] != catalog.SecretPreview(envSecret) || statusBody["finished_at"] != "[REDACTED]" {
 				t.Fatalf("%s status %#v", action, statusBody)
 			}
 		}
+		assertNoSecret(t, raw)
 		assertShortImage(t, action, env)
 		task := log.raw(log.count() - 1)
 		if task["kind"] != imageKind(action) {
@@ -1645,6 +1637,158 @@ func TestImageShortActionsRedactEcho(t *testing.T) {
 	}
 }
 
+func TestImageErrorStringRedacts(t *testing.T) {
+	const longSecret = "abcdefghij0123456789"
+	const shortSecret = "abcd1234"
+	const token = "registry-token-value"
+	w := newWorld(t)
+	w.srv.Secrets = testBox(t)
+	owner := w.user("owner@ex.com", "Owner")
+	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
+	tok := w.token(owner.ID)
+	project := sc.project.ID.String()
+	putEnv(t, w, tok, project, "svc", "LONG="+longSecret+"\nSHORT="+shortSecret+"\n")
+	putRegistry(t, w, tok, project, "ghcr.io", "bot", token)
+	createImage(t, w, tok, sc.project.ID, "web", `{"kind":"service","image":"ghcr.io/joe/app","env_sets":["svc"]}`)
+	conn := helloAgent(t, w, sc.host, sc.credPlain, sc.credID, allowImages(), nil)
+	msg := longSecret + " " + shortSecret + " " + token
+	log := watchTasks(t, conn, func(task map[string]any) map[string]any {
+		return map[string]any{
+			"v": 1, "type": "task_result", "task_id": task["task_id"], "state": "failed",
+			"error_code": msg,
+		}
+	})
+	host := sc.host.ID.String()
+	status, env, raw := postImage(t, w, tok, project, "web", "remove", host, "err-rm", nil)
+	if status != http.StatusInternalServerError || env.Code != "error" {
+		t.Fatalf("remove error %d %#v", status, env)
+	}
+	if !strings.Contains(env.Msg, catalog.SecretPreview(longSecret)) || !strings.Contains(env.Msg, catalog.SecretPreview(shortSecret)) || !strings.Contains(env.Msg, "[REDACTED]") {
+		t.Fatalf("msg %q", env.Msg)
+	}
+	if env.Msg == "internal error" || strings.Contains(env.Msg, longSecret) || strings.Contains(env.Msg, shortSecret) || strings.Contains(env.Msg, token) {
+		t.Fatalf("msg %q", env.Msg)
+	}
+	if catalog.SecretPreview(longSecret) != "abcd…" || catalog.SecretPreview(shortSecret) != "••••" {
+		t.Fatalf("previews %q %q", catalog.SecretPreview(longSecret), catalog.SecretPreview(shortSecret))
+	}
+	found := false
+	for _, row := range auditRows(t, w, sc.project.ID) {
+		if row.Action != "catalog.remove" || row.Decision != "denied" {
+			continue
+		}
+		var detail map[string]any
+		if json.Unmarshal(row.Detail, &detail) != nil {
+			t.Fatal("detail")
+		}
+		if detail["reason"] != "internal error" {
+			t.Fatalf("reason %#v", detail["reason"])
+		}
+		blob, err := json.Marshal(row)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, secret := range []string{longSecret, shortSecret, token, catalog.SecretPreview(longSecret), catalog.SecretPreview(shortSecret), "[REDACTED]"} {
+			if strings.Contains(string(blob), secret) {
+				t.Fatalf("audit held %q", secret)
+			}
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("no remove denial")
+	}
+	if log.count() != 1 {
+		t.Fatalf("dispatched %d", log.count())
+	}
+	status, env, replay := postImage(t, w, tok, project, "web", "remove", host, "err-rm", nil)
+	if status != http.StatusInternalServerError || replay != raw || env.Msg != rawMsg(t, raw) {
+		t.Fatalf("replay %d %q", status, env.Msg)
+	}
+	if log.count() != 1 {
+		t.Fatal("replay dispatched")
+	}
+}
+
+func rawMsg(t *testing.T, raw string) string {
+	t.Helper()
+	var env envelope
+	if err := json.Unmarshal([]byte(raw), &env); err != nil {
+		t.Fatal(err)
+	}
+	return env.Msg
+}
+
+func TestImageHistoryRedactsDigest(t *testing.T) {
+	const secret = "0123456789abcdef"
+	if catalog.SecretPreview(secret) != "0123…" {
+		t.Fatalf("preview %q", catalog.SecretPreview(secret))
+	}
+	w := newWorld(t)
+	w.srv.Secrets = testBox(t)
+	owner := w.user("owner@ex.com", "Owner")
+	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
+	tok := w.token(owner.ID)
+	project := sc.project.ID.String()
+	putEnv(t, w, tok, project, "svc", "FOO="+secret+"\n")
+	created := createImage(t, w, tok, sc.project.ID, "web", `{"kind":"service","image":"nginx","env_sets":["svc"]}`)
+	entryID := uuid.MustParse(created["id"].(string))
+	hash, _ := created["spec_hash"].(string)
+	if strings.Contains(hash, secret) {
+		t.Fatal("spec hash contains the fixture")
+	}
+	digest := "sha256:" + secret + strings.Repeat("ab", 24)
+	if !catalog.ValidDigest(digest) {
+		t.Fatal("digest")
+	}
+	conn := helloAgent(t, w, sc.host, sc.credPlain, sc.credID, allowImages(), nil)
+	log := watchTasks(t, conn, func(msg map[string]any) map[string]any {
+		return imageDeployReply(msg, digest)
+	})
+	host := sc.host.ID.String()
+	status, env, raw := postImage(t, w, tok, project, "web", "deploy", host, "hist-1", nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	if strings.Contains(raw, secret) {
+		t.Fatal("deploy response leaked the digest secret")
+	}
+	rows, err := w.mem.ListImageDeploys(context.Background(), entryID, sc.host.ID)
+	if err != nil || len(rows) != 1 || rows[0].Digest == nil || *rows[0].Digest != digest {
+		t.Fatalf("stored %#v %v", rows, err)
+	}
+	status, env, raw = mustCall(t, w, tok, http.MethodGet, "/v1/projects/"+project+"/catalog/web/deploys?host_id="+host, "")
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	items := listItems(t, env)
+	want := "sha256:" + catalog.SecretPreview(secret) + strings.Repeat("ab", 24)
+	if len(items) != 1 || items[0]["digest"] != want || strings.Contains(raw, secret) {
+		t.Fatalf("history %#v %s", items, raw)
+	}
+	rows, err = w.mem.ListImageDeploys(context.Background(), entryID, sc.host.ID)
+	if err != nil || len(rows) != 1 || rows[0].Digest == nil || *rows[0].Digest != digest {
+		t.Fatalf("history rewrote the row %#v %v", rows, err)
+	}
+	status, env, raw = postImage(t, w, tok, project, "web", "rollback", host, "hist-rb", map[string]any{"digest": digest})
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	if strings.Contains(raw, secret) {
+		t.Fatal("rollback response leaked the digest secret")
+	}
+	if log.count() != 2 {
+		t.Fatalf("tasks %d", log.count())
+	}
+	spec, _ := log.raw(1)["spec"].(map[string]any)
+	if spec["digest"] != digest {
+		t.Fatalf("rollback frame digest %#v", spec["digest"])
+	}
+	rows, err = w.mem.ListImageDeploys(context.Background(), entryID, sc.host.ID)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("rows %d %v", len(rows), err)
+	}
+	for _, row := range rows {
+		if row.Digest == nil || *row.Digest != digest {
+			t.Fatalf("stored digest %#v", row.Digest)
+		}
+	}
+}
+
 func TestImageShortRedactWithoutKey(t *testing.T) {
 	w := newWorld(t)
 	w.srv.Secrets = testBox(t)
@@ -1652,11 +1796,9 @@ func TestImageShortRedactWithoutKey(t *testing.T) {
 	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
 	tok := w.token(owner.ID)
 	project := sc.project.ID.String()
-	putEnv(t, w, tok, project, "svc", "FOO="+envSecret+"\n")
-	putRegistry(t, w, tok, project, "ghcr.io", "bot", regSecret)
 	// FOO is plain. A missing key still returns logs. The registry credential is not a reason to refuse.
-	status, env, _ := mustCall(t, w, tok, http.MethodPatch, envPath(project, "svc")+"/keys/FOO", `{"is_secret":false}`)
-	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	putEnvFlag(t, w, tok, project, "svc", "FOO="+envSecret+"\n", false)
+	putRegistry(t, w, tok, project, "ghcr.io", "bot", regSecret)
 	createImage(t, w, tok, sc.project.ID, "web", `{"kind":"service","image":"ghcr.io/joe/app","env_sets":["svc"]}`)
 	w.srv.Secrets = nil
 	logs := captureLog(w)
@@ -1673,7 +1815,7 @@ func TestImageShortRedactWithoutKey(t *testing.T) {
 	})
 	status, env, raw := postImage(t, w, tok, project, "web", "logs", sc.host.ID.String(), "", nil)
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
-	if objectPayload(t, env)["container"] != "password=hunter22" {
+	if objectPayload(t, env)["container"] != "password=[REDACTED]" {
 		t.Fatalf("container %#v", objectPayload(t, env)["container"])
 	}
 	lines := mustText(objectPayload(t, env)["lines"])
@@ -1785,6 +1927,20 @@ func secretEchoLines() []string {
 
 func secretEcho() string {
 	return strings.Join(secretEchoLines(), " ")
+}
+
+func assertRedactedEcho(t *testing.T, container any) {
+	t.Helper()
+	text, _ := container.(string)
+	if text == "" || text == secretEcho() {
+		t.Fatalf("container not redacted %#v", container)
+	}
+	if !strings.Contains(text, catalog.SecretPreview(envSecret)) || !strings.Contains(text, "[REDACTED]") {
+		t.Fatalf("container %#v", container)
+	}
+	if strings.Contains(text, envSecret) || strings.Contains(text, regSecret) {
+		t.Fatalf("container leaked %#v", container)
+	}
 }
 
 func assertShortImage(t *testing.T, action string, env envelope) {
@@ -2139,7 +2295,16 @@ func createImageGet(t *testing.T, w *world, tok string, project uuid.UUID, name 
 
 func putEnv(t *testing.T, w *world, tok, project, set, dotenv string) {
 	t.Helper()
-	raw, err := json.Marshal(map[string]string{"dotenv": dotenv})
+	putEnvFlag(t, w, tok, project, set, dotenv, true)
+}
+
+func putEnvFlag(t *testing.T, w *world, tok, project, set, dotenv string, secret bool) {
+	t.Helper()
+	body := map[string]any{"dotenv": dotenv}
+	if !secret {
+		body["new_keys_secret"] = false
+	}
+	raw, err := json.Marshal(body)
 	if err != nil {
 		t.Fatal(err)
 	}

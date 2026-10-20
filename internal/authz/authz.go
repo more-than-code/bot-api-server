@@ -17,6 +17,9 @@ const (
 	CapJoinToken    = "join_token"
 	CapMembers      = "members"
 	CapProjectWrite = "project_write"
+	// CapCatalogEdit is catalog replace: owner or admin. Create, delete, and
+	// permissions stay CapProjectWrite.
+	CapCatalogEdit = "catalog_edit"
 	// CapHealthWrite and CapAuditRead are phase-1 admin+ routes that §2 does
 	// not name on their own. See NOTES.md.
 	CapHealthWrite = "health_write"
@@ -54,7 +57,7 @@ func Allows(role, capability string) bool {
 		return role == RoleOwner || role == RoleAdmin || role == RoleViewer
 	case CapRead, CapProbe:
 		return role == RoleOwner || role == RoleAdmin || role == RoleViewer
-	case CapJoinToken, CapMembers, CapHealthWrite, CapAuditRead:
+	case CapJoinToken, CapMembers, CapHealthWrite, CapAuditRead, CapCatalogEdit:
 		return role == RoleOwner || role == RoleAdmin
 	case CapProjectWrite:
 		return role == RoleOwner
@@ -72,6 +75,7 @@ func AllCapabilities() []string {
 		CapJoinToken,
 		CapMembers,
 		CapProjectWrite,
+		CapCatalogEdit,
 		CapHealthWrite,
 		CapAuditRead,
 	}

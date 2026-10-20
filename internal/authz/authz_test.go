@@ -18,27 +18,28 @@ func TestAuthorizeMatrix(t *testing.T) {
 		joinToken    = "join_token"
 		members      = "members"
 		projectWrite = "project_write"
+		catalogEdit  = "catalog_edit"
 		healthWrite  = "health_write"
 		auditRead    = "audit_read"
 	)
 	allowed := map[string]map[string]bool{
 		RoleViewer: {
 			session: true, read: true, probe: true,
-			joinToken: false, members: false, projectWrite: false,
+			joinToken: false, members: false, projectWrite: false, catalogEdit: false,
 			healthWrite: false, auditRead: false,
 		},
 		RoleAdmin: {
 			session: true, read: true, probe: true,
-			joinToken: true, members: true, projectWrite: false,
+			joinToken: true, members: true, projectWrite: false, catalogEdit: true,
 			healthWrite: true, auditRead: true,
 		},
 		RoleOwner: {
 			session: true, read: true, probe: true,
-			joinToken: true, members: true, projectWrite: true,
+			joinToken: true, members: true, projectWrite: true, catalogEdit: true,
 			healthWrite: true, auditRead: true,
 		},
 	}
-	caps := []string{session, read, probe, joinToken, members, projectWrite, healthWrite, auditRead}
+	caps := []string{session, read, probe, joinToken, members, projectWrite, catalogEdit, healthWrite, auditRead}
 	projectID := uuid.New()
 	for _, role := range []string{RoleViewer, RoleAdmin, RoleOwner} {
 		userID := uuid.New()
@@ -66,7 +67,7 @@ func TestAuthorizeNonMember(t *testing.T) {
 		return "", false, nil
 	})
 	userID := uuid.New()
-	for _, cap := range []string{"read", "probe", "join_token", "members", "project_write", "health_write", "audit_read", "nope"} {
+	for _, cap := range []string{"read", "probe", "join_token", "members", "project_write", "catalog_edit", "health_write", "audit_read", "nope"} {
 		err := Authorize(ctx, userID, uuid.New(), cap)
 		var denied *Denied
 		if !errors.As(err, &denied) || denied.Code != "not_found" {

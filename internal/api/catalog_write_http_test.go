@@ -379,7 +379,9 @@ func TestDelegatedCatalogConsoleOnly(t *testing.T) {
 	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
 	status, env, _ = mustCall(t, c.w, c.tok, http.MethodDelete, "/v1/projects/"+project+"/env-sets/svc", "")
 	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
-	status, env, _ = mustCall(t, c.w, c.tok, http.MethodPatch, "/v1/projects/"+project+"/env-sets/svc/keys/TOKEN", `{"is_secret":true}`)
+	status, env, _ = mustCall(t, c.w, c.tok, http.MethodPut, "/v1/projects/"+project+"/env-sets/svc/keys/TOKEN", `{"value":"nope"}`)
+	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
+	status, env, _ = mustCall(t, c.w, c.tok, http.MethodDelete, "/v1/projects/"+project+"/env-sets/svc/keys/TOKEN", "")
 	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
 	status, env, _ = mustCall(t, c.w, c.console, http.MethodGet, "/v1/projects/"+project+"/env-sets", "")
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
@@ -399,7 +401,6 @@ func TestDelegatedCatalogConsoleOnly(t *testing.T) {
 	requireDelegatedDenial(t, rows, audit.ActionCatalogApprovalRevoke, 1)
 	requireDelegatedDenial(t, rows, audit.ActionEnvSetReplace, 1)
 	requireDelegatedDenial(t, rows, audit.ActionEnvSetDelete, 1)
-	requireDelegatedDenial(t, rows, audit.ActionEnvSetVisibility, 1)
 	requireDelegatedDenial(t, rows, audit.ActionEnvSetList, 1)
 	requireDelegatedDenial(t, rows, audit.ActionEnvSetGet, 1)
 }
@@ -481,6 +482,64 @@ func newCatalogCast(t *testing.T) catalogCast {
 	return catalogCast{
 		w: w, owner: owner, admin: admin, extra: extra, sc: sc,
 		console: w.token(owner.ID), tok: tokenKind(t, w, owner.ID, store.KindDelegated),
+	}
+}
+
+func TestAdminCatalogEdit(t *testing.T) {
+	c := newCatalogCast(t)
+	createImage(t, c.w, c.console, c.sc.project.ID, "web", nginxSpec)
+	item := catalogItem(c.sc.project.ID, "web")
+	onlyLogs := `{"grants":[{"subject":"role:admin","actions":["logs"]}]}`
+	status, env := c.w.do(c.console, http.MethodPut, item+"/permissions", onlyLogs)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	admin := c.w.token(c.admin.ID)
+	status, env = c.w.do(admin, http.MethodPut, item, catalogImagePutBody(`{"kind":"service","image":"nginx:1.27"}`, ""))
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	if objectPayload(t, env)["command_display"] != "docker.io/library/nginx:1.27" {
+		t.Fatalf("admin console put %#v", objectPayload(t, env))
+	}
+	if strings.Join(anyStrings(t, objectPayload(t, env)["my_actions"].([]any)), ",") != "logs,status" {
+		t.Fatalf("admin put actions %#v", objectPayload(t, env)["my_actions"])
+	}
+	status, env = c.w.do(c.console, http.MethodPut, item, catalogImagePutBody(`{"kind":"service","image":"nginx:1.27"}`, ""))
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	if strings.Join(anyStrings(t, objectPayload(t, env)["my_actions"].([]any)), ",") != "run,stop,restart,logs,deploy,status" {
+		t.Fatalf("owner put actions %#v", objectPayload(t, env)["my_actions"])
+	}
+
+	delegated := tokenKind(t, c.w, c.admin.ID, store.KindDelegated)
+	status, env, _ = mustCall(t, c.w, delegated, http.MethodPut, item, catalogImagePutBody(nginxSpec, "adm-1"))
+	mustHTTP(t, status, env, http.StatusAccepted, "ok", "ok")
+	id, _, _ := healthPlanOf(t, env)
+	status, env = c.w.do(c.console, http.MethodPost, "/v1/confirmations/"+id, confirmBody("adm-1"))
+	mustHTTP(t, status, env, http.StatusNotFound, "not_found", "not found")
+	status, env = c.w.do(admin, http.MethodPost, "/v1/confirmations/"+id, confirmBody("adm-1"))
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	if objectPayload(t, env)["command_display"] != "docker.io/library/nginx:latest" {
+		t.Fatalf("admin confirm %#v", objectPayload(t, env))
+	}
+	if strings.Join(anyStrings(t, objectPayload(t, env)["my_actions"].([]any)), ",") != "logs,status" {
+		t.Fatalf("admin confirm actions %#v", objectPayload(t, env)["my_actions"])
+	}
+
+	status, env = c.w.do(admin, http.MethodPost, catalogCollection(c.sc.project.ID), catalogImageBody("other", nginxSpec, ""))
+	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
+	status, env = c.w.do(admin, http.MethodDelete, item, "")
+	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
+	status, env = c.w.do(admin, http.MethodPut, item+"/permissions", `{"grants":[]}`)
+	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
+	if catalogNameCount(t, c, "web") != 1 || catalogNameCount(t, c, "other") != 0 {
+		t.Fatal("admin create or delete wrote an entry")
+	}
+
+	viewer := c.w.token(c.sc.spare.ID)
+	status, env = c.w.do(viewer, http.MethodPut, item, catalogImagePutBody(nginxSpec, ""))
+	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
+	viewerDelegated := tokenKind(t, c.w, c.sc.spare.ID, store.KindDelegated)
+	status, env = c.w.do(viewerDelegated, http.MethodPut, item, catalogImagePutBody(nginxSpec, "view-1"))
+	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
+	if createImageGet(t, c.w, c.console, c.sc.project.ID, "web")["command_display"] != "docker.io/library/nginx:latest" {
+		t.Fatal("a forbidden put changed the entry")
 	}
 }
 

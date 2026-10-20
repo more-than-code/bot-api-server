@@ -340,7 +340,11 @@ func (s *Server) confirmCatalogWrite(w http.ResponseWriter, r *http.Request, p p
 	case "delete":
 		auditAction = audit.ActionCatalogDelete
 	}
-	if err := authz.Authorize(r.Context(), p.User.ID, c.ProjectID, authz.CapProjectWrite); err != nil {
+	capability := authz.CapProjectWrite
+	if c.Action == "update" {
+		capability = authz.CapCatalogEdit
+	}
+	if err := authz.Authorize(r.Context(), p.User.ID, c.ProjectID, capability); err != nil {
 		s.deny(w, r, p, idPtr(c.ProjectID), nil, nil, auditAction, err)
 		return
 	}
@@ -368,13 +372,19 @@ func (s *Server) confirmCatalogWrite(w http.ResponseWriter, r *http.Request, p p
 	status := http.StatusOK
 	var payload any
 	detail := map[string]any{"name": entry.Name, "spec_hash": entry.SpecHash}
+	if c.Action == "create" || c.Action == "update" {
+		actions, aerr := s.callerActions(r, c.ProjectID, p.User.ID, entry)
+		if aerr != nil {
+			s.fail(w, aerr)
+			return
+		}
+		entry.MyActions = actions
+	}
 	switch c.Action {
 	case "create":
 		status = http.StatusCreated
-		entry.MyActions = myActions(heldActions(entry.Kind, authz.RoleOwner, p.User.ID, nil))
 		payload = entry
 	case "update":
-		entry.MyActions = myActions(heldActions(entry.Kind, authz.RoleOwner, p.User.ID, nil))
 		payload = entry
 		detail["old_spec_hash"] = old
 	default:

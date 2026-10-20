@@ -208,6 +208,30 @@ func validateRunAs(user string) error {
 	return nil
 }
 
+// ValidateEnvKey applies the dotenv key rules without a line number.
+// The message may name the key. It never includes a value.
+func ValidateEnvKey(key string) error {
+	if !envKeyRe.MatchString(key) {
+		return fieldErr("invalid env key")
+	}
+	if key == "PATH" || key == "HOME" {
+		return fieldErr(key + " is reserved")
+	}
+	if changesWhatRuns(key) {
+		return fieldErr("this variable changes what the program runs")
+	}
+	return nil
+}
+
+// ValidateEnvValue applies the dotenv value rules. The message does not
+// include the value. An empty value is valid.
+func ValidateEnvValue(value string) error {
+	if strings.ContainsRune(value, 0) || strings.ContainsAny(value, "\n\r") || len(value) > maxEnvValue {
+		return fieldErr("invalid env value")
+	}
+	return nil
+}
+
 func validateEnv(env map[string]string) error {
 	if len(env) > 64 {
 		return fieldErr("too many env keys")

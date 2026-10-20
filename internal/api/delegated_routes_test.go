@@ -35,6 +35,8 @@ var delegatedDenyPatterns = []string{
 	"PUT /v1/hosts/{id}/shares/{project_id}",
 	"DELETE /v1/hosts/{id}/shares/{project_id}",
 	"PATCH /v1/services/{id}",
+	"PUT /v1/projects/{id}/env-sets/{set}/keys/{key}",
+	"DELETE /v1/projects/{id}/env-sets/{set}/keys/{key}",
 }
 
 var delegatedAllowPatterns = []string{
@@ -134,6 +136,14 @@ func TestDelegatedWriteRoutesDenied(t *testing.T) {
 		{"PATCH /v1/services/{id}", http.MethodPatch, "/v1/services/" + sc.svc.ID.String(), `{"display_name":"Renamed"}`, func(t *testing.T) string {
 			return displayName(t, w, sc.svc.ID)
 		}},
+		{"PUT /v1/projects/{id}/env-sets/{set}/keys/{key}", http.MethodPut, "/v1/projects/" + project + "/env-sets/svc/keys/TOKEN",
+			`{"value":"nope"}`, func(t *testing.T) string {
+				return envSnap(t, w, sc.project.ID, "svc")
+			}},
+		{"DELETE /v1/projects/{id}/env-sets/{set}/keys/{key}", http.MethodDelete, "/v1/projects/" + project + "/env-sets/svc/keys/TOKEN",
+			"", func(t *testing.T) string {
+				return envSnap(t, w, sc.project.ID, "svc")
+			}},
 	}
 	if len(cases) != len(delegatedDenyPatterns) {
 		t.Fatalf("cases %d, deny list %d", len(cases), len(delegatedDenyPatterns))
@@ -376,6 +386,22 @@ func undeclaredDelegated(routes []route, deny []string) []string {
 		out = append(out, rt.pattern)
 	}
 	return out
+}
+
+func envSnap(t *testing.T, w *world, projectID uuid.UUID, name string) string {
+	t.Helper()
+	set, err := w.mem.GetEnvSet(context.Background(), projectID, name)
+	if errors.Is(err, store.ErrNotFound) {
+		return "missing"
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(set.Keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }
 
 func assertDelegatedDenied(t *testing.T, row store.AuditEntry, actor uuid.UUID, pattern string) {
