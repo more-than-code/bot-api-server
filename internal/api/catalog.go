@@ -16,28 +16,30 @@ import (
 )
 
 type catalogBody struct {
-	Name    string            `json:"name"`
-	Kind    string            `json:"kind"`
-	Command string            `json:"command"`
-	Shell   bool              `json:"shell"`
-	Dir     string            `json:"dir"`
-	RunAs   string            `json:"run_as"`
-	Env     map[string]string `json:"env"`
-	Port    *int              `json:"port"`
-	Restart string            `json:"restart"`
-	Spec    json.RawMessage   `json:"spec"`
+	Name           string            `json:"name"`
+	Kind           string            `json:"kind"`
+	Command        string            `json:"command"`
+	Shell          bool              `json:"shell"`
+	Dir            string            `json:"dir"`
+	RunAs          string            `json:"run_as"`
+	Env            map[string]string `json:"env"`
+	Port           *int              `json:"port"`
+	Restart        string            `json:"restart"`
+	Spec           json.RawMessage   `json:"spec"`
+	IdempotencyKey string            `json:"idempotency_key"`
 }
 
 type catalogReplaceBody struct {
-	Kind    string            `json:"kind"`
-	Command string            `json:"command"`
-	Shell   bool              `json:"shell"`
-	Dir     string            `json:"dir"`
-	RunAs   string            `json:"run_as"`
-	Env     map[string]string `json:"env"`
-	Port    *int              `json:"port"`
-	Restart string            `json:"restart"`
-	Spec    json.RawMessage   `json:"spec"`
+	Kind           string            `json:"kind"`
+	Command        string            `json:"command"`
+	Shell          bool              `json:"shell"`
+	Dir            string            `json:"dir"`
+	RunAs          string            `json:"run_as"`
+	Env            map[string]string `json:"env"`
+	Port           *int              `json:"port"`
+	Restart        string            `json:"restart"`
+	Spec           json.RawMessage   `json:"spec"`
+	IdempotencyKey string            `json:"idempotency_key"`
 }
 
 func (s *Server) handleCatalogList(w http.ResponseWriter, r *http.Request) {
@@ -125,12 +127,16 @@ func (s *Server) handleCatalogCreate(w http.ResponseWriter, r *http.Request) {
 	if !decodeRaw(w, raw, &body) {
 		return
 	}
+	if p.Session.Kind == store.KindDelegated && body.Kind != "image" {
+		s.forbidProgram(w, r, p, id, audit.ActionCatalogCreate)
+		return
+	}
 	if body.Kind == "image" {
 		if programFieldsSet(body.Command, body.Dir, body.RunAs, body.Restart, body.Shell, body.Env, body.Port) {
 			writeCode(w, "bad_request", "invalid json")
 			return
 		}
-		s.writeImage(w, r, p, id, body.Name, body.Spec, false)
+		s.writeImage(w, r, p, id, body.Name, body.Spec, body.IdempotencyKey, false)
 		return
 	}
 	if specPresent(body.Spec) {
@@ -216,6 +222,10 @@ func (s *Server) handleCatalogPut(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	if p.Session.Kind == store.KindDelegated && (body.Kind != "image" || existing.Kind != "image") {
+		s.forbidProgram(w, r, p, id, audit.ActionCatalogUpdate)
+		return
+	}
 	if body.Kind != existing.Kind {
 		writeCode(w, "bad_request", "kind must be "+existing.Kind)
 		return
@@ -225,7 +235,7 @@ func (s *Server) handleCatalogPut(w http.ResponseWriter, r *http.Request) {
 			writeCode(w, "bad_request", "invalid json")
 			return
 		}
-		s.writeImage(w, r, p, id, name, body.Spec, true)
+		s.writeImage(w, r, p, id, name, body.Spec, body.IdempotencyKey, true)
 		return
 	}
 	if specPresent(body.Spec) {
@@ -270,6 +280,10 @@ func (s *Server) handleCatalogDelete(w http.ResponseWriter, r *http.Request) {
 		writeCode(w, "not_found", "not found")
 		return
 	}
+	if p.Session.Kind == store.KindDelegated {
+		s.issueCatalogDelete(w, r, p, id, name)
+		return
+	}
 	entry, err := s.Store.DeleteCatalogEntry(r.Context(), id, name)
 	if err != nil {
 		s.fail(w, err)
@@ -312,6 +326,9 @@ func (s *Server) handleCatalogPermPut(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := authz.Authorize(r.Context(), p.User.ID, id, authz.CapProjectWrite); err != nil {
 		s.deny(w, r, p, idPtr(id), nil, nil, audit.ActionCatalogPermissions, err)
+		return
+	}
+	if s.refuseDelegated(w, r, p, idPtr(id), nil, audit.ActionCatalogPermissions) {
 		return
 	}
 	name := r.PathValue("name")
@@ -378,6 +395,9 @@ func (s *Server) handleCatalogApprove(w http.ResponseWriter, r *http.Request) {
 		s.deny(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), nil, audit.ActionCatalogApprove, err)
 		return
 	}
+	if s.refuseDelegated(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), audit.ActionCatalogApprove) {
+		return
+	}
 	var body struct {
 		EntryID  string `json:"entry_id"`
 		SpecHash string `json:"spec_hash"`
@@ -411,6 +431,9 @@ func (s *Server) handleCatalogApprovalDelete(w http.ResponseWriter, r *http.Requ
 	}
 	if err := authz.Authorize(r.Context(), p.User.ID, host.ProjectID, authz.CapMembers); err != nil {
 		s.deny(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), nil, audit.ActionCatalogApprovalRevoke, err)
+		return
+	}
+	if s.refuseDelegated(w, r, p, idPtr(host.ProjectID), idPtr(host.ID), audit.ActionCatalogApprovalRevoke) {
 		return
 	}
 	entryID, err := uuid.Parse(r.PathValue("entry_id"))

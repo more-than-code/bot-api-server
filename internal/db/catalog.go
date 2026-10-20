@@ -12,6 +12,24 @@ import (
 )
 
 func (d *DB) CreateCatalogEntry(ctx context.Context, projectID uuid.UUID, in store.CatalogWrite) (store.CatalogEntry, error) {
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return store.CatalogEntry{}, mapErr(err)
+	}
+	defer tx.Rollback(ctx)
+	entry, err := insertCatalogEntry(ctx, tx, projectID, in)
+	if err != nil {
+		return store.CatalogEntry{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.CatalogEntry{}, mapErr(err)
+	}
+	return entry, nil
+}
+
+// insertCatalogEntry is the console create path. CommitCatalogWrite uses it
+// inside the confirmation transaction.
+func insertCatalogEntry(ctx context.Context, tx pgx.Tx, projectID uuid.UUID, in store.CatalogWrite) (store.CatalogEntry, error) {
 	kind := in.Kind
 	if kind == "" {
 		kind = "program"
@@ -20,11 +38,6 @@ func (d *DB) CreateCatalogEntry(ctx context.Context, projectID uuid.UUID, in sto
 	if err != nil {
 		return store.CatalogEntry{}, err
 	}
-	tx, err := d.pool.Begin(ctx)
-	if err != nil {
-		return store.CatalogEntry{}, mapErr(err)
-	}
-	defer tx.Rollback(ctx)
 	id := uuid.New()
 	entry, err := scanCatalog(tx.QueryRow(ctx, `
 INSERT INTO app.catalog_entries (
@@ -42,9 +55,6 @@ RETURNING id::text, project_id::text, name, kind, spec, spec_hash, command_displ
 	if err := insertDefaultGrants(ctx, tx, entry.ID, kind); err != nil {
 		return store.CatalogEntry{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return store.CatalogEntry{}, mapErr(err)
-	}
 	return entry, nil
 }
 
@@ -60,15 +70,28 @@ VALUES ($1::uuid, 'role:admin', $2::text[]), ($1::uuid, 'role:viewer', $3::text[
 }
 
 func (d *DB) ReplaceCatalogEntry(ctx context.Context, projectID uuid.UUID, name string, in store.CatalogWrite) (string, store.CatalogEntry, error) {
-	spec, err := marshalWrite(in)
-	if err != nil {
-		return "", store.CatalogEntry{}, err
-	}
 	tx, err := d.pool.Begin(ctx)
 	if err != nil {
 		return "", store.CatalogEntry{}, mapErr(err)
 	}
 	defer tx.Rollback(ctx)
+	old, entry, err := replaceCatalogEntry(ctx, tx, projectID, name, in)
+	if err != nil {
+		return "", store.CatalogEntry{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", store.CatalogEntry{}, mapErr(err)
+	}
+	return old, entry, nil
+}
+
+// replaceCatalogEntry is the console replace path, including the approval
+// void when spec_hash changes. The caller holds the transaction.
+func replaceCatalogEntry(ctx context.Context, tx pgx.Tx, projectID uuid.UUID, name string, in store.CatalogWrite) (string, store.CatalogEntry, error) {
+	spec, err := marshalWrite(in)
+	if err != nil {
+		return "", store.CatalogEntry{}, err
+	}
 	var old string
 	var id string
 	err = tx.QueryRow(ctx, `
@@ -95,9 +118,6 @@ RETURNING id::text, project_id::text, name, kind, spec, spec_hash, command_displ
 	if err != nil {
 		return "", store.CatalogEntry{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", store.CatalogEntry{}, mapErr(err)
-	}
 	return old, entry, nil
 }
 
@@ -107,12 +127,7 @@ func (d *DB) DeleteCatalogEntry(ctx context.Context, projectID uuid.UUID, name s
 		return store.CatalogEntry{}, mapErr(err)
 	}
 	defer tx.Rollback(ctx)
-	entry, err := scanCatalog(tx.QueryRow(ctx, `
-DELETE FROM app.catalog_entries
-WHERE project_id = $1::uuid AND name = $2
-RETURNING id::text, project_id::text, name, kind, spec, spec_hash, command_display,
-          created_by::text, created_at, updated_at
-`, projectID.String(), name))
+	entry, err := deleteCatalogEntry(ctx, tx, projectID, name)
 	if err != nil {
 		return store.CatalogEntry{}, err
 	}
@@ -120,6 +135,17 @@ RETURNING id::text, project_id::text, name, kind, spec, spec_hash, command_displ
 		return store.CatalogEntry{}, mapErr(err)
 	}
 	return entry, nil
+}
+
+// deleteCatalogEntry removes the entry. Grants, approvals, and action
+// confirmations cascade. Service rows are not touched.
+func deleteCatalogEntry(ctx context.Context, tx pgx.Tx, projectID uuid.UUID, name string) (store.CatalogEntry, error) {
+	return scanCatalog(tx.QueryRow(ctx, `
+DELETE FROM app.catalog_entries
+WHERE project_id = $1::uuid AND name = $2
+RETURNING id::text, project_id::text, name, kind, spec, spec_hash, command_display,
+          created_by::text, created_at, updated_at
+`, projectID.String(), name))
 }
 
 func (d *DB) GetCatalogEntry(ctx context.Context, projectID uuid.UUID, name string) (store.CatalogEntry, error) {

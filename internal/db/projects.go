@@ -215,7 +215,12 @@ WHERE project_id = $1::uuid
 	}
 	// Soft-delete does not cascade. Catalog DELETE is granted, and it
 	// removes grants, approvals, and confirmations with the entry.
+	// Catalog-write plans reference the project, not the entry, so they
+	// are removed here. The project row stays, and the foreign key does not fire.
 	if err := exec(ctx, tx, `DELETE FROM app.catalog_entries WHERE project_id = $1::uuid`, id.String()); err != nil {
+		return nil, mapErr(err)
+	}
+	if err := exec(ctx, tx, `DELETE FROM app.catalog_write_confirmations WHERE project_id = $1::uuid`, id.String()); err != nil {
 		return nil, mapErr(err)
 	}
 	if err := exec(ctx, tx, `DELETE FROM app.env_sets WHERE project_id = $1::uuid`, id.String()); err != nil {

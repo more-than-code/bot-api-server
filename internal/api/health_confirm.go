@@ -80,7 +80,8 @@ func (s *Server) confirmServiceHealth(w http.ResponseWriter, r *http.Request, p 
 	c, err := s.Store.GetServiceConfirmation(r.Context(), hash)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeCode(w, "not_found", "not found")
+			// v1.12: a miss of both earlier tables loads catalog_write_confirmations.
+			s.confirmCatalogWrite(w, r, p, hash, key)
 			return
 		}
 		s.fail(w, err)

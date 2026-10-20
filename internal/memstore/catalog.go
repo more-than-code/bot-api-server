@@ -92,6 +92,10 @@ func normWrite(spec store.ProgramSpec) store.ProgramSpec {
 func (m *Mem) CreateCatalogEntry(_ context.Context, projectID uuid.UUID, in store.CatalogWrite) (store.CatalogEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.createCatalogEntryLocked(projectID, in)
+}
+
+func (m *Mem) createCatalogEntryLocked(projectID uuid.UUID, in store.CatalogWrite) (store.CatalogEntry, error) {
 	p, ok := m.projects[projectID]
 	if !ok || p.DeletedAt != nil {
 		return store.CatalogEntry{}, store.ErrNotFound
@@ -129,6 +133,10 @@ func (m *Mem) CreateCatalogEntry(_ context.Context, projectID uuid.UUID, in stor
 func (m *Mem) ReplaceCatalogEntry(_ context.Context, projectID uuid.UUID, name string, in store.CatalogWrite) (string, store.CatalogEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.replaceCatalogEntryLocked(projectID, name, in)
+}
+
+func (m *Mem) replaceCatalogEntryLocked(projectID uuid.UUID, name string, in store.CatalogWrite) (string, store.CatalogEntry, error) {
 	id, ok := m.entryByName[entryKey(projectID, name)]
 	if !ok {
 		return "", store.CatalogEntry{}, store.ErrNotFound
@@ -153,6 +161,10 @@ func (m *Mem) ReplaceCatalogEntry(_ context.Context, projectID uuid.UUID, name s
 func (m *Mem) DeleteCatalogEntry(_ context.Context, projectID uuid.UUID, name string) (store.CatalogEntry, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.deleteCatalogEntryLocked(projectID, name)
+}
+
+func (m *Mem) deleteCatalogEntryLocked(projectID uuid.UUID, name string) (store.CatalogEntry, error) {
 	id, ok := m.entryByName[entryKey(projectID, name)]
 	if !ok {
 		return store.CatalogEntry{}, store.ErrNotFound
@@ -524,6 +536,11 @@ func (m *Mem) deleteCatalogLocked(projectID uuid.UUID) {
 	}
 	for _, id := range ids {
 		m.deleteEntryLocked(id)
+	}
+	for key, rec := range m.catalogWriteConfirmations {
+		if rec.row.ProjectID == projectID {
+			delete(m.catalogWriteConfirmations, key)
+		}
 	}
 }
 

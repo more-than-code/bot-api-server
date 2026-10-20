@@ -2,6 +2,7 @@ package store
 
 import (
 	"encoding/json"
+	"reflect"
 	"regexp"
 	"time"
 
@@ -189,6 +190,39 @@ type ServiceConfirmation struct {
 	CreatedAt      time.Time
 	ExpiresAt      time.Time
 	UsedAt         *time.Time
+}
+
+// CatalogWriteConfirmation is a single-use delegated catalog create, update,
+// or delete. It is stored by token hash in app.catalog_write_confirmations.
+// Body is the normalized ImageSpec for create and update, and nil for delete.
+// It is never returned on the 202. BaseSpecHash is empty for create; the
+// store writes that empty string, and a nil Body, as SQL NULL. RequestHash
+// binds the request. It does not include the idempotency key.
+type CatalogWriteConfirmation struct {
+	UserID         uuid.UUID
+	ProjectID      uuid.UUID
+	Action         string
+	EntryName      string
+	BaseSpecHash   string
+	Body           json.RawMessage
+	RequestHash    []byte
+	IdempotencyKey string
+	CreatedAt      time.Time
+	ExpiresAt      time.Time
+	UsedAt         *time.Time
+}
+
+// SameJSON reports whether a and b are the same JSON value.
+// Object key order does not matter. A nil slice and a JSON null are not equal.
+func SameJSON(a, b []byte) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return len(a) == 0 && len(b) == 0
+	}
+	var left, right any
+	if json.Unmarshal(a, &left) != nil || json.Unmarshal(b, &right) != nil {
+		return false
+	}
+	return reflect.DeepEqual(left, right)
 }
 
 // IdempotencyRecord is one stored run, stop, or restart response.

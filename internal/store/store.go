@@ -642,6 +642,21 @@ type Store interface {
 	// Unknown, used, expired, and foreign plans are ErrNotFound.
 	// The console ReplaceHealthChecks takes the same service lock.
 	CommitHealthReplacement(ctx context.Context, hash []byte, userID uuid.UUID, at time.Time) ([]HealthCheck, error)
+	// PutCatalogWriteConfirmation inserts one catalog-write plan. A duplicate token hash is ErrConflict.
+	PutCatalogWriteConfirmation(ctx context.Context, hash []byte, c CatalogWriteConfirmation) error
+	GetCatalogWriteConfirmation(ctx context.Context, hash []byte) (CatalogWriteConfirmation, error)
+	// CountEntryApprovals is the host-approval rows for the named entry, pending and approved.
+	// A missing entry is 0.
+	CountEntryApprovals(ctx context.Context, projectID uuid.UUID, name string) (int, error)
+	// CommitCatalogWrite locks the plan, re-checks the name or spec_hash, applies
+	// the write through the console create, replace, or delete path, and marks
+	// the plan used. in.Name must equal the row's entry name. For create and
+	// update, in.ImageRaw must be the same JSON value as the stored body.
+	// A taken create name, a spec_hash mismatch, a missing update or delete
+	// entry, or a body mismatch is ErrConflict and does not mark the plan.
+	// Unknown, used, expired, and foreign plans are ErrNotFound.
+	// oldHash is empty for create and is the previous hash for update.
+	CommitCatalogWrite(ctx context.Context, hash []byte, userID uuid.UUID, at time.Time, in CatalogWrite) (oldHash string, entry CatalogEntry, err error)
 	// GetIdempotency returns ErrNotFound when the key is missing or older than IdempotencyTTL.
 	// A stale row is deleted. A claimed row with no response has Pending set.
 	GetIdempotency(ctx context.Context, userID uuid.UUID, key string, at time.Time) (IdempotencyRecord, error)

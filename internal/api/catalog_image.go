@@ -443,7 +443,7 @@ func (s *Server) performImage(w http.ResponseWriter, r *http.Request, p principa
 	})
 }
 
-func (s *Server) writeImage(w http.ResponseWriter, r *http.Request, p principal, projectID uuid.UUID, name string, raw json.RawMessage, replace bool) {
+func (s *Server) writeImage(w http.ResponseWriter, r *http.Request, p principal, projectID uuid.UUID, name string, raw json.RawMessage, key string, replace bool) {
 	names, err := s.Store.ListEnvKeyNames(r.Context(), projectID)
 	if err != nil {
 		s.fail(w, err)
@@ -462,11 +462,11 @@ func (s *Server) writeImage(w http.ResponseWriter, r *http.Request, p principal,
 		s.writeField(w, err)
 		return
 	}
-	digests := map[string]string{}
-	for _, set := range catalog.ReferencedSets(img) {
-		digests[set] = catalog.EnvKeyDigest(names[set])
+	hash := catalog.ImageHash(img, digestMap(names, img))
+	if p.Session.Kind == store.KindDelegated {
+		s.issueCatalogImage(w, r, p, projectID, name, img, hash, key, replace)
+		return
 	}
-	hash := catalog.ImageHash(img, digests)
 	in := store.CatalogWrite{
 		Name: name, Kind: "image", ImageRaw: json.RawMessage(catalog.SpecJSON(img)),
 		SpecHash: hash, CommandDisplay: img.Image, Actor: p.User.ID, At: s.now(),
