@@ -373,6 +373,16 @@ func TestDelegatedCatalogConsoleOnly(t *testing.T) {
 	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
 	status, env, _ = mustCall(t, c.w, c.tok, http.MethodPut, "/v1/projects/"+project+"/env-sets/svc", `{"dotenv":"TOKEN=super-secret-value-zz"}`)
 	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
+	status, env, _ = mustCall(t, c.w, c.tok, http.MethodGet, "/v1/projects/"+project+"/env-sets", "")
+	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
+	status, env, _ = mustCall(t, c.w, c.tok, http.MethodGet, "/v1/projects/"+project+"/env-sets/svc", "")
+	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
+	status, env, _ = mustCall(t, c.w, c.tok, http.MethodDelete, "/v1/projects/"+project+"/env-sets/svc", "")
+	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
+	status, env, _ = mustCall(t, c.w, c.tok, http.MethodPatch, "/v1/projects/"+project+"/env-sets/svc/keys/TOKEN", `{"is_secret":true}`)
+	mustHTTP(t, status, env, http.StatusForbidden, "forbidden", "forbidden")
+	status, env, _ = mustCall(t, c.w, c.console, http.MethodGet, "/v1/projects/"+project+"/env-sets", "")
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
 	status, env, _ = mustCall(t, c.w, c.tok, http.MethodGet, catalogItem(c.sc.project.ID, "web")+"/permissions", "")
 	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
 	status, env, _ = mustCall(t, c.w, c.tok, http.MethodGet, "/v1/hosts/"+host+"/catalog-approvals", "")
@@ -387,6 +397,11 @@ func TestDelegatedCatalogConsoleOnly(t *testing.T) {
 	requireDelegatedDenial(t, rows, audit.ActionCatalogPermissions, 1)
 	requireDelegatedDenial(t, rows, audit.ActionCatalogApprove, 1)
 	requireDelegatedDenial(t, rows, audit.ActionCatalogApprovalRevoke, 1)
+	requireDelegatedDenial(t, rows, audit.ActionEnvSetReplace, 1)
+	requireDelegatedDenial(t, rows, audit.ActionEnvSetDelete, 1)
+	requireDelegatedDenial(t, rows, audit.ActionEnvSetVisibility, 1)
+	requireDelegatedDenial(t, rows, audit.ActionEnvSetList, 1)
+	requireDelegatedDenial(t, rows, audit.ActionEnvSetGet, 1)
 }
 
 func TestCatalogWriteConfirmedViaConsole(t *testing.T) {

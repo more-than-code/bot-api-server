@@ -56,6 +56,8 @@ const (
 	ActionEnvSetReplace            = "env_set.replace"
 	ActionEnvSetVisibility         = "env_set.key_visibility"
 	ActionEnvSetDelete             = "env_set.delete"
+	ActionEnvSetList               = "env_set.list"
+	ActionEnvSetGet                = "env_set.get"
 	ActionRegistryPut              = "registry.put"
 	ActionRegistryDelete           = "registry.delete"
 	ActionFilePut                  = "file.put"

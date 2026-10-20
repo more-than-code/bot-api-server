@@ -31,7 +31,7 @@ func (s *Server) handleEnvSetList(w http.ResponseWriter, r *http.Request) {
 		s.writeAuth(w, err)
 		return
 	}
-	if !requireConsole(w, p) {
+	if s.refuseDelegated(w, r, p, idPtr(id), nil, audit.ActionEnvSetList) || !requireConsole(w, p) {
 		return
 	}
 	items, err := s.Store.ListEnvSets(r.Context(), id)
@@ -51,7 +51,7 @@ func (s *Server) handleEnvSetGet(w http.ResponseWriter, r *http.Request) {
 		s.writeAuth(w, err)
 		return
 	}
-	if !requireConsole(w, p) {
+	if s.refuseDelegated(w, r, p, idPtr(id), nil, audit.ActionEnvSetGet) || !requireConsole(w, p) {
 		return
 	}
 	name, ok := envSetName(w, r)
@@ -75,7 +75,7 @@ func (s *Server) handleEnvSetPut(w http.ResponseWriter, r *http.Request) {
 		s.writeAuth(w, err)
 		return
 	}
-	if !requireConsole(w, p) {
+	if s.refuseDelegated(w, r, p, idPtr(id), nil, audit.ActionEnvSetReplace) || !requireConsole(w, p) {
 		return
 	}
 	name, ok := envSetName(w, r)
@@ -139,7 +139,7 @@ func (s *Server) handleEnvSetDelete(w http.ResponseWriter, r *http.Request) {
 		s.writeAuth(w, err)
 		return
 	}
-	if !requireConsole(w, p) {
+	if s.refuseDelegated(w, r, p, idPtr(id), nil, audit.ActionEnvSetDelete) || !requireConsole(w, p) {
 		return
 	}
 	name, ok := envSetName(w, r)
@@ -167,7 +167,7 @@ func (s *Server) handleEnvKeyPatch(w http.ResponseWriter, r *http.Request) {
 		s.writeAuth(w, err)
 		return
 	}
-	if !requireConsole(w, p) {
+	if s.refuseDelegated(w, r, p, idPtr(id), nil, audit.ActionEnvSetVisibility) || !requireConsole(w, p) {
 		return
 	}
 	name, ok := envSetName(w, r)
