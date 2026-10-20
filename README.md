@@ -1,6 +1,6 @@
 # bot-api-server
 
-Go service for deploybot: Google OAuth sign-in and sessions, projects and members, join tokens and host credentials, the bot-agent WebSocket, metrics ingest into Postgres `deploybot`, live probes, and the REST API used by bot-console and bot-mcp-server.
+Go service for Deploybot: Google OAuth sign-in and sessions, projects and members, join tokens and host credentials, the bot-agent WebSocket, metrics ingest into Postgres `deploybot`, live probes, and the REST API used by bot-console and bot-mcp-server.
 
 - Design: `docs/design.md`
 - Contracts (frozen, do not edit here): `docs/contracts/api-v1.md`, `docs/contracts/oauth-v1.md`, and `docs/contracts/agent-protocol-v1.md`.

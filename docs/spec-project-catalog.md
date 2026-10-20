@@ -14,7 +14,7 @@
 1. A project owner curates a **catalog** of named things members may run: programs (a command in a directory, run as an allowed account) and images (container image patterns).
 2. The owner decides, per entry, which roles or members may run, stop, restart and read logs.
 3. bot-agent runs catalog entries on hosts that allow it. **Free-form commands are never accepted.**
-4. Anything started through deploybot appears as a service with its **exact name**, without CAP_SYS_PTRACE.
+4. Anything started through Deploybot appears as a service with its **exact name**, without CAP_SYS_PTRACE.
 
 ## 2. Threat model (what the design must hold)
 
@@ -169,7 +169,7 @@ The policy is reported in `hello` capabilities, as a hash plus the `enabled` fla
 
 1. **Existing systemd units are not adopted.** pi1's `tra-backend`, `tra-webapp` and the other user units are **re-created as catalog entries**. The old user units are stopped and disabled by hand once each entry runs; there is no `adoptable_units` in the policy.
 2. **Code updates stay out of scope.** A `git pull` / build step for programs is not part of phase 2b. Programs run whatever is in `dir`.
-3. **No unprivileged naming guess.** Services not started through deploybot keep the `port <n> · <user>` default and can be renamed (v1.2). Exact names come from catalog entries.
+3. **No unprivileged naming guess.** Services not started through Deploybot keep the `port <n> · <user>` default and can be renamed (v1.2). Exact names come from catalog entries.
 
 ## 7a. Sequencing (Joe, 2026-10-14)
 

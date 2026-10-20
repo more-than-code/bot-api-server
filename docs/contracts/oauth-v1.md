@@ -1,4 +1,4 @@
-# Contract: deploybot OAuth v1 (MCP authorization)
+# Contract: Deploybot OAuth v1 (MCP authorization)
 
 **Status:** Frozen 2026-10-14, from the approved spec `docs/spec-mcp-oauth.md`. Copies in the repos must not be edited; amendments go in a new dated section at the end.
 

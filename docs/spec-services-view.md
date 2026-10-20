@@ -1,4 +1,4 @@
-# Spec: Services tab shows deploybot services; gone services
+# Spec: Services tab shows Deploybot services; gone services
 
 **Status:** approved by Joe 2026-10-15 ("ye"), including the three-option Show select
 **Tier:** 3 (api-v1 contract, migration 0008, console, MCP tool, small agent fix)
@@ -11,8 +11,8 @@ Joe, 2026-10-15: "Expect the table show services created from the bot agent only
 Today the project's Services tab lists every listener the agent has ever reported, and never hides one that went away. pi1 shows `port 3031 · joe` (the old user unit, last seen 14:00) next to `tra-backend · catalog` (the catalog unit, last seen 14:13), though neither runs. Rows from yesterday (3021, 5174) are still listed too.
 
 Decisions (Joe, AskUserQuestion, 2026-10-15):
-1. By default the tab shows only **deploybot services** (source `owned` or `declared`). A toggle reveals discovered listeners, which mohiguide still needs for health checks and wave 2 adoption.
-2. A service the agent no longer reports is **gone**. Gone discovered rows are hidden by default. Owned rows stay and show as **stopped**, since deploybot can start them again.
+1. By default the tab shows only **Deploybot services** (source `owned` or `declared`). A toggle reveals discovered listeners, which mohiguide still needs for health checks and wave 2 adoption.
+2. A service the agent no longer reports is **gone**. Gone discovered rows are hidden by default. Owned rows stay and show as **stopped**, since Deploybot can start them again.
 
 ## 2. Approach
 
@@ -49,7 +49,7 @@ Nothing else changes: `GET /v1/hosts/{id}/services` (host page), health checks, 
 |---|---|
 | umbrella | `docs/contracts/api-v1.md` v1.7 section (copied into each repo's `docs/contracts/`); this spec; `AGENTS.md` (migrations through 0008, contract list). |
 | bot-api-server | Migration `0008_service_gone.sql` (+ hand-run `.down.sql`): `services.gone_at timestamptz NULL`. Backfill: on each host, rows whose `last_seen_at` is earlier than the host's newest `last_seen_at` get `gone_at = last_seen_at`. Every report upserts all present rows with the same `at`, so the newest value marks the latest report. `UpsertDiscovered` (db + memstore) marks and clears `gone_at` in the same transaction. List query adds `view` (validated, in SQL), sort puts gone rows last for `status`, and the cursor carries the view. `Service` JSON gains `gone_at`. |
-| bot-console | Services tab: a **Show** select above the table, with options "deploybot services" (default, `view=deploybot`), "Also discovered" (`deploybot_and_discovered`) and "Everything, including gone" (`all`). It is kept in the URL (`?show=`) like the host filter. The Status cell shows a **stopped** badge for an owned/declared row with `gone_at`, and **gone** for a discovered one, instead of the health status. The empty state for the default view reads "No services run by deploybot yet. Show discovered listeners." (link to the second view). |
+| bot-console | Services tab: a **Show** select above the table, with options "Deploybot services" (default, `view=deploybot`), "Also discovered" (`deploybot_and_discovered`) and "Everything, including gone" (`all`). It is kept in the URL (`?show=`) like the host filter. The Status cell shows a **stopped** badge for an owned/declared row with `gone_at`, and **gone** for a discovered one, instead of the health status. The empty state for the default view reads "No services run by Deploybot yet. Show discovered listeners." (link to the second view). |
 | bot-mcp-server | `list_services` gains an optional `view` argument (same three values, default `all`) and returns `gone_at`. The tool description says gone rows are listeners no longer reported. |
 | bot-agent | `discover()` today turns a failed process scan into an **empty** set, and a failed owned-program lookup (helper) into a set **without** the catalog programs; both are then sent as the full set. Under this spec they would mark every service gone, or show running catalog programs as stopped. Change: when the scan fails, or when the policy is enabled and the owned lookup fails, `maybeServices` sends nothing for that cycle (the API keeps the last state; the existing log lines stay). The first-ever report after start waits for a successful scan. agent-protocol v1.3.2: a services report is only sent from a complete discovery; `hello` gains `services_complete` (absent = true), because `hello.services` is also stored and an incomplete first discovery must not mark rows gone (found while freezing the contract, 2026-10-15). |
 

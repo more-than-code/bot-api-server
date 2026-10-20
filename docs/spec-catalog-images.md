@@ -308,7 +308,7 @@ run/stop/restart/logs/status reuse the wave 1 routes and dispatch by kind. Check
 
 ## 7. Rollback
 
-- **Per host:** set `images = []` (or remove `projects`) in `runner.toml`, then the helper refuses image verbs. Or revert the helper unit's `ReadWritePaths=/var/run/docker.sock`. Containers deploybot created keep running under their restart policy; remove them by hand if wanted.
+- **Per host:** set `images = []` (or remove `projects`) in `runner.toml`, then the helper refuses image verbs. Or revert the helper unit's `ReadWritePaths=/var/run/docker.sock`. Containers Deploybot created keep running under their restart policy; remove them by hand if wanted.
 - **API, console and MCP:** revert the commits; image entries become `not_implemented` again. Migration 0009 has a down script that drops the encrypted data, so take a dump first.
 - **mohiguide:** the pilot is shadow-only. Remove the `mohiguide-webadmin` container and volume; swag never pointed at them.
 
@@ -386,7 +386,7 @@ These rules are normative and take precedence over the earlier text where they a
    - **`secret_env`:** references resolve only within the entry's own project. The set name follows `^[a-z0-9][a-z0-9-]{0,47}$` and is split at the first `.`.
    - **Previews, the MCP D25 plan, the history and audit** show key names and secret/plain flags only, never values. That includes the console `docker run` preview, which shows `-e KEY` for set and secret keys.
 9. **Honesty about leaks (§3.4 addendum):** redaction of stdout/logs is a best-effort filter, not a boundary. Anyone allowed to `deploy` can choose a command or image that prints a value in another encoding or sends it over the network. Containers keep outbound network access, which apps such as mo-services need for FCM.
-10. **Network scope (decision 3 clarified):** in 2a only deploybot-created containers of one project share `deploybot-<slug>`. Compose containers (swag and the others) are **not** attached, so name resolution between swag and a deploybot container only works once both run under deploybot (the full move). The helper never connects a container to any network other than its project's. Docker's inter-bridge isolation is assumed (the default iptables setup); the live check confirms it on pi3 and mohiguide.
+10. **Network scope (decision 3 clarified):** in 2a only Deploybot-created containers of one project share `deploybot-<slug>`. Compose containers (swag and the others) are **not** attached, so name resolution between swag and a Deploybot container only works once both run under Deploybot (the full move). The helper never connects a container to any network other than its project's. Docker's inter-bridge isolation is assumed (the default iptables setup); the live check confirms it on pi3 and mohiguide.
 11. **Shared hosts:** the approval covers the spec, the env-set names and the key names, but not values. A guest project can change secret values without a new approval; that is accepted and documented (the host owner approves *what runs*, not the guest's credentials).
 
 ## 13. Changes during implementation (all approved by Joe, 2026-10-15/16)

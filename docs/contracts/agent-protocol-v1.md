@@ -177,7 +177,7 @@ Supersedes the "whenever its discovered set changes (checked every 60 s)" senten
 
 ### Host policy
 
-`/etc/bot-agent/runner.toml`, written by the host's administrator, never by deploybot:
+`/etc/bot-agent/runner.toml`, written by the host's administrator, never by Deploybot:
 
 ```toml
 enabled = true
@@ -400,7 +400,7 @@ A content-only change could not be rolled back: `image_rollback` redeployed the 
 
 ## v1.6 Docker health status (2026-10-18, approved spec `docs/spec-docker-health.md` rev 1; additive, gated)
 
-Containers whose image defines a Docker `HEALTHCHECK` report Docker's verdict; deploybot checks remain the fallback (api-v1 v1.11).
+Containers whose image defines a Docker `HEALTHCHECK` report Docker's verdict; Deploybot checks remain the fallback (api-v1 v1.11).
 
 1. **`container_list`** items gain `"health": "healthy"|"unhealthy"|"starting"|null`. The helper takes it from the Engine's structured `Health.Status` when present, otherwise from the `Status` text suffix `(healthy)`, `(unhealthy)` or `(health: starting)`; any other value, or no suffix, is `null`. No new verb, call or privilege.
 2. **Gate:** `hello.programs` gains `"docker_health": true` from an agent that implements this section. The server sends `config.docker_health: true` only to a host that advertised it (an older agent refuses unknown config keys); an older server never sends it. `config_update` carries it the same way. Without `config.docker_health: true` the agent emits no docker samples.
@@ -415,3 +415,9 @@ Containers whose image defines a Docker `HEALTHCHECK` report Docker's verdict; d
 1. In image task output (log tails, error text) the agent replaces an env secret value from the task (raw, base64 and JSON-escaped forms, values of at least 6 bytes as before) with `preview(v)`: the first 4 runes followed by `…` when `v` has at least 16 runes, otherwise `••••`.
 2. Secret-file pieces keep `[REDACTED]`. The keyword rule is unchanged.
 3. The task frame is unchanged. An agent before v1.7 keeps writing `[REDACTED]`; the API accepts both.
+
+## v1.6.1 health-aware unchanged, first-deploy failure (2026-10-20, `docs/spec-docker-health.md` rev 3 §10, approved 2026-10-21; no wire change)
+
+1. **Unchanged** (amends rule 11 for service deploys): when the task's ImageSpec has `healthcheck`, `unchanged` also requires the current container's `container_list` health to be `healthy`; otherwise the agent deploys and waits per v1.6 item 7. Without `healthcheck`, rule 11 is unchanged.
+2. **Nothing good to roll back to:** a service deploy whose wait fails, when the container that was current before the deploy was not `running` (`missing`, `exited`, `created`, `dead`), does not call `container_rollback`. The agent calls `container_stop` on the new container (it is kept) and reports outcome `failed`, with that container's status and the last ≤ 50 redacted log lines. When it was `running`, v1.6 item 7 applies (`rolled_back` / `rollback_failed`). A parked older container stays on `-prev` and is not started. *(Amended 2026-10-21 from the w28 spec review.)*
+3. `image_rollback` and jobs are unchanged.
