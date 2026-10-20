@@ -757,12 +757,21 @@ func TestOAuthTokenExchange(t *testing.T) {
 	if me.Code != http.StatusOK {
 		t.Fatalf("delegated /v1/me %d %s", me.Code, me.Body.String())
 	}
+	// v1.12.1 refuses project create for an api_delegated token. The token still
+	// reaches /v1 (see /v1/me above), and the refusal is audited via mcp.
 	created := f.do(http.MethodPost, "/v1/projects", `{"name":"From MCP"}`, "application/json", delegated)
-	if created.Code != http.StatusCreated {
+	if created.Code != http.StatusForbidden {
 		t.Fatalf("delegated create %d %s", created.Code, created.Body.String())
 	}
-	if !auditHas(f.mem.AllAudits(), audit.ActionProjectCreate, audit.DecisionAllowed, audit.ViaMCP) {
-		t.Fatal("delegated audit via is not mcp")
+	var createdEnv envelope
+	if err := json.Unmarshal(created.Body.Bytes(), &createdEnv); err != nil || createdEnv.Code != "forbidden" || createdEnv.Msg != "forbidden" {
+		t.Fatalf("delegated create body %s", created.Body.String())
+	}
+	if !auditHas(f.mem.AllAudits(), audit.ActionDelegatedDenied, audit.DecisionDenied, audit.ViaMCP) {
+		t.Fatal("delegated denial via is not mcp")
+	}
+	if auditHas(f.mem.AllAudits(), audit.ActionProjectCreate, audit.DecisionAllowed, audit.ViaMCP) {
+		t.Fatal("delegated create was allowed")
 	}
 	again := f.exchange(accessForm(delegated), store.ClientMCP, mcpSecret)
 	oauthErr(t, again, http.StatusBadRequest, "invalid_grant")

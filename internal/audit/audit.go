@@ -62,6 +62,7 @@ const (
 	ActionRegistryDelete           = "registry.delete"
 	ActionFilePut                  = "file.put"
 	ActionFileDelete               = "file.delete"
+	ActionDelegatedDenied          = "delegated.denied"
 
 	ViaConsole = "console"
 	ViaMCP     = "mcp"

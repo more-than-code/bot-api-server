@@ -559,6 +559,17 @@ func TestCatalogConfirmationAndIdempotency(t *testing.T) {
 	if lines != 200 {
 		t.Fatalf("default lines %v", log.raw(2)["spec"])
 	}
+	// Delegated status uses the same connected agent as the logs call above.
+	// The del-1 confirm earlier in this test already returned 200.
+	status, env = postAct(w, delegated, project, "tra", "status", host, "", nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	if log.count() != 4 {
+		t.Fatalf("delegated status tasks %d", log.count())
+	}
+	delegatedStatus, _ := log.raw(3)["spec"].(map[string]any)
+	if log.raw(3)["kind"] != "program_status" || len(delegatedStatus) != 2 || delegatedStatus["project"] != "proj" || delegatedStatus["entry"] != "tra" {
+		t.Fatalf("delegated status %#v", log.raw(3))
+	}
 	rows := auditRows(t, w, sc.project.ID)
 	if auditCount(rows, "program.confirmation_issued", "allowed") != 1 || auditVia(t, rows, "program.confirmation_issued") != "mcp" {
 		t.Fatalf("confirmation audit %#v", rows)

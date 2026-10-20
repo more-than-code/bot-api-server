@@ -41,102 +41,114 @@ type Server struct {
 	imageBudget int
 }
 
+// delegatedPolicy says what an api_delegated session may do on a mutating route.
+// The zero value, delegatedDeny, refuses the call in the route wrapper, so a
+// route that sets nothing is refused.
+type delegatedPolicy int
+
+const (
+	delegatedDeny delegatedPolicy = iota
+	delegatedAllow
+	delegatedHandler
+)
+
 type route struct {
-	pattern string
-	public  bool
-	fn      func(*Server, http.ResponseWriter, *http.Request)
+	pattern   string
+	public    bool
+	fn        func(*Server, http.ResponseWriter, *http.Request)
+	delegated delegatedPolicy
 }
 
 func contractRoutes() []route {
 	return []route{
-		{"GET /health", true, (*Server).handleHealth},
-		{"GET /.well-known/oauth-authorization-server", true, (*Server).handleOAuthMetadata},
-		{"POST /oauth/register", true, (*Server).handleOAuthRegister},
-		{"GET /oauth/authorize", true, (*Server).handleOAuthAuthorize},
-		{"POST /oauth/token", true, (*Server).handleOAuthToken},
-		{"POST /oauth/revoke", true, (*Server).handleOAuthRevoke},
-		{"GET /v1/auth/google/start", true, (*Server).handleGoogleStart},
-		{"POST /v1/auth/google/callback", true, (*Server).handleGoogleCallback},
-		{"POST /v1/auth/signout", false, (*Server).handleSignOut},
-		{"GET /v1/me", false, (*Server).handleMe},
-		{"GET /v1/oauth/requests/{id}", false, (*Server).handleOAuthRequestGet},
-		{"POST /v1/oauth/requests/{id}/approve", false, (*Server).handleOAuthRequestApprove},
-		{"POST /v1/oauth/requests/{id}/deny", false, (*Server).handleOAuthRequestDeny},
-		{"GET /v1/me/grants", false, (*Server).handleGrantList},
-		{"DELETE /v1/me/grants/{id}", false, (*Server).handleGrantDelete},
-		{"POST /v1/auth/device/code", true, (*Server).handleDeviceCode},
-		{"POST /v1/auth/device/token", true, (*Server).handleDeviceToken},
-		{"GET /v1/auth/device/{user_code}", false, (*Server).handleDeviceGet},
-		{"POST /v1/auth/device/{user_code}/approve", false, (*Server).handleDeviceApprove},
-		{"POST /v1/auth/device/{user_code}/deny", false, (*Server).handleDeviceDeny},
-		{"POST /v1/projects", false, (*Server).handleProjectCreate},
-		{"GET /v1/projects", false, (*Server).handleProjectList},
-		{"GET /v1/projects/{id}", false, (*Server).handleProjectGet},
-		{"PATCH /v1/projects/{id}", false, (*Server).handleProjectPatch},
-		{"DELETE /v1/projects/{id}", false, (*Server).handleProjectDelete},
-		{"GET /v1/projects/{id}/members", false, (*Server).handleMemberList},
-		{"POST /v1/projects/{id}/members", false, (*Server).handleMemberAdd},
-		{"PATCH /v1/projects/{id}/members/{user_id}", false, (*Server).handleMemberPatch},
-		{"DELETE /v1/projects/{id}/members/{user_id}", false, (*Server).handleMemberDelete},
-		{"POST /v1/projects/{id}/transfer-ownership", false, (*Server).handleTransfer},
-		{"POST /v1/projects/{id}/join-tokens", false, (*Server).handleJoinCreate},
-		{"GET /v1/projects/{id}/join-tokens", false, (*Server).handleJoinList},
-		{"DELETE /v1/projects/{id}/join-tokens/{token_id}", false, (*Server).handleJoinRevoke},
-		{"POST /v1/projects/{id}/invites", false, (*Server).handleInviteCreate},
-		{"GET /v1/projects/{id}/invites", false, (*Server).handleInviteList},
-		{"DELETE /v1/projects/{id}/invites/{invite_id}", false, (*Server).handleInviteRevoke},
-		{"POST /v1/invites/lookup", false, (*Server).handleInviteLookup},
-		{"POST /v1/invites/accept", false, (*Server).handleInviteAccept},
-		{"POST /v1/projects/{id}/catalog/parse", false, (*Server).handleCatalogParse},
-		{"GET /v1/projects/{id}/catalog", false, (*Server).handleCatalogList},
-		{"POST /v1/projects/{id}/catalog", false, (*Server).handleCatalogCreate},
-		{"GET /v1/projects/{id}/catalog/{name}", false, (*Server).handleCatalogGet},
-		{"PUT /v1/projects/{id}/catalog/{name}", false, (*Server).handleCatalogPut},
-		{"DELETE /v1/projects/{id}/catalog/{name}", false, (*Server).handleCatalogDelete},
-		{"GET /v1/projects/{id}/catalog/{name}/permissions", false, (*Server).handleCatalogPermGet},
-		{"PUT /v1/projects/{id}/catalog/{name}/permissions", false, (*Server).handleCatalogPermPut},
-		{"POST /v1/projects/{id}/catalog/{name}/run", false, (*Server).handleCatalogRun},
-		{"POST /v1/projects/{id}/catalog/{name}/stop", false, (*Server).handleCatalogStop},
-		{"POST /v1/projects/{id}/catalog/{name}/restart", false, (*Server).handleCatalogRestart},
-		{"POST /v1/projects/{id}/catalog/{name}/logs", false, (*Server).handleCatalogLogs},
-		{"POST /v1/projects/{id}/catalog/{name}/status", false, (*Server).handleCatalogStatus},
-		{"POST /v1/projects/{id}/catalog/{name}/deploy", false, (*Server).handleCatalogDeploy},
-		{"POST /v1/projects/{id}/catalog/{name}/rollback", false, (*Server).handleCatalogRollback},
-		{"POST /v1/projects/{id}/catalog/{name}/remove", false, (*Server).handleCatalogRemove},
-		{"GET /v1/projects/{id}/catalog/{name}/deploys", false, (*Server).handleCatalogDeploys},
-		{"GET /v1/projects/{id}/env-sets", false, (*Server).handleEnvSetList},
-		{"GET /v1/projects/{id}/env-sets/{set}", false, (*Server).handleEnvSetGet},
-		{"PUT /v1/projects/{id}/env-sets/{set}", false, (*Server).handleEnvSetPut},
-		{"DELETE /v1/projects/{id}/env-sets/{set}", false, (*Server).handleEnvSetDelete},
-		{"PATCH /v1/projects/{id}/env-sets/{set}/keys/{key}", false, (*Server).handleEnvKeyPatch},
-		{"GET /v1/projects/{id}/registries", false, (*Server).handleRegistryList},
-		{"PUT /v1/projects/{id}/registries/{host}", false, (*Server).handleRegistryPut},
-		{"DELETE /v1/projects/{id}/registries/{host}", false, (*Server).handleRegistryDelete},
-		{"GET /v1/projects/{id}/files", false, (*Server).handleFileList},
-		{"GET /v1/projects/{id}/files/{name}", false, (*Server).handleFileGet},
-		{"PUT /v1/projects/{id}/files/{name}", false, (*Server).handleFilePut},
-		{"DELETE /v1/projects/{id}/files/{name}", false, (*Server).handleFileDelete},
-		{"GET /v1/projects/{id}/hosts", false, (*Server).handleHostList},
-		{"GET /v1/projects/{id}/services", false, (*Server).handleProjectServices},
-		{"GET /v1/hosts/{id}", false, (*Server).handleHostGet},
-		{"DELETE /v1/hosts/{id}/credential", false, (*Server).handleHostRevoke},
-		{"GET /v1/hosts/{id}/shares", false, (*Server).handleShareList},
-		{"PUT /v1/hosts/{id}/shares/{project_id}", false, (*Server).handleSharePut},
-		{"DELETE /v1/hosts/{id}/shares/{project_id}", false, (*Server).handleShareDelete},
-		{"GET /v1/hosts/{id}/catalog-approvals", false, (*Server).handleCatalogApprovals},
-		{"POST /v1/hosts/{id}/catalog-approvals", false, (*Server).handleCatalogApprove},
-		{"DELETE /v1/hosts/{id}/catalog-approvals/{entry_id}", false, (*Server).handleCatalogApprovalDelete},
-		{"GET /v1/hosts/{id}/services", false, (*Server).handleServiceList},
-		{"GET /v1/services/{id}", false, (*Server).handleServiceGet},
-		{"PATCH /v1/services/{id}", false, (*Server).handleServicePatch},
-		{"PUT /v1/services/{id}/health-checks", false, (*Server).handleHealthPut},
-		{"GET /v1/hosts/{id}/metrics", false, (*Server).handleMetrics},
-		{"GET /v1/hosts/{id}/processes", false, (*Server).handleProcesses},
-		{"GET /v1/services/{id}/health", false, (*Server).handleHealthHistory},
-		{"POST /v1/hosts/{id}/snapshot", false, (*Server).handleSnapshot},
-		{"POST /v1/services/{id}/probe", false, (*Server).handleProbe},
-		{"POST /v1/confirmations/{confirmation_id}", false, (*Server).handleConfirmation},
-		{"GET /v1/projects/{id}/audit", false, (*Server).handleAudit},
+		{"GET /health", true, (*Server).handleHealth, delegatedDeny},
+		{"GET /.well-known/oauth-authorization-server", true, (*Server).handleOAuthMetadata, delegatedDeny},
+		{"POST /oauth/register", true, (*Server).handleOAuthRegister, delegatedAllow},
+		{"GET /oauth/authorize", true, (*Server).handleOAuthAuthorize, delegatedDeny},
+		{"POST /oauth/token", true, (*Server).handleOAuthToken, delegatedAllow},
+		{"POST /oauth/revoke", true, (*Server).handleOAuthRevoke, delegatedAllow},
+		{"GET /v1/auth/google/start", true, (*Server).handleGoogleStart, delegatedDeny},
+		{"POST /v1/auth/google/callback", true, (*Server).handleGoogleCallback, delegatedAllow},
+		{"POST /v1/auth/signout", false, (*Server).handleSignOut, delegatedAllow},
+		{"GET /v1/me", false, (*Server).handleMe, delegatedDeny},
+		{"GET /v1/oauth/requests/{id}", false, (*Server).handleOAuthRequestGet, delegatedDeny},
+		{"POST /v1/oauth/requests/{id}/approve", false, (*Server).handleOAuthRequestApprove, delegatedHandler},
+		{"POST /v1/oauth/requests/{id}/deny", false, (*Server).handleOAuthRequestDeny, delegatedHandler},
+		{"GET /v1/me/grants", false, (*Server).handleGrantList, delegatedDeny},
+		{"DELETE /v1/me/grants/{id}", false, (*Server).handleGrantDelete, delegatedHandler},
+		{"POST /v1/auth/device/code", true, (*Server).handleDeviceCode, delegatedAllow},
+		{"POST /v1/auth/device/token", true, (*Server).handleDeviceToken, delegatedAllow},
+		{"GET /v1/auth/device/{user_code}", false, (*Server).handleDeviceGet, delegatedDeny},
+		{"POST /v1/auth/device/{user_code}/approve", false, (*Server).handleDeviceApprove, delegatedHandler},
+		{"POST /v1/auth/device/{user_code}/deny", false, (*Server).handleDeviceDeny, delegatedHandler},
+		{"POST /v1/projects", false, (*Server).handleProjectCreate, delegatedDeny},
+		{"GET /v1/projects", false, (*Server).handleProjectList, delegatedDeny},
+		{"GET /v1/projects/{id}", false, (*Server).handleProjectGet, delegatedDeny},
+		{"PATCH /v1/projects/{id}", false, (*Server).handleProjectPatch, delegatedDeny},
+		{"DELETE /v1/projects/{id}", false, (*Server).handleProjectDelete, delegatedDeny},
+		{"GET /v1/projects/{id}/members", false, (*Server).handleMemberList, delegatedDeny},
+		{"POST /v1/projects/{id}/members", false, (*Server).handleMemberAdd, delegatedDeny},
+		{"PATCH /v1/projects/{id}/members/{user_id}", false, (*Server).handleMemberPatch, delegatedDeny},
+		{"DELETE /v1/projects/{id}/members/{user_id}", false, (*Server).handleMemberDelete, delegatedDeny},
+		{"POST /v1/projects/{id}/transfer-ownership", false, (*Server).handleTransfer, delegatedDeny},
+		{"POST /v1/projects/{id}/join-tokens", false, (*Server).handleJoinCreate, delegatedDeny},
+		{"GET /v1/projects/{id}/join-tokens", false, (*Server).handleJoinList, delegatedDeny},
+		{"DELETE /v1/projects/{id}/join-tokens/{token_id}", false, (*Server).handleJoinRevoke, delegatedDeny},
+		{"POST /v1/projects/{id}/invites", false, (*Server).handleInviteCreate, delegatedDeny},
+		{"GET /v1/projects/{id}/invites", false, (*Server).handleInviteList, delegatedDeny},
+		{"DELETE /v1/projects/{id}/invites/{invite_id}", false, (*Server).handleInviteRevoke, delegatedDeny},
+		{"POST /v1/invites/lookup", false, (*Server).handleInviteLookup, delegatedHandler},
+		{"POST /v1/invites/accept", false, (*Server).handleInviteAccept, delegatedHandler},
+		{"POST /v1/projects/{id}/catalog/parse", false, (*Server).handleCatalogParse, delegatedAllow},
+		{"GET /v1/projects/{id}/catalog", false, (*Server).handleCatalogList, delegatedDeny},
+		{"POST /v1/projects/{id}/catalog", false, (*Server).handleCatalogCreate, delegatedHandler},
+		{"GET /v1/projects/{id}/catalog/{name}", false, (*Server).handleCatalogGet, delegatedDeny},
+		{"PUT /v1/projects/{id}/catalog/{name}", false, (*Server).handleCatalogPut, delegatedHandler},
+		{"DELETE /v1/projects/{id}/catalog/{name}", false, (*Server).handleCatalogDelete, delegatedHandler},
+		{"GET /v1/projects/{id}/catalog/{name}/permissions", false, (*Server).handleCatalogPermGet, delegatedDeny},
+		{"PUT /v1/projects/{id}/catalog/{name}/permissions", false, (*Server).handleCatalogPermPut, delegatedHandler},
+		{"POST /v1/projects/{id}/catalog/{name}/run", false, (*Server).handleCatalogRun, delegatedHandler},
+		{"POST /v1/projects/{id}/catalog/{name}/stop", false, (*Server).handleCatalogStop, delegatedHandler},
+		{"POST /v1/projects/{id}/catalog/{name}/restart", false, (*Server).handleCatalogRestart, delegatedHandler},
+		{"POST /v1/projects/{id}/catalog/{name}/logs", false, (*Server).handleCatalogLogs, delegatedAllow},
+		{"POST /v1/projects/{id}/catalog/{name}/status", false, (*Server).handleCatalogStatus, delegatedAllow},
+		{"POST /v1/projects/{id}/catalog/{name}/deploy", false, (*Server).handleCatalogDeploy, delegatedHandler},
+		{"POST /v1/projects/{id}/catalog/{name}/rollback", false, (*Server).handleCatalogRollback, delegatedHandler},
+		{"POST /v1/projects/{id}/catalog/{name}/remove", false, (*Server).handleCatalogRemove, delegatedHandler},
+		{"GET /v1/projects/{id}/catalog/{name}/deploys", false, (*Server).handleCatalogDeploys, delegatedDeny},
+		{"GET /v1/projects/{id}/env-sets", false, (*Server).handleEnvSetList, delegatedDeny},
+		{"GET /v1/projects/{id}/env-sets/{set}", false, (*Server).handleEnvSetGet, delegatedDeny},
+		{"PUT /v1/projects/{id}/env-sets/{set}", false, (*Server).handleEnvSetPut, delegatedHandler},
+		{"DELETE /v1/projects/{id}/env-sets/{set}", false, (*Server).handleEnvSetDelete, delegatedHandler},
+		{"PATCH /v1/projects/{id}/env-sets/{set}/keys/{key}", false, (*Server).handleEnvKeyPatch, delegatedHandler},
+		{"GET /v1/projects/{id}/registries", false, (*Server).handleRegistryList, delegatedDeny},
+		{"PUT /v1/projects/{id}/registries/{host}", false, (*Server).handleRegistryPut, delegatedHandler},
+		{"DELETE /v1/projects/{id}/registries/{host}", false, (*Server).handleRegistryDelete, delegatedHandler},
+		{"GET /v1/projects/{id}/files", false, (*Server).handleFileList, delegatedDeny},
+		{"GET /v1/projects/{id}/files/{name}", false, (*Server).handleFileGet, delegatedDeny},
+		{"PUT /v1/projects/{id}/files/{name}", false, (*Server).handleFilePut, delegatedHandler},
+		{"DELETE /v1/projects/{id}/files/{name}", false, (*Server).handleFileDelete, delegatedHandler},
+		{"GET /v1/projects/{id}/hosts", false, (*Server).handleHostList, delegatedDeny},
+		{"GET /v1/projects/{id}/services", false, (*Server).handleProjectServices, delegatedDeny},
+		{"GET /v1/hosts/{id}", false, (*Server).handleHostGet, delegatedDeny},
+		{"DELETE /v1/hosts/{id}/credential", false, (*Server).handleHostRevoke, delegatedDeny},
+		{"GET /v1/hosts/{id}/shares", false, (*Server).handleShareList, delegatedDeny},
+		{"PUT /v1/hosts/{id}/shares/{project_id}", false, (*Server).handleSharePut, delegatedDeny},
+		{"DELETE /v1/hosts/{id}/shares/{project_id}", false, (*Server).handleShareDelete, delegatedDeny},
+		{"GET /v1/hosts/{id}/catalog-approvals", false, (*Server).handleCatalogApprovals, delegatedDeny},
+		{"POST /v1/hosts/{id}/catalog-approvals", false, (*Server).handleCatalogApprove, delegatedHandler},
+		{"DELETE /v1/hosts/{id}/catalog-approvals/{entry_id}", false, (*Server).handleCatalogApprovalDelete, delegatedHandler},
+		{"GET /v1/hosts/{id}/services", false, (*Server).handleServiceList, delegatedDeny},
+		{"GET /v1/services/{id}", false, (*Server).handleServiceGet, delegatedDeny},
+		{"PATCH /v1/services/{id}", false, (*Server).handleServicePatch, delegatedDeny},
+		{"PUT /v1/services/{id}/health-checks", false, (*Server).handleHealthPut, delegatedHandler},
+		{"GET /v1/hosts/{id}/metrics", false, (*Server).handleMetrics, delegatedDeny},
+		{"GET /v1/hosts/{id}/processes", false, (*Server).handleProcesses, delegatedDeny},
+		{"GET /v1/services/{id}/health", false, (*Server).handleHealthHistory, delegatedDeny},
+		{"POST /v1/hosts/{id}/snapshot", false, (*Server).handleSnapshot, delegatedAllow},
+		{"POST /v1/services/{id}/probe", false, (*Server).handleProbe, delegatedAllow},
+		{"POST /v1/confirmations/{confirmation_id}", false, (*Server).handleConfirmation, delegatedAllow},
+		{"GET /v1/projects/{id}/audit", false, (*Server).handleAudit, delegatedDeny},
 	}
 }
 
@@ -173,14 +185,14 @@ func (s *statusWriter) Write(b []byte) (int, error) {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	for _, rt := range contractRoutes() {
-		s.route(mux, rt.pattern, rt.public, rt.fn)
+		s.route(mux, rt)
 	}
-	s.route(mux, "/", true, (*Server).handleNotFound)
+	s.route(mux, route{pattern: "/", public: true, fn: (*Server).handleNotFound})
 	return mux
 }
 
-func (s *Server) route(mux *http.ServeMux, pattern string, public bool, fn func(*Server, http.ResponseWriter, *http.Request)) {
-	mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+func (s *Server) route(mux *http.ServeMux, rt route) {
+	mux.HandleFunc(rt.pattern, func(w http.ResponseWriter, r *http.Request) {
 		sw := &statusWriter{ResponseWriter: w}
 		start := time.Now()
 		defer func() {
@@ -196,10 +208,16 @@ func (s *Server) route(mux *http.ServeMux, pattern string, public bool, fn func(
 			}
 			s.logger().Info("request", "method", r.Method, "pattern", r.Pattern, "status", code, "ms", time.Since(start).Milliseconds())
 		}()
-		if strings.Contains(pattern, " /v1/") && s.rejectMCPAudience(sw, r) {
+		if strings.Contains(rt.pattern, " /v1/") && s.rejectMCPAudience(sw, r) {
 			return
 		}
-		if !public {
+		// Public routes have no delegated principal. A mutating deny route
+		// refuses api_delegated before the handler, so the answer does not
+		// depend on whether the path id exists.
+		if !rt.public && mutating(r.Method) && rt.delegated == delegatedDeny && s.rejectDelegated(sw, r, rt.pattern) {
+			return
+		}
+		if !rt.public {
 			sess, user, err := s.Auth.Authenticate(r.Context(), r.Header.Get("Authorization"))
 			if err != nil {
 				writeCode(sw, "unauthorized", "unauthorized")
@@ -213,7 +231,7 @@ func (s *Server) route(mux *http.ServeMux, pattern string, public bool, fn func(
 			ctx = withPrincipal(ctx, principal{User: user, Session: sess})
 			r = r.WithContext(ctx)
 		}
-		fn(s, sw, r)
+		rt.fn(s, sw, r)
 	})
 }
 
@@ -319,6 +337,34 @@ func (s *Server) rejectMCPAudience(w http.ResponseWriter, r *http.Request) bool 
 		return false
 	}
 	writeCode(w, "invalid_token", "invalid token")
+	return true
+}
+
+// rejectDelegated refuses a live api_delegated session on a console-only write.
+// A missing or invalid bearer is left for the handler, so its error code stays
+// the same. Project and host stay unset: a path id may not exist, and the
+// audit foreign keys would reject it.
+func (s *Server) rejectDelegated(w http.ResponseWriter, r *http.Request, pattern string) bool {
+	if r.Header.Get("Authorization") == "" {
+		return false
+	}
+	sess, user, err := s.Auth.Authenticate(r.Context(), r.Header.Get("Authorization"))
+	if err != nil {
+		return false
+	}
+	if sess.Kind != store.KindDelegated {
+		return false
+	}
+	code := "forbidden"
+	s.Audit.Record(r.Context(), store.AuditRow{
+		ActorUserID: idPtr(user.ID),
+		Via:         audit.ViaMCP,
+		Action:      audit.ActionDelegatedDenied,
+		Decision:    audit.DecisionDenied,
+		ErrorCode:   &code,
+		Detail:      map[string]any{"route": pattern},
+	})
+	writeCode(w, "forbidden", "forbidden")
 	return true
 }
 
