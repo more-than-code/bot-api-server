@@ -26,6 +26,7 @@ const (
 	reasonNoContainers  = "this host does not run containers"
 	reasonNoFiles       = "this host's agent does not support files"
 	reasonNoHealthcheck = "this host's agent does not support healthcheck"
+	reasonNoLogging     = "this host's agent does not support log settings"
 	invalidAgentResult  = "invalid agent result"
 	settleTimeout       = 5 * time.Second
 	staleGraceSec       = 120
@@ -210,6 +211,10 @@ func (s *Server) imageMutate(w http.ResponseWriter, r *http.Request, action stri
 		s.imageDeny(w, r, p, projectID, host.ID, host.Name, entry.Name, action, "bad_request", reasonNoHealthcheck)
 		return
 	}
+	if (action == "deploy" || action == "rollback") && !loggingReady(host, img) {
+		s.imageDeny(w, r, p, projectID, host.ID, host.Name, entry.Name, action, "bad_request", reasonNoLogging)
+		return
+	}
 	if action == "rollback" && !s.digestAllowed(w, r, entry.ID, host.ID, body.Digest) {
 		return
 	}
@@ -326,6 +331,10 @@ func (s *Server) confirmImage(w http.ResponseWriter, r *http.Request, p principa
 	}
 	if (c.Action == "deploy" || c.Action == "rollback") && !healthcheckReady(host, img) {
 		s.imageDeny(w, r, p, c.ProjectID, host.ID, host.Name, entry.Name, c.Action, "bad_request", reasonNoHealthcheck)
+		return
+	}
+	if (c.Action == "deploy" || c.Action == "rollback") && !loggingReady(host, img) {
+		s.imageDeny(w, r, p, c.ProjectID, host.ID, host.Name, entry.Name, c.Action, "bad_request", reasonNoLogging)
 		return
 	}
 	if c.Action == "rollback" && !s.digestAllowed(w, r, entry.ID, host.ID, digest) {
@@ -902,6 +911,13 @@ func healthcheckReady(host store.Host, img catalog.Image) bool {
 		return true
 	}
 	return host.Programs != nil && host.Programs.Healthcheck
+}
+
+func loggingReady(host store.Host, img catalog.Image) bool {
+	if img.Logging == nil {
+		return true
+	}
+	return host.Programs != nil && host.Programs.Logging
 }
 
 // logsNeedKey reports whether image_logs would have to hide a secret env

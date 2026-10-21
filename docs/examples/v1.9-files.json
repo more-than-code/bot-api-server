@@ -78,6 +78,7 @@
     "files": true,
     "healthcheck": false,
     "images": true,
+    "logging": false,
     "policy_hash": "abc",
     "run_as": [
       "joe"

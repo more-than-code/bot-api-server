@@ -77,6 +77,35 @@ func TestCatalogWritePlanSentences(t *testing.T) {
 	}
 }
 
+func TestLoggingPlan(t *testing.T) {
+	img := mustPlanImage(t, "web", `{"kind":"service","image":"nginx","logging":{"max_size_mb":10,"max_files":3}}`, nil, nil)
+	got := catalogCreatePlan("Proj", "web", img)
+	if !strings.Contains(got, "logging max_size_mb=10 max_files=3") {
+		t.Fatalf("create plan %s", got)
+	}
+	plain := mustPlanImage(t, "web", `{"kind":"service","image":"nginx"}`, nil, nil)
+	if strings.Contains(catalogCreatePlan("Proj", "web", plain), "logging") {
+		t.Fatal("plan mentioned absent logging")
+	}
+	added := catalogUpdatePlan("web", plain, img, 1)
+	if !strings.Contains(added, "logging: none → max_size_mb=10 max_files=3") {
+		t.Fatalf("added plan %s", added)
+	}
+	removed := catalogUpdatePlan("web", img, plain, 1)
+	if !strings.Contains(removed, "logging: max_size_mb=10 max_files=3 → none") {
+		t.Fatalf("removed plan %s", removed)
+	}
+	next := mustPlanImage(t, "web", `{"kind":"service","image":"nginx","logging":{"max_size_mb":5,"max_files":2}}`, nil, nil)
+	changed := catalogUpdatePlan("web", img, next, 0)
+	if !strings.Contains(changed, "logging: max_size_mb=10 max_files=3 → max_size_mb=5 max_files=2") {
+		t.Fatalf("changed plan %s", changed)
+	}
+	job := mustPlanImage(t, "batch", `{"kind":"job","image":"nginx","logging":{"max_size_mb":5,"max_files":2}}`, nil, nil)
+	if !strings.Contains(catalogCreatePlan("Proj", "batch", job), "logging max_size_mb=5 max_files=2") {
+		t.Fatalf("job plan %s", catalogCreatePlan("Proj", "batch", job))
+	}
+}
+
 func TestHealthcheckPlan(t *testing.T) {
 	img := mustPlanImage(t, "web", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD","hello world"]}}`, nil, nil)
 	got := catalogCreatePlan("Proj", "web", img)

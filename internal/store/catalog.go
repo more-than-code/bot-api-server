@@ -31,6 +31,7 @@ type HostPrograms struct {
 	Files        bool     `json:"files"`
 	DockerHealth bool     `json:"docker_health"`
 	Healthcheck  bool     `json:"healthcheck"`
+	Logging      bool     `json:"logging"`
 }
 
 // ProgramSpec is the stored program document. Env and Args are never nil

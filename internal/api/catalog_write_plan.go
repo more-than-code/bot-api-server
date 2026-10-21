@@ -45,6 +45,9 @@ func catalogCreatePlan(project, name string, img catalog.Image) string {
 	if img.Healthcheck != nil {
 		parts = append(parts, "healthcheck "+healthcheckPhrase(*img.Healthcheck))
 	}
+	if img.Logging != nil {
+		parts = append(parts, "logging "+loggingPhrase(*img.Logging))
+	}
 	if len(img.Entrypoint) > 0 {
 		parts = append(parts, "entrypoint "+argvPhrase(img.Entrypoint))
 	}
@@ -86,6 +89,7 @@ func catalogUpdatePlan(name string, old, next catalog.Image, voids int) string {
 	add("files", fileOrNone(old.Files), fileOrNone(next.Files))
 	add("command", argvOrNone(old.Command), argvOrNone(next.Command))
 	add("healthcheck", healthOrNone(old.Healthcheck), healthOrNone(next.Healthcheck))
+	add("logging", loggingOrNone(old.Logging), loggingOrNone(next.Logging))
 	add("entrypoint", argvOrNone(old.Entrypoint), argvOrNone(next.Entrypoint))
 	add("restart", textOrNone(old.Restart), textOrNone(next.Restart))
 	add("user", textOrNone(old.User), textOrNone(next.User))
@@ -288,6 +292,17 @@ func healthOrNone(h *catalog.Healthcheck) string {
 		return "none"
 	}
 	return healthcheckPhrase(*h)
+}
+
+func loggingPhrase(l catalog.LogLimit) string {
+	return "max_size_mb=" + strconv.Itoa(l.MaxSizeMB) + " max_files=" + strconv.Itoa(l.MaxFiles)
+}
+
+func loggingOrNone(l *catalog.LogLimit) string {
+	if l == nil {
+		return "none"
+	}
+	return loggingPhrase(*l)
 }
 
 func textOrNone(s string) string {

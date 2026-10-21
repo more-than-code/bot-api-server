@@ -421,3 +421,11 @@ Containers whose image defines a Docker `HEALTHCHECK` report Docker's verdict; D
 1. **Unchanged** (amends rule 11 for service deploys): when the task's ImageSpec has `healthcheck`, `unchanged` also requires the current container's `container_list` health to be `healthy`; otherwise the agent deploys and waits per v1.6 item 7. Without `healthcheck`, rule 11 is unchanged.
 2. **Nothing good to roll back to:** a service deploy whose wait fails, when the container that was current before the deploy was not `running` (`missing`, `exited`, `created`, `dead`), does not call `container_rollback`. The agent calls `container_stop` on the new container (it is kept) and reports outcome `failed`, with that container's status and the last ≤ 50 redacted log lines. When it was `running`, v1.6 item 7 applies (`rolled_back` / `rollback_failed`). A parked older container stays on `-prev` and is not started. *(Amended 2026-10-21 from the w28 spec review.)*
 3. `image_rollback` and jobs are unchanged.
+
+## v1.8 container log limit (2026-10-21, approved spec `docs/spec-container-logging.md` rev 1; additive, gated)
+
+1. **Create body:** every `container_deploy` create (service or job) sets `HostConfig.LogConfig = {"Type":"json-file","Config":{"max-size":"<n>m","max-file":"<k>"}}`. `n` and `k` come from the task ImageSpec `logging` (`max_size_mb`, `max_files`) when present, else **10** and **3**. The driver is always `json-file`, whatever the daemon default.
+2. **Validation in the helper:** `max_size_mb` 1–100 and `max_files` 1–10 (integers); out of range or unknown keys → refusal `forbidden_spec`, nothing created.
+3. **Gate:** `hello.programs` gains `"logging": true` from an agent that implements this section. The ImageSpec `logging` key is sent only to such an agent (api-v1 v1.14 item 2).
+4. `container_logs` and `image_logs` are unchanged; Docker's log API reads rotated `json-file` files.
+5. Existing containers keep their creation-time `LogConfig`. `unchanged` (digest, `spec_hash`, `files_hash`) is unchanged, so a container is limited only after its next real deploy.

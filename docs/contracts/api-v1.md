@@ -545,3 +545,11 @@ ImageSpec    gains "files":[{"file":string,"target":string}]   // default []
 7. **Auth:** all env-set routes stay owner or admin, console session only. Items 3 and 4 are refused for `api_delegated` by v1.12.1 item 3 (`delegated.denied`). Adding or deleting a key changes the set's key list and voids host approvals of entries that use the set, as a whole-set replace does; a value-only change does not.
 8. **`PUT /v1/projects/{id}/catalog/{name}`:** owner or admin (was owner), for console sessions and for the delegated D25 plan and its confirm. Create, delete and permissions stay owner-only.
 9. **Redaction:** in log lines, status text (including the `ImageStatus`/`ImageDeploy` string fields) and error strings, an env-set secret value of at least 6 bytes (raw, base64 and JSON-escaped forms; the floor is unchanged from v1.4) is replaced by `preview(v)` instead of `[REDACTED]`. Audit rows keep their fixed phrases. Registry tokens and secret-file pieces keep `[REDACTED]`. Text already redacted by an older agent (`[REDACTED]`) is accepted as is.
+
+## v1.14 container log limit (2026-10-21, approved spec `docs/spec-container-logging.md` rev 1; additive)
+
+1. **ImageSpec `logging`** (optional; services and jobs): `{"max_size_mb": int 1–100, "max_files": int 1–10}`. When present, both keys are required; an unknown key, a missing key, a non-integer or an out-of-range value → `bad_request` naming the field (`logging.max_size_mb`, `logging.max_files`). `null` or absent means the agent default (10 MB × 3). It is part of `spec_hash`.
+2. **Gate:** a deploy, rollback or job run of an entry whose spec has `logging` to a host whose `programs.logging` is not `true` → `bad_request` with message `this host's agent does not support log settings`, and no task is sent. Entries without `logging` are not gated. `HostPrograms` gains `logging` (bool, false when absent).
+3. **Plans (v1.12 delegated writes):** create lists `logging max_size_mb=<n> max_files=<k>` when set; update lists it when it changes (old → new, or added/removed).
+4. Catalog GET returns `logging` inside the spec as stored. No migration.
+5. **Rollback note:** an older API's strict stored-spec parser cannot read an entry with `logging`; clear it before rolling the API back.

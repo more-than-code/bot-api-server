@@ -37,6 +37,28 @@ func TestParseProgramsDockerHealth(t *testing.T) {
 	}
 }
 
+func TestParseProgramsLogging(t *testing.T) {
+	base := `{"enabled":true,"run_as":["joe"],"allow_shell":false,"policy_hash":"abc","images":true,"docker":true}`
+	absent, ok := parsePrograms(json.RawMessage(base))
+	if !ok || absent == nil || absent.Logging {
+		t.Fatalf("absent %#v %v", absent, ok)
+	}
+	on, ok := parsePrograms(json.RawMessage(base[:len(base)-1] + `,"logging":true}`))
+	if !ok || on == nil || !on.Logging {
+		t.Fatalf("logging true %#v %v", on, ok)
+	}
+	off, ok := parsePrograms(json.RawMessage(base[:len(base)-1] + `,"logging":false}`))
+	if !ok || off == nil || off.Logging {
+		t.Fatalf("logging false %#v %v", off, ok)
+	}
+	if _, ok := parsePrograms(json.RawMessage(base[:len(base)-1] + `,"logging":1}`)); ok {
+		t.Fatal("non-bool logging accepted")
+	}
+	if _, ok := parsePrograms(json.RawMessage(base[:len(base)-1] + `,"logging":"yes"}`)); ok {
+		t.Fatal("string logging accepted")
+	}
+}
+
 func TestPolicyDeniedMapping(t *testing.T) {
 	code, msg := rejectCode("policy_denied")
 	if code != "forbidden" || msg != "forbidden" {

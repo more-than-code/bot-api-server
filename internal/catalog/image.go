@@ -43,6 +43,10 @@ const (
 	minHealthStart = 0
 	maxHealthStart = 600
 	defHealthStart = 0
+	minLogMB       = 1
+	maxLogMB       = 100
+	minLogFiles    = 1
+	maxLogFiles    = 10
 	pullSlackSec   = 300
 	taskSlackSec   = 60
 	shortTaskSec   = 60
@@ -53,7 +57,7 @@ var imageUserRe = runAsRe
 
 // Image is a normalised image entry spec. Empty command and entrypoint are
 // nil. Env, SecretEnv, EnvSets, Ports, Volumes, and Files are non-nil.
-// Healthcheck is nil when the spec omitted it.
+// Healthcheck and Logging are nil when the spec omitted them.
 type Image struct {
 	Kind            string
 	Image           string
@@ -67,6 +71,7 @@ type Image struct {
 	Volumes         []Volume
 	Files           []FileMount
 	Healthcheck     *Healthcheck
+	Logging         *LogLimit
 	Restart         string
 	User            string
 	HealthyAfterSec int
@@ -81,6 +86,12 @@ type Healthcheck struct {
 	TimeoutSec     int      `json:"timeout_sec"`
 	Retries        int      `json:"retries"`
 	StartPeriodSec int      `json:"start_period_sec"`
+}
+
+// LogLimit is the optional json-file cap. Both numbers are required together.
+type LogLimit struct {
+	MaxSizeMB int `json:"max_size_mb"`
+	MaxFiles  int `json:"max_files"`
 }
 
 // Port is one published port.
@@ -115,7 +126,7 @@ func ValidImageName(name string) bool {
 	return !strings.HasSuffix(name, "-") && !strings.HasSuffix(name, "-prev")
 }
 
-// BuildImage applies v1.8 writing rules 1–11 and v1.9 rule 13.
+// BuildImage applies v1.8 writing rules 1–11, v1.9 rule 13, and v1.14 logging.
 // sets is the project's env-set key names. files is the project's file names.
 // A nil files map rejects every named file. Errors name a field and do not
 // include image references, commands, env values, volume targets, file
@@ -136,6 +147,10 @@ func BuildImage(name string, raw []byte, sets SetKeys, files map[string]struct{}
 		return Image{}, fieldErr("invalid kind")
 	}
 	hc, err := decodeHealthcheck(fields["healthcheck"], kind)
+	if err != nil {
+		return Image{}, err
+	}
+	logging, err := decodeLogging(fields["logging"])
 	if err != nil {
 		return Image{}, err
 	}
@@ -277,6 +292,7 @@ func BuildImage(name string, raw []byte, sets SetKeys, files map[string]struct{}
 		Volumes:         volumes,
 		Files:           mounts,
 		Healthcheck:     hc,
+		Logging:         logging,
 		Restart:         restart,
 		User:            user,
 		HealthyAfterSec: healthy,
@@ -426,6 +442,10 @@ func specJSON(img Image, withFiles bool) string {
 	if img.Healthcheck != nil {
 		hc = `,"healthcheck":` + healthcheckJSON(*img.Healthcheck)
 	}
+	logging := ""
+	if img.Logging != nil {
+		logging = `,"logging":` + loggingJSON(*img.Logging)
+	}
 	return `{"command":` + argvJSON(img.Command) +
 		`,"entrypoint":` + argvJSON(img.Entrypoint) +
 		`,"env":` + stringMapJSON(img.Env) +
@@ -435,6 +455,7 @@ func specJSON(img Image, withFiles bool) string {
 		`,"healthy_after_sec":` + strconv.Itoa(img.HealthyAfterSec) +
 		`,"image":` + jsonString(img.Image) +
 		`,"kind":` + jsonString(img.Kind) +
+		logging +
 		`,"memory_mb":` + mem +
 		`,"ports":` + portsJSON(img.Ports) +
 		`,"restart":` + jsonString(img.Restart) +
@@ -472,6 +493,7 @@ func ParseStored(raw []byte) (Image, error) {
 		Volumes:         doc.Volumes,
 		Files:           doc.Files,
 		Healthcheck:     doc.Healthcheck,
+		Logging:         doc.Logging,
 		Restart:         doc.Restart,
 		User:            doc.User,
 		HealthyAfterSec: doc.HealthyAfterSec,
@@ -502,6 +524,7 @@ type storedImage struct {
 	Volumes         []Volume          `json:"volumes"`
 	Files           []FileMount       `json:"files"`
 	Healthcheck     *Healthcheck      `json:"healthcheck"`
+	Logging         *LogLimit         `json:"logging"`
 	Restart         string            `json:"restart"`
 	User            string            `json:"user"`
 	HealthyAfterSec int               `json:"healthy_after_sec"`
@@ -559,7 +582,7 @@ func sortStrings(items []string) {
 
 var imageFields = map[string]struct{}{
 	"kind": {}, "image": {}, "command": {}, "entrypoint": {}, "ports": {},
-	"env": {}, "env_sets": {}, "secret_env": {}, "volumes": {}, "files": {}, "healthcheck": {}, "restart": {},
+	"env": {}, "env_sets": {}, "secret_env": {}, "volumes": {}, "files": {}, "healthcheck": {}, "logging": {}, "restart": {},
 	"user": {}, "healthy_after_sec": {}, "memory_mb": {}, "timeout_sec": {},
 }
 
@@ -698,6 +721,58 @@ func decodeBoundedInt(raw json.RawMessage, name string, min, max, def int) (int,
 		return 0, fieldErr("invalid " + name)
 	}
 	return int(v), nil
+}
+
+// decodeLogging accepts null as absent. A present object needs both integers.
+// An unknown key names the object. A missing, non-integer, or out-of-range
+// value names logging.max_size_mb or logging.max_files.
+func decodeLogging(raw json.RawMessage) (*LogLimit, error) {
+	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
+		return nil, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	var obj map[string]json.RawMessage
+	if err := dec.Decode(&obj); err != nil || obj == nil {
+		return nil, fieldErr("invalid logging")
+	}
+	if err := dec.Decode(new(struct{})); err != io.EOF {
+		return nil, fieldErr("invalid logging")
+	}
+	allowed := map[string]struct{}{"max_size_mb": {}, "max_files": {}}
+	for key := range obj {
+		if _, ok := allowed[key]; !ok {
+			return nil, fieldErr("invalid logging")
+		}
+	}
+	size, err := decodeRequiredInt(obj["max_size_mb"], "logging.max_size_mb", minLogMB, maxLogMB)
+	if err != nil {
+		return nil, err
+	}
+	files, err := decodeRequiredInt(obj["max_files"], "logging.max_files", minLogFiles, maxLogFiles)
+	if err != nil {
+		return nil, err
+	}
+	return &LogLimit{MaxSizeMB: size, MaxFiles: files}, nil
+}
+
+func decodeRequiredInt(raw json.RawMessage, name string, min, max int) (int, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" || !jsonIntToken(trimmed) {
+		return 0, fieldErr("invalid " + name)
+	}
+	return decodeBoundedInt(raw, name, min, max, 0)
+}
+
+// jsonIntToken is a JSON number token. A quoted string is not an integer.
+func jsonIntToken(raw []byte) bool {
+	if len(raw) > 0 && raw[0] == '-' {
+		raw = raw[1:]
+	}
+	return len(raw) > 0 && raw[0] >= '0' && raw[0] <= '9'
+}
+
+func loggingJSON(l LogLimit) string {
+	return `{"max_files":` + strconv.Itoa(l.MaxFiles) + `,"max_size_mb":` + strconv.Itoa(l.MaxSizeMB) + `}`
 }
 
 func healthcheckJSON(h Healthcheck) string {
