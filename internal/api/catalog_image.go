@@ -27,6 +27,7 @@ const (
 	reasonNoFiles       = "this host's agent does not support files"
 	reasonNoHealthcheck = "this host's agent does not support healthcheck"
 	reasonNoLogging     = "this host's agent does not support log settings"
+	reasonNoPolicy      = "this host's agent does not support health policies"
 	invalidAgentResult  = "invalid agent result"
 	settleTimeout       = 5 * time.Second
 	staleGraceSec       = 120
@@ -215,6 +216,10 @@ func (s *Server) imageMutate(w http.ResponseWriter, r *http.Request, action stri
 		s.imageDeny(w, r, p, projectID, host.ID, host.Name, entry.Name, action, "bad_request", reasonNoLogging)
 		return
 	}
+	if (action == "deploy" || action == "rollback") && !policyReady(host, img) {
+		s.imageDeny(w, r, p, projectID, host.ID, host.Name, entry.Name, action, "bad_request", reasonNoPolicy)
+		return
+	}
 	if action == "rollback" && !s.digestAllowed(w, r, entry.ID, host.ID, body.Digest) {
 		return
 	}
@@ -335,6 +340,10 @@ func (s *Server) confirmImage(w http.ResponseWriter, r *http.Request, p principa
 	}
 	if (c.Action == "deploy" || c.Action == "rollback") && !loggingReady(host, img) {
 		s.imageDeny(w, r, p, c.ProjectID, host.ID, host.Name, entry.Name, c.Action, "bad_request", reasonNoLogging)
+		return
+	}
+	if (c.Action == "deploy" || c.Action == "rollback") && !policyReady(host, img) {
+		s.imageDeny(w, r, p, c.ProjectID, host.ID, host.Name, entry.Name, c.Action, "bad_request", reasonNoPolicy)
 		return
 	}
 	if c.Action == "rollback" && !s.digestAllowed(w, r, entry.ID, host.ID, digest) {
@@ -656,7 +665,7 @@ func (s *Server) imageTask(ctx context.Context, projectID uuid.UUID, host store.
 		if err != nil {
 			return nil, nil, err
 		}
-		spec, err := storedSpec(img)
+		spec, err := storedSpec(img, host)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -920,6 +929,19 @@ func loggingReady(host store.Host, img catalog.Image) bool {
 	return host.Programs != nil && host.Programs.Logging
 }
 
+// policyReady gates only a health_policy that differs from the defaults
+// (v1.15 item 2). An entry at the defaults deploys everywhere.
+func policyReady(host store.Host, img catalog.Image) bool {
+	if catalog.PolicyIsDefault(img) {
+		return true
+	}
+	return policySupported(host)
+}
+
+func policySupported(host store.Host) bool {
+	return host.Programs != nil && host.Programs.HealthPolicy
+}
+
 // logsNeedKey reports whether image_logs would have to hide a secret env
 // value or a secret file. Precedence matches mergeEnv and does not decrypt.
 // A plain winning value, a missing secret_env reference, and a registry
@@ -1100,13 +1122,18 @@ func (s *Server) registryAuth(ctx context.Context, projectID uuid.UUID, host str
 // storedSpec is the entry's ImageSpec for the task frame. Inline env, env_sets,
 // and secret_env stay references. Resolved values travel only in the task's
 // top-level env. An empty files list is omitted; a wave 2a agent rejects the key.
-func storedSpec(img catalog.Image) (map[string]any, error) {
+// health_policy is dropped for an agent without programs.health_policy; the
+// gate has already refused a policy that differs from the defaults (v1.15).
+func storedSpec(img catalog.Image, host store.Host) (map[string]any, error) {
 	var spec map[string]any
 	if err := json.Unmarshal([]byte(catalog.SpecJSON(img)), &spec); err != nil {
 		return nil, err
 	}
 	if len(img.Files) == 0 {
 		delete(spec, "files")
+	}
+	if !policySupported(host) {
+		delete(spec, "health_policy")
 	}
 	return spec, nil
 }

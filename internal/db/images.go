@@ -96,12 +96,26 @@ func (d *DB) ListImageDeploys(ctx context.Context, entryID, hostID uuid.UUID) ([
 	if !exists {
 		return nil, store.ErrNotFound
 	}
+	// The newest 50 non-automatic rows, plus the newest 20 automatic rows
+	// newer than the oldest of those (all automatic rows qualify when there
+	// are no non-automatic rows), merged by time (v1.15 rev 2 item 5).
 	rows, err := d.pool.Query(ctx, `
+WITH manual AS (
+    SELECT * FROM app.image_deploys
+    WHERE entry_id = $1::uuid AND host_id = $2::uuid AND NOT in_flight AND via <> 'agent'
+    ORDER BY finished_at DESC, id DESC
+    LIMIT 50
+), auto AS (
+    SELECT * FROM app.image_deploys
+    WHERE entry_id = $1::uuid AND host_id = $2::uuid AND NOT in_flight AND via = 'agent'
+      AND (NOT EXISTS (SELECT 1 FROM manual)
+           OR finished_at > (SELECT min(finished_at) FROM manual))
+    ORDER BY finished_at DESC, id DESC
+    LIMIT 20
+)
 SELECT `+deployCols+`
-FROM app.image_deploys
-WHERE entry_id = $1::uuid AND host_id = $2::uuid AND NOT in_flight
+FROM (SELECT * FROM manual UNION ALL SELECT * FROM auto) merged
 ORDER BY finished_at DESC, id DESC
-LIMIT 50
 `, entryID.String(), hostID.String())
 	if err != nil {
 		return nil, mapErr(err)
@@ -163,7 +177,8 @@ func collectDeploys(rows pgx.Rows) ([]store.ImageDeploy, error) {
 
 func scanDeploy(row pgx.Row) (store.ImageDeploy, error) {
 	var d store.ImageDeploy
-	var id, entryID, hostID, by string
+	var id, entryID, hostID string
+	var by *string
 	var until *time.Time
 	if err := row.Scan(
 		&id, &entryID, &hostID, &d.Digest, &d.SpecHash, &d.Outcome, &d.ExitCode,
@@ -184,10 +199,134 @@ func scanDeploy(row pgx.Row) (store.ImageDeploy, error) {
 	if d.HostID, err = parseID(hostID); err != nil {
 		return store.ImageDeploy{}, err
 	}
-	if d.By, err = parseID(by); err != nil {
-		return store.ImageDeploy{}, err
+	if by != nil {
+		userID, err := parseID(*by)
+		if err != nil {
+			return store.ImageDeploy{}, err
+		}
+		d.By = &userID
 	}
 	return d, nil
+}
+
+func (d *DB) AutoActionTarget(ctx context.Context, hostID uuid.UUID, projectSlug, entry string) (store.AutoTarget, error) {
+	var projectID, entryID string
+	var raw []byte
+	var deployed bool
+	err := d.pool.QueryRow(ctx, `
+SELECT p.id::text, e.id::text, e.spec, EXISTS (
+    SELECT 1 FROM app.image_deploys x
+    WHERE x.entry_id = e.id AND x.host_id = h.id AND NOT x.in_flight
+      AND x.outcome IN ('succeeded', 'unchanged')
+)
+FROM app.projects p
+JOIN app.catalog_entries e ON e.project_id = p.id
+JOIN app.hosts h ON h.id = $3::uuid
+WHERE p.slug = $1 AND p.deleted_at IS NULL
+  AND e.name = $2 AND e.kind = 'image'
+  AND (h.project_id = p.id OR EXISTS (
+      SELECT 1 FROM app.host_shares s
+      WHERE s.host_id = h.id AND s.project_id = p.id AND s.level = 'deploy'
+  ))
+`, projectSlug, entry, hostID.String()).Scan(&projectID, &entryID, &raw, &deployed)
+	if err != nil {
+		return store.AutoTarget{}, mapErr(err)
+	}
+	out := store.AutoTarget{ImageRaw: raw, Deployed: deployed}
+	if out.ProjectID, err = parseID(projectID); err != nil {
+		return store.AutoTarget{}, err
+	}
+	if out.EntryID, err = parseID(entryID); err != nil {
+		return store.AutoTarget{}, err
+	}
+	return out, nil
+}
+
+func (d *DB) RecordAutoAction(ctx context.Context, in store.AutoAction) (store.ImageDeploy, bool, error) {
+	if in.Digest != nil && !catalog.ValidDigest(*in.Digest) {
+		in.Digest = nil
+	}
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return store.ImageDeploy{}, false, mapErr(err)
+	}
+	defer tx.Rollback(ctx)
+	var replayed bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM app.image_deploys WHERE auto_action_id = $1::uuid)`, in.ID.String()).Scan(&replayed); err != nil {
+		return store.ImageDeploy{}, false, mapErr(err)
+	}
+	if replayed {
+		return store.ImageDeploy{}, false, nil
+	}
+	// Serialize auto actions for one (entry, host) so the hourly count holds.
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, "auto_action:"+in.EntryID.String()+":"+in.HostID.String()); err != nil {
+		return store.ImageDeploy{}, false, mapErr(err)
+	}
+	var recent int
+	if err := tx.QueryRow(ctx, `
+SELECT count(*) FROM app.image_deploys
+WHERE entry_id = $1::uuid AND host_id = $2::uuid AND via = 'agent' AND finished_at > $3
+`, in.EntryID.String(), in.HostID.String(), in.At.Add(-time.Hour)).Scan(&recent); err != nil {
+		return store.ImageDeploy{}, false, mapErr(err)
+	}
+	if recent >= store.AutoActionsPerHour {
+		return store.ImageDeploy{}, false, store.ErrAutoActionLimit
+	}
+	var specHash string
+	err = tx.QueryRow(ctx, `
+SELECT COALESCE((
+    SELECT spec_hash FROM app.image_deploys
+    WHERE entry_id = $1::uuid AND host_id = $2::uuid AND NOT in_flight
+    ORDER BY finished_at DESC, id DESC
+    LIMIT 1
+), (SELECT spec_hash FROM app.catalog_entries WHERE id = $1::uuid))
+`, in.EntryID.String(), in.HostID.String()).Scan(&specHash)
+	if err != nil {
+		return store.ImageDeploy{}, false, mapErr(err)
+	}
+	// A null digest inherits only from the last user deploy that succeeded
+	// or was unchanged, never from an agent row (fix round 2).
+	digest := in.Digest
+	if digest == nil && in.Outcome != "auto_failed" {
+		var last string
+		err = tx.QueryRow(ctx, `
+SELECT digest
+FROM app.image_deploys
+WHERE entry_id = $1::uuid AND host_id = $2::uuid AND NOT in_flight AND digest IS NOT NULL
+  AND via <> 'agent' AND outcome IN ('succeeded', 'unchanged')
+ORDER BY finished_at DESC, id DESC
+LIMIT 1
+`, in.EntryID.String(), in.HostID.String()).Scan(&last)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return store.ImageDeploy{}, false, mapErr(err)
+		}
+		if err == nil {
+			digest = &last
+		}
+	}
+	if in.Outcome == "auto_failed" {
+		digest = nil
+	}
+	row, err := scanDeploy(tx.QueryRow(ctx, `
+INSERT INTO app.image_deploys (
+    id, entry_id, host_id, digest, spec_hash, outcome, exit_code,
+    started_at, finished_at, by_user, via, in_flight, in_flight_until, auto_action_id
+) VALUES (
+    $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, NULL,
+    $7, $7, NULL, 'agent', false, NULL, $8::uuid
+)
+ON CONFLICT (auto_action_id) DO NOTHING
+RETURNING `+deployCols, uuid.New().String(), in.EntryID.String(), in.HostID.String(), digest, specHash, in.Outcome, in.At, in.ID.String()))
+	if errors.Is(err, store.ErrNotFound) {
+		return store.ImageDeploy{}, false, nil
+	}
+	if err != nil {
+		return store.ImageDeploy{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.ImageDeploy{}, false, mapErr(err)
+	}
+	return row, true, nil
 }
 
 func (d *DB) ListEnvKeyNames(ctx context.Context, projectID uuid.UUID) (map[string][]string, error) {

@@ -72,9 +72,10 @@ func (m *Mem) BeginImageOp(ctx context.Context, entryID, hostID uuid.UUID, specH
 		m.imageDeploys[id] = row
 		break
 	}
+	actor := by
 	row := store.ImageDeploy{
 		ID: uuid.New(), EntryID: entryID, HostID: hostID, SpecHash: specHash,
-		Outcome: "in_flight", StartedAt: at, By: by, Via: via, InFlight: true,
+		Outcome: "in_flight", StartedAt: at, By: &actor, Via: via, InFlight: true,
 		InFlightUntil: until,
 	}
 	m.imageDeploys[row.ID] = row
@@ -127,19 +128,47 @@ func (m *Mem) ListImageDeploys(_ context.Context, entryID, hostID uuid.UUID) ([]
 	if _, ok := m.entries[entryID]; !ok {
 		return nil, store.ErrNotFound
 	}
-	out := make([]store.ImageDeploy, 0)
+	manual := make([]store.ImageDeploy, 0)
+	auto := make([]store.ImageDeploy, 0)
 	for _, row := range m.imageDeploys {
-		if row.EntryID == entryID && row.HostID == hostID && !row.InFlight {
-			out = append(out, copyDeploy(row))
+		if row.EntryID != entryID || row.HostID != hostID || row.InFlight {
+			continue
+		}
+		if row.Via == "agent" {
+			auto = append(auto, copyDeploy(row))
+		} else {
+			manual = append(manual, copyDeploy(row))
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		return out[i].FinishedAt.After(*out[j].FinishedAt)
-	})
-	if len(out) > 50 {
-		out = out[:50]
+	sortDeploys(manual)
+	sortDeploys(auto)
+	if len(manual) > 50 {
+		manual = manual[:50]
 	}
+	out := manual
+	added := 0
+	for _, row := range auto {
+		if added == 20 {
+			break
+		}
+		if len(manual) > 0 && !row.FinishedAt.After(*manual[len(manual)-1].FinishedAt) {
+			break
+		}
+		out = append(out, row)
+		added++
+	}
+	sortDeploys(out)
 	return out, nil
+}
+
+// sortDeploys orders finished rows newest first, then by id, as the DB does.
+func sortDeploys(rows []store.ImageDeploy) {
+	sort.Slice(rows, func(i, j int) bool {
+		if !rows[i].FinishedAt.Equal(*rows[j].FinishedAt) {
+			return rows[i].FinishedAt.After(*rows[j].FinishedAt)
+		}
+		return rows[i].ID.String() > rows[j].ID.String()
+	})
 }
 
 func (m *Mem) RollbackDigests(_ context.Context, entryID, hostID uuid.UUID) ([]string, error) {
@@ -173,8 +202,106 @@ func (m *Mem) RollbackDigests(_ context.Context, entryID, hostID uuid.UUID) ([]s
 	return out, nil
 }
 
+func (m *Mem) AutoActionTarget(ctx context.Context, hostID uuid.UUID, projectSlug, entry string) (store.AutoTarget, error) {
+	if err := ctx.Err(); err != nil {
+		return store.AutoTarget{}, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	projectID, ok := m.lookupCatalogLocked(projectSlug, entry, "image")
+	if !ok {
+		return store.AutoTarget{}, store.ErrNotFound
+	}
+	h, ok := m.hosts[hostID]
+	if !ok {
+		return store.AutoTarget{}, store.ErrNotFound
+	}
+	if h.ProjectID != projectID {
+		sh, shared := m.shares[shareKey(hostID, projectID)]
+		if !shared || sh.Level != "deploy" {
+			return store.AutoTarget{}, store.ErrNotFound
+		}
+	}
+	entryID := m.entryByName[entryKey(projectID, entry)]
+	deployed := false
+	for _, row := range m.imageDeploys {
+		if row.EntryID == entryID && row.HostID == hostID && !row.InFlight && (row.Outcome == "succeeded" || row.Outcome == "unchanged") {
+			deployed = true
+			break
+		}
+	}
+	raw := append([]byte(nil), m.entries[entryID].ImageRaw...)
+	return store.AutoTarget{ProjectID: projectID, EntryID: entryID, ImageRaw: raw, Deployed: deployed}, nil
+}
+
+func (m *Mem) RecordAutoAction(ctx context.Context, in store.AutoAction) (store.ImageDeploy, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return store.ImageDeploy{}, false, err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.autoActions[in.ID]; ok {
+		return store.ImageDeploy{}, false, nil
+	}
+	entry, ok := m.entries[in.EntryID]
+	if !ok {
+		return store.ImageDeploy{}, false, store.ErrNotFound
+	}
+	if _, ok := m.hosts[in.HostID]; !ok {
+		return store.ImageDeploy{}, false, store.ErrNotFound
+	}
+	since := in.At.Add(-time.Hour)
+	recent := 0
+	var last, lastDigest *store.ImageDeploy
+	for _, row := range m.imageDeploys {
+		if row.EntryID != in.EntryID || row.HostID != in.HostID || row.InFlight {
+			continue
+		}
+		r := row
+		if r.Via == "agent" && r.FinishedAt.After(since) {
+			recent++
+		}
+		if last == nil || r.FinishedAt.After(*last.FinishedAt) {
+			last = &r
+		}
+		inheritable := r.Via != "agent" && (r.Outcome == "succeeded" || r.Outcome == "unchanged")
+		if r.Digest != nil && inheritable && (lastDigest == nil || r.FinishedAt.After(*lastDigest.FinishedAt)) {
+			lastDigest = &r
+		}
+	}
+	if recent >= store.AutoActionsPerHour {
+		return store.ImageDeploy{}, false, store.ErrAutoActionLimit
+	}
+	specHash := entry.SpecHash
+	if last != nil {
+		specHash = last.SpecHash
+	}
+	digest := in.Digest
+	if digest != nil && !catalog.ValidDigest(*digest) {
+		digest = nil
+	}
+	if digest == nil && lastDigest != nil {
+		digest = lastDigest.Digest
+	}
+	if in.Outcome == "auto_failed" {
+		digest = nil
+	}
+	at := in.At
+	row := store.ImageDeploy{
+		ID: uuid.New(), EntryID: in.EntryID, HostID: in.HostID, Digest: cloneString(digest),
+		SpecHash: specHash, Outcome: in.Outcome, StartedAt: at, FinishedAt: &at, Via: "agent",
+	}
+	m.imageDeploys[row.ID] = row
+	m.autoActions[in.ID] = struct{}{}
+	return copyDeploy(row), true, nil
+}
+
 func copyDeploy(row store.ImageDeploy) store.ImageDeploy {
 	row.Digest = cloneString(row.Digest)
+	if row.By != nil {
+		by := *row.By
+		row.By = &by
+	}
 	if row.ExitCode != nil {
 		n := *row.ExitCode
 		row.ExitCode = &n

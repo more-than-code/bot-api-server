@@ -276,6 +276,8 @@ func (h *Hub) dispatch(ac *agentConn, f frame) error {
 	case "task_reject":
 		h.onTaskReject(ac, f)
 		return nil
+	case "auto_action":
+		return h.onAutoAction(ac, f)
 	default:
 		h.log.Info("ignored agent frame", "type", f.Type)
 		return nil
@@ -303,6 +305,7 @@ func (h *Hub) storePrograms(ac *agentConn, raw json.RawMessage) {
 	if !ok {
 		programs = &store.HostPrograms{Enabled: false, RunAs: []string{}}
 	}
+	ac.healthPolicy = programs != nil && programs.HealthPolicy
 	if err := h.st.SetHostPrograms(ac.parent, ac.hostID, programs); err != nil {
 		h.log.Error("programs update failed", "host_id", ac.hostID.String())
 	}

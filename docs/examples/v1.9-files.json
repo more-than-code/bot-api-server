@@ -76,6 +76,7 @@
     "docker_health": false,
     "enabled": true,
     "files": true,
+    "health_policy": false,
     "healthcheck": false,
     "images": true,
     "logging": false,

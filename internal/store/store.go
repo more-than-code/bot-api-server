@@ -16,6 +16,8 @@ var (
 	ErrNotFound           = errors.New("not found")
 	ErrUnknownMeasurement = errors.New("unknown measurement")
 	ErrConflict           = errors.New("conflict")
+	// ErrAutoActionLimit is an auto_action beyond AutoActionsPerHour.
+	ErrAutoActionLimit = errors.New("auto action limit")
 	// ErrPending is an idempotency key that was claimed and has no response yet.
 	ErrPending      = errors.New("request in progress")
 	ErrUnauthorized = errors.New("unauthorized")
@@ -685,10 +687,27 @@ type Store interface {
 	FinishImageDeploy(ctx context.Context, id uuid.UUID, outcome string, digest *string, exitCode *int, at time.Time) (ImageDeploy, error)
 	// ReleaseImageOp deletes an in-flight row. A finished row is left as it is.
 	ReleaseImageOp(ctx context.Context, id uuid.UUID) error
-	// ListImageDeploys returns finished rows, newest first, at most 50.
+	// ListImageDeploys returns finished rows newest first: the newest 50
+	// non-automatic rows, plus at most the newest 20 automatic (via agent)
+	// rows newer than the oldest of those (v1.15 rev 2 item 5).
 	ListImageDeploys(ctx context.Context, entryID, hostID uuid.UUID) ([]ImageDeploy, error)
 	// RollbackDigests returns up to three newest distinct succeeded or unchanged digests.
 	RollbackDigests(ctx context.Context, entryID, hostID uuid.UUID) ([]string, error)
+	// AutoActionTarget resolves an auto_action's project slug and entry name
+	// for one host. ErrNotFound: unknown or deleted project, no image entry of
+	// that name, or a host that is neither the project's nor shared with it
+	// at deploy level. It writes nothing.
+	AutoActionTarget(ctx context.Context, hostID uuid.UUID, projectSlug, entry string) (AutoTarget, error)
+	// RecordAutoAction stores one agent automatic action as a finished
+	// image_deploys row with via agent and no user (api-v1 v1.15 item 3).
+	// spec_hash is the entry's last finished row on the host (the entry's
+	// hash when there is none). A nil digest becomes the digest of the last
+	// succeeded or unchanged user deploy (never an agent row), except for
+	// auto_failed, which stays null. A replayed id returns
+	// inserted false and writes nothing. ErrAutoActionLimit when the
+	// (entry, host) already has AutoActionsPerHour agent rows in the hour
+	// before in.At.
+	RecordAutoAction(ctx context.Context, in AutoAction) (row ImageDeploy, inserted bool, err error)
 
 	// ListEnvKeyNames returns key names only, including sets that have none.
 	ListEnvKeyNames(ctx context.Context, projectID uuid.UUID) (map[string][]string, error)

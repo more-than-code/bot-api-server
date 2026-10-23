@@ -76,6 +76,7 @@ type Mem struct {
 	registries   map[string]registryRec
 	projectFiles map[string]fileRec
 	imageDeploys map[uuid.UUID]imageDeployRec
+	autoActions  map[uuid.UUID]struct{}
 }
 
 type sessionRec struct {
@@ -155,6 +156,7 @@ func New() *Mem {
 		registries:                map[string]registryRec{},
 		projectFiles:              map[string]fileRec{},
 		imageDeploys:              map[uuid.UUID]imageDeployRec{},
+		autoActions:               map[uuid.UUID]struct{}{},
 	}
 }
 

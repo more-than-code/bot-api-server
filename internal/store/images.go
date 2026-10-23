@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,10 +19,46 @@ type ImageDeploy struct {
 	ExitCode      *int       `json:"exit_code"`
 	StartedAt     time.Time  `json:"started_at"`
 	FinishedAt    *time.Time `json:"finished_at"`
-	By            uuid.UUID  `json:"by"`
+	By            *uuid.UUID `json:"by"`
 	Via           string     `json:"via"`
 	InFlight      bool       `json:"-"`
 	InFlightUntil time.Time  `json:"-"`
+}
+
+// AutoActionsPerHour is the rev 2 cap on stored auto_action rows per
+// (entry, host) in a rolling hour.
+const AutoActionsPerHour = 20
+
+// AutoTarget is the entry an auto_action names, as one host sees it.
+// Deployed is true when the entry has a succeeded or unchanged deploy row
+// on that host.
+type AutoTarget struct {
+	ProjectID uuid.UUID
+	EntryID   uuid.UUID
+	ImageRaw  json.RawMessage
+	Deployed  bool
+}
+
+// AutoAction is one checked agent auto_action to store (api-v1 v1.15 item 3).
+// Outcome is auto_restarted, auto_rolled_back, auto_gave_up, or auto_failed.
+// Digest is nil when the frame sent null or the outcome is auto_failed.
+// At is server time.
+type AutoAction struct {
+	ID      uuid.UUID
+	EntryID uuid.UUID
+	HostID  uuid.UUID
+	Outcome string
+	Digest  *string
+	At      time.Time
+}
+
+// IsAutoOutcome reports the automatic deploy-row outcomes.
+func IsAutoOutcome(outcome string) bool {
+	switch outcome {
+	case "auto_restarted", "auto_rolled_back", "auto_gave_up", "auto_failed":
+		return true
+	}
+	return false
 }
 
 // EnvKey is one env-set key in an HTTP body. Value is null when the key is secret.

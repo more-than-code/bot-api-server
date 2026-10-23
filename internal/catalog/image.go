@@ -57,7 +57,7 @@ var imageUserRe = runAsRe
 
 // Image is a normalised image entry spec. Empty command and entrypoint are
 // nil. Env, SecretEnv, EnvSets, Ports, Volumes, and Files are non-nil.
-// Healthcheck and Logging are nil when the spec omitted them.
+// Healthcheck, Logging, and HealthPolicy are nil when the spec omitted them.
 type Image struct {
 	Kind            string
 	Image           string
@@ -72,6 +72,7 @@ type Image struct {
 	Files           []FileMount
 	Healthcheck     *Healthcheck
 	Logging         *LogLimit
+	HealthPolicy    *HealthPolicy
 	Restart         string
 	User            string
 	HealthyAfterSec int
@@ -118,15 +119,18 @@ type FileMount struct {
 // SetKeys maps an env set name to its key names. Values are not included.
 type SetKeys map[string][]string
 
-// ValidImageName is the catalog name rule plus the image suffix rule.
+// ValidImageName is the catalog name rule plus the image suffix rule: no
+// trailing "-", and no "-prev" or "-old" suffix, which the agent uses for
+// the kept and rollback containers (api-v1 v1.15 rev 3).
 func ValidImageName(name string) bool {
 	if !ValidName(name) {
 		return false
 	}
-	return !strings.HasSuffix(name, "-") && !strings.HasSuffix(name, "-prev")
+	return !strings.HasSuffix(name, "-") && !strings.HasSuffix(name, "-prev") && !strings.HasSuffix(name, "-old")
 }
 
-// BuildImage applies v1.8 writing rules 1–11, v1.9 rule 13, and v1.14 logging.
+// BuildImage applies v1.8 writing rules 1–11, v1.9 rule 13, v1.14 logging,
+// and v1.15 health_policy.
 // sets is the project's env-set key names. files is the project's file names.
 // A nil files map rejects every named file. Errors name a field and do not
 // include image references, commands, env values, volume targets, file
@@ -151,6 +155,10 @@ func BuildImage(name string, raw []byte, sets SetKeys, files map[string]struct{}
 		return Image{}, err
 	}
 	logging, err := decodeLogging(fields["logging"])
+	if err != nil {
+		return Image{}, err
+	}
+	policy, err := decodeHealthPolicy(fields["health_policy"], kind, hc)
 	if err != nil {
 		return Image{}, err
 	}
@@ -293,6 +301,7 @@ func BuildImage(name string, raw []byte, sets SetKeys, files map[string]struct{}
 		Files:           mounts,
 		Healthcheck:     hc,
 		Logging:         logging,
+		HealthPolicy:    policy,
 		Restart:         restart,
 		User:            user,
 		HealthyAfterSec: healthy,
@@ -419,17 +428,28 @@ func CanonicalImage(img Image, keyDigests map[string]string) string {
 }
 
 // SpecJSON is the stored ImageSpec object. An empty files list is [].
+// health_policy is stored as written.
 func SpecJSON(img Image) string {
-	return specJSON(img, true)
+	policy := ""
+	if img.HealthPolicy != nil {
+		policy = healthPolicyJSON(*img.HealthPolicy)
+	}
+	return specJSON(img, true, policy)
 }
 
 // hashSpecJSON is the spec_hash input. An empty files list is omitted so the
-// hash matches a wave 2a entry that had no files field.
+// hash matches a wave 2a entry that had no files field. health_policy enters
+// only when it differs from the defaults, with every key filled in, so an
+// entry at the defaults keeps its hash (v1.15).
 func hashSpecJSON(img Image) string {
-	return specJSON(img, len(img.Files) > 0)
+	policy := ""
+	if !PolicyIsDefault(img) {
+		policy = effectivePolicyJSON(img.HealthPolicy.Effective())
+	}
+	return specJSON(img, len(img.Files) > 0, policy)
 }
 
-func specJSON(img Image, withFiles bool) string {
+func specJSON(img Image, withFiles bool, policy string) string {
 	mem := "null"
 	if img.MemoryMB != nil {
 		mem = strconv.Itoa(*img.MemoryMB)
@@ -446,11 +466,15 @@ func specJSON(img Image, withFiles bool) string {
 	if img.Logging != nil {
 		logging = `,"logging":` + loggingJSON(*img.Logging)
 	}
+	if policy != "" {
+		policy = `,"health_policy":` + policy
+	}
 	return `{"command":` + argvJSON(img.Command) +
 		`,"entrypoint":` + argvJSON(img.Entrypoint) +
 		`,"env":` + stringMapJSON(img.Env) +
 		`,"env_sets":` + stringArrayJSON(img.EnvSets) +
 		files +
+		policy +
 		hc +
 		`,"healthy_after_sec":` + strconv.Itoa(img.HealthyAfterSec) +
 		`,"image":` + jsonString(img.Image) +
@@ -494,6 +518,7 @@ func ParseStored(raw []byte) (Image, error) {
 		Files:           doc.Files,
 		Healthcheck:     doc.Healthcheck,
 		Logging:         doc.Logging,
+		HealthPolicy:    doc.HealthPolicy,
 		Restart:         doc.Restart,
 		User:            doc.User,
 		HealthyAfterSec: doc.HealthyAfterSec,
@@ -525,6 +550,7 @@ type storedImage struct {
 	Files           []FileMount       `json:"files"`
 	Healthcheck     *Healthcheck      `json:"healthcheck"`
 	Logging         *LogLimit         `json:"logging"`
+	HealthPolicy    *HealthPolicy     `json:"health_policy"`
 	Restart         string            `json:"restart"`
 	User            string            `json:"user"`
 	HealthyAfterSec int               `json:"healthy_after_sec"`
@@ -582,7 +608,7 @@ func sortStrings(items []string) {
 
 var imageFields = map[string]struct{}{
 	"kind": {}, "image": {}, "command": {}, "entrypoint": {}, "ports": {},
-	"env": {}, "env_sets": {}, "secret_env": {}, "volumes": {}, "files": {}, "healthcheck": {}, "logging": {}, "restart": {},
+	"env": {}, "env_sets": {}, "secret_env": {}, "volumes": {}, "files": {}, "healthcheck": {}, "logging": {}, "health_policy": {}, "restart": {},
 	"user": {}, "healthy_after_sec": {}, "memory_mb": {}, "timeout_sec": {},
 }
 

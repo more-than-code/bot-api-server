@@ -553,3 +553,45 @@ ImageSpec    gains "files":[{"file":string,"target":string}]   // default []
 3. **Plans (v1.12 delegated writes):** create lists `logging max_size_mb=<n> max_files=<k>` when set; update lists it when it changes (old → new, or added/removed).
 4. Catalog GET returns `logging` inside the spec as stored. No migration.
 5. **Rollback note:** an older API's strict stored-spec parser cannot read an entry with `logging`; clear it before rolling the API back.
+
+## v1.15 health failure policy (2026-10-23, approved spec `docs/spec-health-policy.md` rev 1; additive, one migration)
+
+1. **ImageSpec `health_policy`** (optional; **services only**): `{"on_deploy_failure":"rollback"|"stop"|"keep","on_unhealthy":"none"|"restart"|"rollback","unhealthy_after_sec":int 15–600,"max_actions_per_hour":int 1–10}`.
+   - **Keys are optional; defaults** `rollback`, `none`, `45`, `3`. Stored as written.
+   - **Errors** → `bad_request` naming the field (`health_policy.on_unhealthy`, …): unknown key, bad enum, non-integer or out of range. A `job` with the key → `bad_request` (`health_policy applies to services`). `on_unhealthy` other than `none` without `healthcheck` → `bad_request` (`health_policy.on_unhealthy needs a healthcheck`).
+   - **`spec_hash`:** `null` or absent means all defaults. It is part of `spec_hash` only when present and different from all-defaults, so an entry at the defaults keeps its hash.
+2. **Gate:** a deploy, rollback or run of an entry whose `health_policy` differs from the defaults, to a host whose `programs.health_policy` is not `true` → `bad_request` `this host's agent does not support health policies`, and no task is sent. `HostPrograms` gains `health_policy` (bool, false when absent). Entries at the defaults are not gated, and their stored `health_policy` key (if any) is dropped from the task sent to an older agent.
+3. **`auto_action` ingest** (agent-protocol v1.9 item 5).
+   - **Validation:** the server checks the frame. `project` must be a project the host belongs to, `entry` an image entry in it, plus the enums and the `reason` length. An invalid frame is acknowledged and dropped, with one `warn` log line.
+   - **Storage:** a valid frame writes:
+     - an `audit_log` row: `action` `catalog.auto_<action>`, `via` `agent`, `actor_user_id` null, target = the entry, detail = host, container, reason, result;
+     - an `image_deploys` row: `outcome` `auto_restarted` | `auto_rolled_back` | `auto_gave_up`, `via` `agent`, `by` null, `digest` from the frame (or the entry's last digest when null), `spec_hash` of the entry's last deploy to that host, and `started_at` = `finished_at` = `t`.
+   - **Replay:** the frame `id` is stored, and a replayed `id` is acknowledged without a second row.
+4. **Migration 0014.** `app.image_deploys.by_user` becomes nullable, with a CHECK that `by_user` is null only when `via = 'agent'`. `via` allows `agent`, and `outcome` allows the three `auto_*` values. A new unique column `auto_action_id uuid NULL` makes replays idempotent. Down migration: delete the `via='agent'` rows, then restore the old constraints.
+5. **Shapes.** `ImageDeploy` gains `"via":"console"|"mcp"|"agent"` and `"by":"<user uuid>"|null`. `Outcome` gains `auto_restarted|auto_rolled_back|auto_gave_up`. Deploy history lists them like any other row.
+6. **Plans (v1.12):** create lists `health_policy on_deploy_failure=… on_unhealthy=… unhealthy_after_sec=… max_actions_per_hour=…` when present and not all defaults; update lists the change.
+7. **Rollback note:** an older API's strict stored-spec parser cannot read an entry with `health_policy`, and an older API stores a host as programs-disabled when its hello carries `health_policy`. Roll back the agents first, clear `health_policy` from every entry, then roll back the API and migration 0014.
+
+### v1.15 rev 2 amendments (2026-10-23, Joe "yes" after the w31 reviews; these replace the matching rules above)
+- **Item 1:** `on_deploy_failure: "keep"` combined with `on_unhealthy` other than `none` → `bad_request` (`health_policy.on_unhealthy cannot be combined with keep`). The unknown-key error names the key: `unknown field health_policy.<key>` when the key is at most 64 bytes of `[a-z_]`, else `invalid health_policy`.
+- **Item 3, ingest authority.** A frame is stored only when **all** of these hold. Otherwise it is acknowledged, dropped, and logged once at `warn`:
+  - the entry is an image `service`;
+  - its stored effective `on_unhealthy` equals the action (`restart` ↔ `restart`, `rollback` ↔ `rollback`); `gave_up` and `auto_failed` need any value other than `none`;
+  - `container` equals `<project>-<entry>`;
+  - the entry has at least one `succeeded` or `unchanged` deploy row on this host.
+- **Item 3, rate.** At most **20** stored frames per (entry, host) per rolling hour. Beyond that, frames are acknowledged and dropped, with one `warn` per hour. Rows use **server time** for `started_at` and `finished_at`. The frame's `t` goes into the audit detail only. The host flag check comes before any database read.
+- **Item 3, outcome.** `result: "error"` is stored as outcome `auto_failed`, with a null digest, whatever the action.
+- **Item 4, migration 0014:**
+  - `outcome` also allows `auto_failed`;
+  - CHECK `(via = 'agent') = (auto_action_id IS NOT NULL)`;
+  - CHECK `outcome NOT IN (auto outcomes) OR via = 'agent'`;
+  - agent rows have `in_flight = false`;
+  - the down migration runs in one transaction.
+- **Item 5, history.**
+  - Deploy history returns the newest 50 non-automatic rows, plus at most the newest 20 automatic rows that are newer than the oldest returned row, merged by time.
+  - Automatic rows are never rollback candidates.
+  - Clients treat the newest `auto_rolled_back` as the current digest for display. They do not count automatic rows toward the "same image" rule.
+  - MCP's short history lists non-automatic rows only.
+
+### v1.15 rev 3 amendment (2026-10-23, agent-protocol v1.9 rev 3b)
+- **Entry names:** an image entry `name` must not end with `-old` either. The rule is the same as for `-prev`, and it applies on create and replace (`bad_request`). The agent uses `<project>-<entry>-old` while it rolls back. Neither dev nor production has an entry name ending in `-old` (checked 2026-10-23).

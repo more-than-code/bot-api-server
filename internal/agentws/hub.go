@@ -28,6 +28,9 @@ const (
 	maxFrame       = 1 << 20
 	metricsPerSec  = 2
 	metricsBurst   = 20
+	autoPerSec     = 1
+	autoBurst      = 10
+	autoWarnEvery  = time.Hour
 	taskTimeoutSec = 15
 	taskTTL        = 60 * time.Second
 	metricsEvery   = 10
@@ -46,6 +49,8 @@ type Hub struct {
 	conns   map[uuid.UUID]*agentConn
 	waiters map[uuid.UUID]waiter
 	unauth  int
+	// autoWarned is the hourly-cap warn state per (entry, host), one line an hour.
+	autoWarned map[string]*warnCount
 }
 
 type waiter struct {
@@ -71,6 +76,12 @@ type agentConn struct {
 	metricTokens float64
 	metricAt     time.Time
 	metricLogged time.Time
+	// healthPolicy is this connection's hello programs.health_policy.
+	healthPolicy bool
+	// auto_action throttle and warn dedup, owned by the read loop.
+	autoTokens float64
+	autoAt     time.Time
+	autoWarns  map[string]*warnCount
 }
 
 // errFrameTooLarge is returned when a serialized outbound frame exceeds maxFrame.
@@ -92,12 +103,13 @@ func New(st store.Store, aud audit.Writer, log *slog.Logger, now func() time.Tim
 		log = slog.Default()
 	}
 	h := &Hub{
-		st:      st,
-		aud:     aud,
-		log:     log,
-		now:     now,
-		conns:   map[uuid.UUID]*agentConn{},
-		waiters: map[uuid.UUID]waiter{},
+		st:         st,
+		aud:        aud,
+		log:        log,
+		now:        now,
+		conns:      map[uuid.UUID]*agentConn{},
+		waiters:    map[uuid.UUID]waiter{},
+		autoWarned: map[string]*warnCount{},
 	}
 	h.seen = ingest.NewSeen(h.now)
 	return h

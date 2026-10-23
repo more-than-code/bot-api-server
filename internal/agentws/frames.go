@@ -30,6 +30,8 @@ type frame struct {
 	State            string          `json:"state"`
 	ErrorCode        json.RawMessage `json:"error_code"`
 	Payload          json.RawMessage `json:"payload"`
+	// Raw is the whole frame, for handlers that decode a strict shape.
+	Raw []byte `json:"-"`
 }
 
 type errorFrame struct {
@@ -102,6 +104,7 @@ func parseFrame(b []byte) (frame, error) {
 	if err := validServicesComplete(f.ServicesComplete); err != nil {
 		return frame{}, err
 	}
+	f.Raw = b
 	return f, nil
 }
 

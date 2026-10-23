@@ -48,6 +48,9 @@ func catalogCreatePlan(project, name string, img catalog.Image) string {
 	if img.Logging != nil {
 		parts = append(parts, "logging "+loggingPhrase(*img.Logging))
 	}
+	if !catalog.PolicyIsDefault(img) {
+		parts = append(parts, "health_policy "+policyPhrase(img.HealthPolicy.Effective()))
+	}
 	if len(img.Entrypoint) > 0 {
 		parts = append(parts, "entrypoint "+argvPhrase(img.Entrypoint))
 	}
@@ -90,6 +93,7 @@ func catalogUpdatePlan(name string, old, next catalog.Image, voids int) string {
 	add("command", argvOrNone(old.Command), argvOrNone(next.Command))
 	add("healthcheck", healthOrNone(old.Healthcheck), healthOrNone(next.Healthcheck))
 	add("logging", loggingOrNone(old.Logging), loggingOrNone(next.Logging))
+	add("health_policy", policyPhrase(old.HealthPolicy.Effective()), policyPhrase(next.HealthPolicy.Effective()))
 	add("entrypoint", argvOrNone(old.Entrypoint), argvOrNone(next.Entrypoint))
 	add("restart", textOrNone(old.Restart), textOrNone(next.Restart))
 	add("user", textOrNone(old.User), textOrNone(next.User))
@@ -303,6 +307,15 @@ func loggingOrNone(l *catalog.LogLimit) string {
 		return "none"
 	}
 	return loggingPhrase(*l)
+}
+
+// policyPhrase is the effective policy. Defaults are written out, so an
+// update from or to the defaults reads the same way as any other change.
+func policyPhrase(p catalog.EffectivePolicy) string {
+	return "on_deploy_failure=" + planText(p.OnDeployFailure) +
+		" on_unhealthy=" + planText(p.OnUnhealthy) +
+		" unhealthy_after_sec=" + strconv.Itoa(p.UnhealthyAfterSec) +
+		" max_actions_per_hour=" + strconv.Itoa(p.MaxActionsPerHour)
 }
 
 func textOrNone(s string) string {

@@ -109,6 +109,7 @@ func TestBuildImageRules(t *testing.T) {
 		{"name", "", "invalid name"},
 		{"trailing", "", "invalid name"},
 		{"prev", "", "invalid name"},
+		{"old", "", "invalid name"},
 		{"upper image", `{"kind":"service","image":"Nginx"}`, "invalid image"},
 		{"command long", `{"kind":"service","image":"nginx","command":["` + strings.Repeat("x", 4097) + `"]}`, "invalid command"},
 		{"command nul", `{"kind":"service","image":"nginx","command":["a\u0000b"]}`, "invalid command"},
@@ -142,9 +143,11 @@ func TestBuildImageRules(t *testing.T) {
 			n = "web-"
 		case "prev":
 			n = "web-prev"
+		case "old":
+			n = "web-old"
 		}
 		_, err := BuildImage(n, []byte(tc.spec), sets, nil)
-		if tc.spec == "" && tc.name != "name" && tc.name != "trailing" && tc.name != "prev" {
+		if tc.spec == "" && tc.name != "name" && tc.name != "trailing" && tc.name != "prev" && tc.name != "old" {
 			continue
 		}
 		if err == nil || err.Error() != tc.want {
@@ -212,4 +215,17 @@ func manyArgs(n int) string {
 		parts[i] = `"a"`
 	}
 	return "[" + strings.Join(parts, ",") + "]"
+}
+
+func TestImageNameOldSuffix(t *testing.T) {
+	for _, name := range []string{"web-old", "web-prev", "web-", "a-old"} {
+		if ValidImageName(name) {
+			t.Fatalf("%s accepted", name)
+		}
+	}
+	for _, name := range []string{"web-old2", "old", "web-older", "webold", "old-web"} {
+		if !ValidImageName(name) {
+			t.Fatalf("%s refused", name)
+		}
+	}
 }

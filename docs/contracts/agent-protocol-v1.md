@@ -429,3 +429,62 @@ Containers whose image defines a Docker `HEALTHCHECK` report Docker's verdict; D
 3. **Gate:** `hello.programs` gains `"logging": true` from an agent that implements this section. The ImageSpec `logging` key is sent only to such an agent (api-v1 v1.14 item 2).
 4. `container_logs` and `image_logs` are unchanged; Docker's log API reads rotated `json-file` files.
 5. Existing containers keep their creation-time `LogConfig`. `unchanged` (digest, `spec_hash`, `files_hash`) is unchanged, so a container is limited only after its next real deploy.
+
+## v1.9 health failure policy (2026-10-23, approved spec `docs/spec-health-policy.md` rev 1; additive, gated)
+
+1. **ImageSpec `health_policy`** (services only, optional; api-v1 v1.15): `{"on_deploy_failure":"rollback"|"stop"|"keep","on_unhealthy":"none"|"restart"|"rollback","unhealthy_after_sec":int 15–600,"max_actions_per_hour":int 1–10}`. Defaults for an absent field or key are `rollback`, `none`, `45` and `3`. The agent validates the shape again; unknown keys, bad enums or out-of-range values cause `task_reject` `bad_spec`. A `job` spec with the key causes `bad_spec`.
+2. **Failed health wait in `image_deploy`** (replaces the fixed v1.6.1 rule only when `on_deploy_failure` is not `rollback`):
+   - `rollback`: unchanged v1.6.1 behaviour. Roll back to `-prev` if the pre-deploy container was `running` (outcome `rolled_back` or `rollback_failed`); otherwise stop the new container and keep it (outcome `failed`).
+   - `stop`: stop the new container and keep it, whatever the pre-deploy state. Do not restart `-prev`. Outcome `failed`.
+   - `keep`: leave the new container running. Outcome `failed`.
+
+   `image_rollback` is unchanged.
+3. **Labels at create.** For a service with a non-default `on_unhealthy`, the helper sets `dev.deploybot.on_unhealthy`, `dev.deploybot.unhealthy_after_sec` and `dev.deploybot.max_actions_per_hour` (decimal strings), next to the existing owner labels. `container_list` returns these three labels for owned containers as `"policy":{"on_unhealthy","unhealthy_after_sec","max_actions_per_hour"}` (or `null` when absent). The helper validates label values like item 1 and ignores (treats as `null`) anything invalid.
+4. **Supervisor.** Every 15 s the agent runs `container_list` and considers owned, running service containers with `policy.on_unhealthy` ≠ `none`. It acts on a container only when all of these hold:
+   - its Docker health has been `unhealthy` on every poll for at least `unhealthy_after_sec`;
+   - no image task for that `(project, entry)` is in flight, using the same per-entry lock as task handling;
+   - fewer than `max_actions_per_hour` automatic actions on that container in the last 60 minutes;
+   - for `rollback`, a `-prev` container exists and no automatic rollback has happened for that entry since its last `image_deploy` or `image_rollback` task.
+
+   The action is helper `container_restart` (`restart`) or `container_rollback` (`rollback`). A container that is not `running` is never acted on. Counters live in memory: they reset on agent restart and, per entry, on every `image_deploy` or `image_rollback` task. When the limit or the once-per-deploy rule blocks an action, the agent reports `gave_up` once and then ignores that container until the next deploy or rollback task for its entry.
+5. **`auto_action` frame** (agent → server), one per action or `gave_up`:
+   ```json
+   {"v":1,"type":"auto_action","id":"<uuid>","t":"<RFC3339>","project":"<slug>","entry":"<name>","container":"<name>","action":"restart"|"rollback"|"gave_up","reason":"unhealthy for <n>s","result":"ok"|"error","digest":"sha256:<64 hex>"|null}
+   ```
+   Server → agent: `{"v":1,"type":"auto_action_ack","id":"<uuid>"}`, sent after the server has stored it, and also for a replayed `id` (not stored twice). The agent keeps unacknowledged frames in memory (cap 100, oldest dropped) and resends them after a reconnect. `reason` is at most 200 bytes. `digest` is the image digest of the container running after the action.
+6. **Gate:** `hello.programs` gains `"health_policy": true`. The server sends `health_policy` in a spec only to such an agent (api-v1 v1.15 item 2), and sends `auto_action_ack` only on a connection whose hello advertised it.
+7. **Docker restart policy is unchanged.** Docker still restarts only on exit; the supervisor covers `unhealthy`.
+
+### v1.9 rev 2 amendments (2026-10-23, Joe "yes" after the w31 reviews; these replace the matching rules above)
+- **Item 1:**
+  - `on_deploy_failure: "keep"` combined with `on_unhealthy` other than `none` → `bad_spec`. A container kept after a failed deploy is never supervised.
+  - `on_unhealthy` other than `none` requires `spec.healthcheck` → `bad_spec` otherwise. This repeats the API rule as defense in depth, so an image-defined HEALTHCHECK alone never triggers actions.
+- **Item 4:**
+  - A `rollback` action with no `-prev` container reports `gave_up`.
+  - A supervisor action (helper call plus its status read) has a **30 s** budget.
+  - An image task for the same entry waits for the supervisor's lock within its own task timeout.
+  - When the agent cannot compute its host label (unreadable machine-id), the supervisor does not run.
+- **Item 5:**
+  - `result: "error"` means the helper call failed. `digest` is then `null`.
+  - The server stores such a frame with outcome `auto_failed` (api-v1 v1.15 rev 2).
+
+### v1.9 rev 3 amendments (2026-10-23, Joe "yes" after the pi3-2 live check of dev build 0.2.5.1; these replace the matching rules above)
+- **Finding:** an automatic restart or rollback of a container that ignores SIGTERM ran past the 25 s helper-call budget. The helper stop gives a container 30 s (`t=30`). The cancelled helper call left the container stopped, the agent reported `auto_failed`, and the supervisor then ignored the stopped container.
+- **Item 4, budget:** a supervisor action has a **60 s** helper call plus a **5 s** status read on its own context, 65 s in total. This replaces the rev 2 30 s budget. An image task for the same entry still waits for the supervisor's lock within its own task timeout.
+- **Item 4, completion (new):** once the helper has stopped a container for `container_restart` or `container_rollback`, it finishes the sequence on its own bounded context (at most 60 s) even when the caller's context is cancelled.
+  - For a restart: start the container.
+  - For a rollback: start `-prev`. If that fails, start the original container again.
+  - An automatic action must never leave a container stopped that was running before it. The same applies to the task verbs.
+- **Item 5:** when the helper call returns an error but the completion step left a container running, the frame is still `result: "error"`. The next poll judges the running container afresh.
+- **`container_rollback` order** (amends v1.5 rule 10 for a running original). The rev 3 completion rule needs the original to stay restorable:
+  - The original is renamed `<project>-<entry>-old`, and its file slot is moved aside.
+  - `-prev` and its slot are renamed back and started.
+  - Only then are the original and its slot removed.
+  - On any failure, both containers and both slots are put back and the original is started.
+  - A non-running original keeps the old order.
+  - The end state is unchanged. A leftover `-old`, for example after a crash, is cleaned up by the next deploy or rollback of that entry. It is never supervised or counted as current.
+- **Rev 3b (after the fix round 5 review, 2026-10-23).** This amendment replaces the cleanup sentence above.
+  - **Cleaning up a leftover `-old`.** Every service or job deploy, every rollback (running or not) and every remove of an entry first removes an `-old` container that the agent owns for that entry, together with its file slot. Its labels must pass the owner, project, entry and host checks. This happens before the `max_containers` check, so the removed `-old` frees its slot. A container named `-old` whose labels don't match is never touched; it makes the verb fail with `conflict`.
+  - **Recovery budget.** The restart's start step and the rollback's restore run on a fresh recovery context of 20 s. This context is not derived from the 60 s finish context, so a stop that used up the whole budget still restarts the original.
+  - **Entry names.** An entry name must not end with `-old` (agent `ValidEntry`, same rule as `-prev`).
+  - **Logging.** A failure to restore a file slot, or to remove `-old` after a successful rollback, is logged. The rollback still reports success.
