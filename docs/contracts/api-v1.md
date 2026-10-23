@@ -22,6 +22,7 @@
 | `error` | 500 |
 | `rate_limited` | 429 (v1.5) |
 | `not_implemented` | 501 (v1.6) |
+| `registry_unavailable` | 502 (v1.16: a container registry lookup failed; `payload.reason`) |
 
   The device token endpoint also uses `authorization_pending`, `slow_down`, `expired_token`, and `access_denied`, all with HTTP 400.
 - **Auth:** `Authorization: Bearer <session token>` on every route except those marked public. A missing, expired, or unknown token, or a disabled user, gives `unauthorized`.
@@ -595,3 +596,49 @@ ImageSpec    gains "files":[{"file":string,"target":string}]   // default []
 
 ### v1.15 rev 3 amendment (2026-10-23, agent-protocol v1.9 rev 3b)
 - **Entry names:** an image entry `name` must not end with `-old` either. The rule is the same as for `-prev`, and it applies on create and replace (`bad_request`). The agent uses `<project>-<entry>-old` while it rolls back. Neither dev nor production has an entry name ending in `-old` (checked 2026-10-23).
+
+## v1.16 registry tags and tag digests (2026-10-23, approved spec `docs/spec-registry-tags.md` rev 4; additive, no migration)
+
+1. **`GET /v1/projects/{id}/image-tags?image=<ref>`**: owner or admin, console session only. Other session kinds, including MCP-delegated tokens, get 403. These routes are not under `/catalog/`, so they cannot shadow catalog entry names.
+   - `image` is parsed like a catalog image reference. Its tag and digest are ignored.
+   - The registry host must be either a host stored in **this** project's registries, or one of `docker.io`, `ghcr.io`, `quay.io`, `gcr.io`, `registry.gitlab.com`, `public.ecr.aws`, `mcr.microsoft.com`. Any other host → `bad_request`, msg `registry not allowed`. `docker.io` is fetched from `registry-1.docker.io`.
+   - **Outbound:**
+     - HTTPS on **port 443 only**. A stored host with another port gets no lookups; deploys are unaffected.
+     - Every connection is checked after DNS resolution, on the IP actually dialled: the registry, token realms, redirects (at most 3) and `Link` next pages. Each must use HTTPS, port 443 and have no userinfo.
+     - Refused addresses (an IPv6 address with a zone is always refused):
+       - loopback, private, link-local, CGNAT, multicast, unspecified, `0.0.0.0/8` and broadcast;
+       - the reserved and documentation ranges (`192.0.0.0/24`, `192.0.2.0/24`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `240.0.0.0/4`) and `168.63.129.16`;
+       - IPv6 ULA, link-local, site-local, `100::/64`, NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`), IPv4-compatible (`::/96`), 6to4 (`2002::/16`), and IPv4-mapped forms of all of these.
+     - Next pages must stay on the same host. A redirect to another host (including a subdomain) drops `Authorization`.
+     - Limits: 5 s per request, 12 s per lookup, 32 KiB of response headers, 1 MiB per body, at most 5 pages and 500 tags read.
+     - At most 32 lookups run at once across all users. Beyond that → `rate_limited`.
+     - Proxy settings are ignored. `BOT_API_REGISTRY_ALLOW_PRIVATE=1` (dev only) lifts the address and port checks, not HTTPS.
+   - **Auth:**
+     - The Distribution v2 Bearer flow, with scope `repository:<path>:pull`.
+     - The stored username and token are sent as Basic only to a realm whose host and port equal the registry's, or to `auth.docker.io` for `docker.io`. Otherwise the token is requested anonymously.
+     - A plain `Basic` challenge from the registry host itself is answered with that host's stored credential.
+   - **Response** in the standard envelope: `payload {"items":[{"tag":string}],"truncated":bool}`, at most 200 items.
+     - Tags must match `^[A-Za-z0-9_][A-Za-z0-9._-]{0,127}$`; others are dropped.
+     - Order: semver-like tags descending, then `latest`, then the rest in reverse lexical order.
+     - `truncated` is also true when the page or tag cap left tags unread.
+2. **`GET /v1/projects/{id}/image-digest?image=<repo>:<tag>`**: same access, hosts, outbound rules, auth, errors and logging as item 1. It shares item 1's rate bucket.
+   - `image` must have a tag and no digest, otherwise `bad_request` `invalid image`.
+   - The API sends `HEAD /v2/<path>/manifests/<tag>` with Accept for the OCI index, the Docker manifest list v2, the OCI manifest and the Docker manifest v2, and reads `Docker-Content-Digest`. If that header is missing, it sends a GET (body ≤ 4 MiB) and uses the sha256 of the body.
+   - **Response:** `payload {"digest":"sha256:<64 hex>"}`.
+3. **Errors:**
+   - `bad_request` (400): `invalid image` or `registry not allowed`.
+   - `rate_limited` (429) with `Retry-After`: the per-user limit or the global concurrency cap.
+   - A missing secrets key while a registry is stored → the same response the deploy routes give.
+   - `registry_unavailable` (502) with `payload {"reason"}`:
+     - `auth_failed`: a stored credential that was sent and refused.
+     - `not_found`: a missing repository or tag. This includes a 401 or 403 after the token flow when no stored credential was sent.
+     - `timeout`.
+     - `unreachable`: DNS, connect, TLS, an address or port refusal, or a registry answering 429 or 5xx.
+     - `bad_response`: a malformed answer or an invalid digest.
+   - Registry bodies are never echoed.
+4. **Cache, rate limit and logging:**
+   - Results are cached 60 s per (project, host, path), and per (project, host, path, tag) for digests. At most 1024 entries; when full, a new result is not stored. Errors are not cached.
+   - 20 uncached lookups per user per minute, shared by both routes.
+   - Each lookup logs kind, host, path, outcome (`cache` for hits), duration, and `auth: stored|anonymous|cache` (whether the credential was sent; `cache` on a hit). Tokens are never logged. No audit row.
+5. **Registry tokens** (amends the v1.8 sealing paragraph): besides building `image_deploy`/`image_rollback` tasks, a stored token is decrypted for items 1 and 2, and only for an image whose registry host equals the stored host in the same project.
+6. **Unchanged:** no MCP tools for registries or tags. The stored image reference and the deploy path are unchanged; a picked `repo:tag@sha256:…` is stored as typed. An older API answers 404, and clients fall back to a plain input.

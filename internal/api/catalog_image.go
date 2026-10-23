@@ -1109,14 +1109,22 @@ func (s *Server) registryAuth(ctx context.Context, projectID uuid.UUID, host str
 	if err != nil {
 		return nil, err
 	}
-	if s.Secrets == nil {
-		return nil, errSecretsKey
-	}
-	token, err := s.Secrets.Open(seal.RegistryAAD(projectID.String(), host), mat.Nonce, mat.Ciphertext)
+	token, err := s.openRegistry(projectID, mat)
 	if err != nil {
-		return nil, errDecrypt
+		return nil, err
 	}
-	return map[string]any{"host": host, "username": mat.Username, "token": string(token)}, nil
+	return map[string]any{"host": host, "username": mat.Username, "token": token}, nil
+}
+
+func (s *Server) openRegistry(projectID uuid.UUID, m store.RegistryMaterial) (string, error) {
+	if s.Secrets == nil {
+		return "", errSecretsKey
+	}
+	plain, err := s.Secrets.Open(seal.RegistryAAD(projectID.String(), m.Host), m.Nonce, m.Ciphertext)
+	if err != nil {
+		return "", errDecrypt
+	}
+	return string(plain), nil
 }
 
 // storedSpec is the entry's ImageSpec for the task frame. Inline env, env_sets,

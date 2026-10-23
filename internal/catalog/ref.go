@@ -26,6 +26,14 @@ type ImageRef struct {
 	Image string
 	// Host is the registry host, including a port. docker.io is explicit.
 	Host string
+	// Path is the repository path, with library/ for single-name Hub images.
+	Path string
+	// Tag is the tag, latest when neither a tag nor a digest was written.
+	Tag string
+	// Digest is the sha256 digest, or empty.
+	Digest string
+	// TagGiven is true when the reference itself carried a tag.
+	TagGiven bool
 }
 
 // ParseImageRef normalises a Docker reference the way the agent does.
@@ -74,6 +82,7 @@ func ParseImageRef(raw string) (ImageRef, error) {
 	if host == dockerHub && len(parts) != 2 {
 		return ImageRef{}, fieldErr("invalid image")
 	}
+	tagGiven := tag != ""
 	if tag == "" && digest == "" {
 		tag = "latest"
 	}
@@ -87,7 +96,7 @@ func ParseImageRef(raw string) (ImageRef, error) {
 	if len(stored) > maxImageLen {
 		return ImageRef{}, fieldErr("invalid image")
 	}
-	return ImageRef{Image: stored, Host: host}, nil
+	return ImageRef{Image: stored, Host: host, Path: path, Tag: tag, Digest: digest, TagGiven: tagGiven}, nil
 }
 
 func splitDockerDomain(name string) (host, path string) {
@@ -119,6 +128,11 @@ func ValidRegistryHost(host string) bool {
 		}
 	}
 	return true
+}
+
+// ValidTag reports whether tag matches the reference tag grammar.
+func ValidTag(tag string) bool {
+	return tagRe.MatchString(tag)
 }
 
 // ValidDigest reports whether digest is sha256 and 64 lowercase hex digits.

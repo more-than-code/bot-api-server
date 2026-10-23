@@ -83,6 +83,8 @@ func TestRouteTable(t *testing.T) {
 		"GET /v1/projects/{id}/registries",
 		"PUT /v1/projects/{id}/registries/{host}",
 		"DELETE /v1/projects/{id}/registries/{host}",
+		"GET /v1/projects/{id}/image-tags",
+		"GET /v1/projects/{id}/image-digest",
 		"GET /v1/projects/{id}/files",
 		"GET /v1/projects/{id}/files/{name}",
 		"PUT /v1/projects/{id}/files/{name}",
@@ -245,6 +247,7 @@ func TestEnvelopeStatus(t *testing.T) {
 		{"invalid_token", 401},
 		{"rate_limited", 429},
 		{"not_implemented", 501},
+		{"registry_unavailable", 502},
 	}
 	for _, tc := range cases {
 		rec := httptest.NewRecorder()

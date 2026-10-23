@@ -26,6 +26,9 @@ type Config struct {
 	// SecretsKeyFile is optional. Empty means env-set and registry writes
 	// that need the key are unavailable. The file contents are not stored here.
 	SecretsKeyFile string
+	// RegistryAllowPrivate is BOT_API_REGISTRY_ALLOW_PRIVATE=1 (dev only). It
+	// lifts only the address and port checks on registry tag and digest lookups.
+	RegistryAllowPrivate bool
 }
 
 const defaultIssuer = "https://accounts.google.com"
@@ -48,6 +51,7 @@ func FromEnv(getenv func(string) string, migrateOnly bool) (Config, error) {
 		ConsoleOrigin:         strings.TrimSpace(getenv("BOT_API_CONSOLE_ORIGIN")),
 		MCPClientSecretFile:   strings.TrimSpace(getenv("BOT_API_MCP_CLIENT_SECRET_FILE")),
 		SecretsKeyFile:        strings.TrimSpace(getenv("BOT_SECRETS_KEY_FILE")),
+		RegistryAllowPrivate:  strings.TrimSpace(getenv("BOT_API_REGISTRY_ALLOW_PRIVATE")) == "1",
 	}
 	if cfg.GoogleIssuer == "" {
 		cfg.GoogleIssuer = defaultIssuer

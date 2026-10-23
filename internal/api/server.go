@@ -14,6 +14,7 @@ import (
 	"github.com/more-than-code/bot-api-server/internal/audit"
 	"github.com/more-than-code/bot-api-server/internal/auth"
 	"github.com/more-than-code/bot-api-server/internal/authz"
+	"github.com/more-than-code/bot-api-server/internal/registry"
 	"github.com/more-than-code/bot-api-server/internal/seal"
 	"github.com/more-than-code/bot-api-server/internal/store"
 )
@@ -35,6 +36,8 @@ type Server struct {
 	// Secrets is nil when BOT_SECRETS_KEY_FILE is unset. Env-set writes,
 	// registry writes, and deploys that need a secret then return unavailable.
 	Secrets *seal.Box
+	// Registry serves the v1.16 tag and digest lookups. Nil makes them unavailable.
+	Registry *registry.Service
 	// imageBudget, when non-zero, replaces the image task timeout.
 	// Production leaves it at 0. Tests set it so a timeout does not wait
 	// out the real deploy budget.
@@ -125,6 +128,8 @@ func contractRoutes() []route {
 		{"GET /v1/projects/{id}/registries", false, (*Server).handleRegistryList, delegatedDeny},
 		{"PUT /v1/projects/{id}/registries/{host}", false, (*Server).handleRegistryPut, delegatedHandler},
 		{"DELETE /v1/projects/{id}/registries/{host}", false, (*Server).handleRegistryDelete, delegatedHandler},
+		{"GET /v1/projects/{id}/image-tags", false, (*Server).handleImageTags, delegatedDeny},
+		{"GET /v1/projects/{id}/image-digest", false, (*Server).handleImageDigest, delegatedDeny},
 		{"GET /v1/projects/{id}/files", false, (*Server).handleFileList, delegatedDeny},
 		{"GET /v1/projects/{id}/files/{name}", false, (*Server).handleFileGet, delegatedDeny},
 		{"PUT /v1/projects/{id}/files/{name}", false, (*Server).handleFilePut, delegatedHandler},

@@ -17,6 +17,7 @@ import (
 	"github.com/more-than-code/bot-api-server/internal/auth"
 	"github.com/more-than-code/bot-api-server/internal/config"
 	"github.com/more-than-code/bot-api-server/internal/db"
+	"github.com/more-than-code/bot-api-server/internal/registry"
 	"github.com/more-than-code/bot-api-server/internal/seal"
 )
 
@@ -101,6 +102,10 @@ func run(args []string, getenv func(string) string, d deps) error {
 		Log:           log,
 		Now:           now,
 		Secrets:       secrets,
+		Registry:      registry.NewService(registry.Options{AllowPrivate: cfg.RegistryAllowPrivate}),
+	}
+	if cfg.RegistryAllowPrivate {
+		log.Warn("registry lookups may reach private addresses and other ports (BOT_API_REGISTRY_ALLOW_PRIVATE=1, dev only)")
 	}
 	root := http.NewServeMux()
 	root.Handle("GET /agent/v1/ws", hub)

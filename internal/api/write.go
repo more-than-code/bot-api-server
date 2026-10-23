@@ -46,6 +46,8 @@ func phrase(code string) string {
 		return "rate limited"
 	case "not_implemented":
 		return "not implemented"
+	case "registry_unavailable":
+		return "registry unavailable"
 	default:
 		return code
 	}
@@ -73,6 +75,8 @@ func statusFor(code string) int {
 		return http.StatusGatewayTimeout
 	case "not_implemented":
 		return http.StatusNotImplemented
+	case "registry_unavailable":
+		return http.StatusBadGateway
 	default:
 		return http.StatusInternalServerError
 	}
