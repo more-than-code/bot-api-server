@@ -125,6 +125,7 @@ func contractRoutes() []route {
 		{"DELETE /v1/projects/{id}/env-sets/{set}", false, (*Server).handleEnvSetDelete, delegatedHandler},
 		{"PUT /v1/projects/{id}/env-sets/{set}/keys/{key}", false, (*Server).handleEnvKeyPut, delegatedDeny},
 		{"DELETE /v1/projects/{id}/env-sets/{set}/keys/{key}", false, (*Server).handleEnvKeyDelete, delegatedDeny},
+		{"POST /v1/projects/{id}/env-sets/{set}/secret", false, (*Server).handleEnvKeysSecret, delegatedDeny},
 		{"GET /v1/projects/{id}/registries", false, (*Server).handleRegistryList, delegatedDeny},
 		{"PUT /v1/projects/{id}/registries/{host}", false, (*Server).handleRegistryPut, delegatedHandler},
 		{"DELETE /v1/projects/{id}/registries/{host}", false, (*Server).handleRegistryDelete, delegatedHandler},

@@ -513,6 +513,51 @@ func (m *Mem) DeleteEnvKey(_ context.Context, projectID uuid.UUID, name, key str
 	return nil
 }
 
+func (m *Mem) MakeEnvKeysSecret(_ context.Context, projectID uuid.UUID, name string, keys []string, seal store.EnvSealer, actor uuid.UUID, at time.Time) (store.EnvSet, []string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	id := envKey(projectID, name)
+	set, ok := m.envSets[id]
+	if !ok {
+		return store.EnvSet{}, nil, store.ErrNotFound
+	}
+	values := append([]envValueRec(nil), m.envValues[id]...)
+	index := map[string]int{}
+	for i, v := range values {
+		index[v.Key] = i
+	}
+	for _, key := range keys {
+		if _, ok := index[key]; !ok {
+			return store.EnvSet{}, nil, &store.MissingEnvKeyError{Key: key}
+		}
+	}
+	changed := []string{}
+	for _, key := range keys {
+		i := index[key]
+		if values[i].IsSecret {
+			continue
+		}
+		sealed, err := seal(key, values[i].Plain)
+		if err != nil {
+			return store.EnvSet{}, nil, err
+		}
+		values[i] = envValueRec{
+			Key: key, IsSecret: true,
+			Nonce: append([]byte(nil), sealed.Nonce...), Ciphertext: append([]byte(nil), sealed.Ciphertext...),
+			KeyVersion: sealed.KeyVersion,
+		}
+		changed = append(changed, key)
+	}
+	if len(changed) > 0 {
+		set.UpdatedAt = at
+		set.UpdatedBy = actor
+		m.envSets[id] = set
+		m.envValues[id] = values
+	}
+	sort.Strings(changed)
+	return m.envSetViewLocked(projectID, set), changed, nil
+}
+
 func storedEnvKey(key string, secret bool, plain string) store.EnvKey {
 	item := store.EnvKey{Key: key, IsSecret: secret}
 	if !secret {

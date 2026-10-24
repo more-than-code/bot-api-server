@@ -642,3 +642,14 @@ ImageSpec    gains "files":[{"file":string,"target":string}]   // default []
    - Each lookup logs kind, host, path, outcome (`cache` for hits), duration, and `auth: stored|anonymous|cache` (whether the credential was sent; `cache` on a hit). Tokens are never logged. No audit row.
 5. **Registry tokens** (amends the v1.8 sealing paragraph): besides building `image_deploy`/`image_rollback` tasks, a stored token is decrypted for items 1 and 2, and only for an image whose registry host equals the stored host in the same project.
 6. **Unchanged:** no MCP tools for registries or tags. The stored image reference and the deploy path are unchanged; a picked `repo:tag@sha256:…` is stored as typed. An older API answers 404, and clients fall back to a plain input.
+
+## v1.17 plain env-set keys made secret (2026-10-25, approved spec `docs/spec-env-make-secret.md` rev 1; additive, no migration)
+
+1. **`POST /v1/projects/{id}/env-sets/{set}/secret`**, body `{"keys":[KEY,...]}`: marks plain keys secret. Owner or admin, console session only; refused for `api_delegated` (`delegated.denied`) like v1.13 items 3 and 4. No MCP tool.
+   - `keys`: 1–200 entries, each matching the dotenv key grammar, no duplicates; otherwise `bad_request`. An unknown set or any key not in the set → `not_found` naming the key; nothing changes.
+   - One transaction: each named plain key's stored value is sealed with the current secrets key and stored as secret (`value` cleared). Keys already secret are skipped. The set's `updated_at`/`updated_by` change when any key changed.
+   - Response: the set as v1.13 item 2 shows it.
+   - Audit: one `env_set.key_secret` row per changed key (`set`, `key`), never the value. Skipped keys get no row.
+2. **Amends v1.13 item 5:** a secret key stays secret; a plain key becomes secret only through item 1. `PUT …/keys/{key}` still refuses any flag change (`secret flag is fixed; delete and re-add the key`).
+3. **Approvals and hash:** unchanged. `spec_hash` covers key names only, so item 1 voids no host approvals (as a value-only change, v1.13 item 7). The next `image_deploy`/`image_rollback` lists the key in `secret_keys` (agent-protocol v1.5).
+4. **Rollback note:** keys marked secret stay secret under an older API, which reads them normally.

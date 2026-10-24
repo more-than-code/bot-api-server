@@ -80,6 +80,7 @@ func TestRouteTable(t *testing.T) {
 		"DELETE /v1/projects/{id}/env-sets/{set}",
 		"PUT /v1/projects/{id}/env-sets/{set}/keys/{key}",
 		"DELETE /v1/projects/{id}/env-sets/{set}/keys/{key}",
+		"POST /v1/projects/{id}/env-sets/{set}/secret",
 		"GET /v1/projects/{id}/registries",
 		"PUT /v1/projects/{id}/registries/{host}",
 		"DELETE /v1/projects/{id}/registries/{host}",

@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -18,6 +20,7 @@ const (
 	maxRegistryUser  = 255
 	maxRegistryToken = 4096
 	envPutLimit      = 2 << 20
+	maxSecretKeys    = 200
 )
 
 func (s *Server) handleEnvSetList(w http.ResponseWriter, r *http.Request) {
@@ -271,6 +274,106 @@ func (s *Server) handleEnvKeyDelete(w http.ResponseWriter, r *http.Request) {
 	writeOK(w, http.StatusOK, map[string]any{})
 }
 
+// handleEnvKeysSecret marks plain keys of a set secret (api-v1 v1.17 item 1).
+// It is one way: no route makes a secret key plain again.
+func (s *Server) handleEnvKeysSecret(w http.ResponseWriter, r *http.Request) {
+	p, id, ok := s.catalogProject(w, r)
+	if !ok {
+		return
+	}
+	if err := authz.Authorize(r.Context(), p.User.ID, id, authz.CapMembers); err != nil {
+		s.writeAuth(w, err)
+		return
+	}
+	if s.refuseDelegated(w, r, p, idPtr(id), nil, audit.ActionEnvSetKeySecret) || !requireConsole(w, p) {
+		return
+	}
+	name, ok := envSetName(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		Keys []string `json:"keys"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if !secretKeysOK(w, body.Keys) {
+		return
+	}
+	if s.Secrets == nil {
+		s.logger().Error("secrets key not configured")
+		writeCode(w, "unavailable", errSecretsKey.Error())
+		return
+	}
+	// The store reads each plain value under its row lock and calls this to
+	// seal it, so the value never leaves the transaction unsealed. A seal
+	// error comes back wrapped in sealFailure so it maps like other seal errors.
+	sealer := func(key, plain string) (store.EnvSecret, error) {
+		sealed, err := s.sealValue(id, name, key, plain)
+		if err != nil {
+			return store.EnvSecret{}, sealFailure{err}
+		}
+		return sealed, nil
+	}
+	set, changed, err := s.Store.MakeEnvKeysSecret(r.Context(), id, name, body.Keys, sealer, p.User.ID, s.now())
+	var missing *store.MissingEnvKeyError
+	var failed sealFailure
+	switch {
+	case errors.As(err, &failed):
+		s.secretWriteErr(w, failed.err)
+		return
+	case errors.As(err, &missing):
+		writeCode(w, "not_found", missing.Error())
+		return
+	case err != nil:
+		s.writeErr(w, err, false)
+		return
+	}
+	// The change is committed: a client disconnect must not drop its audit rows.
+	auditCtx := context.WithoutCancel(r.Context())
+	for _, key := range changed {
+		s.auditOK(auditCtx, p, store.AuditRow{
+			ProjectID: idPtr(id),
+			Action:    audit.ActionEnvSetKeySecret,
+			Detail:    map[string]any{"set": name, "key": key},
+		})
+	}
+	filled, ok := s.withPreviews(w, r, id, set)
+	if !ok {
+		return
+	}
+	writeOK(w, http.StatusOK, filled)
+}
+
+// sealFailure marks an error from the handler's sealer as it comes back
+// through MakeEnvKeysSecret, so it is answered by secretWriteErr.
+type sealFailure struct{ err error }
+
+func (f sealFailure) Error() string { return f.err.Error() }
+
+func (f sealFailure) Unwrap() error { return f.err }
+
+// secretKeysOK checks the v1.17 body: 1 to maxSecretKeys valid keys, no duplicates.
+func secretKeysOK(w http.ResponseWriter, keys []string) bool {
+	if len(keys) == 0 || len(keys) > maxSecretKeys {
+		writeCode(w, "bad_request", fmt.Sprintf("keys must list 1 to %d keys", maxSecretKeys))
+		return false
+	}
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		if !envKeyOK(w, key) {
+			return false
+		}
+		if seen[key] {
+			writeCode(w, "bad_request", "duplicate key "+key)
+			return false
+		}
+		seen[key] = true
+	}
+	return true
+}
+
 func (s *Server) handleRegistryList(w http.ResponseWriter, r *http.Request) {
 	p, id, ok := s.catalogProject(w, r)
 	if !ok {
@@ -401,16 +504,25 @@ func envSetName(w http.ResponseWriter, r *http.Request) (string, bool) {
 
 func envKeyName(w http.ResponseWriter, r *http.Request) (string, bool) {
 	key := r.PathValue("key")
-	if err := catalog.ValidateEnvKey(key); err != nil {
-		var field *catalog.FieldError
-		if errors.As(err, &field) {
-			writeCode(w, field.Code, field.Msg)
-			return "", false
-		}
-		writeCode(w, "bad_request", "invalid env key")
+	if !envKeyOK(w, key) {
 		return "", false
 	}
 	return key, true
+}
+
+// envKeyOK writes the ValidateEnvKey refusal and reports whether key is valid.
+func envKeyOK(w http.ResponseWriter, key string) bool {
+	err := catalog.ValidateEnvKey(key)
+	if err == nil {
+		return true
+	}
+	var field *catalog.FieldError
+	if errors.As(err, &field) {
+		writeCode(w, field.Code, field.Msg)
+		return false
+	}
+	writeCode(w, "bad_request", "invalid env key")
+	return false
 }
 
 func registryHost(w http.ResponseWriter, r *http.Request) (string, bool) {

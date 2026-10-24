@@ -59,6 +59,7 @@ const (
 	ActionEnvSetReplace            = "env_set.replace"
 	ActionEnvSetKeyPut             = "env_set.key_put"
 	ActionEnvSetKeyDelete          = "env_set.key_delete"
+	ActionEnvSetKeySecret          = "env_set.key_secret"
 	ActionEnvSetDelete             = "env_set.delete"
 	ActionEnvSetList               = "env_set.list"
 	ActionEnvSetGet                = "env_set.get"

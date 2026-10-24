@@ -722,6 +722,14 @@ type Store interface {
 	// A Secret that differs from the stored flag is ErrSecretFixed.
 	// The bool is true when the key was created. Only a created key rehashes.
 	PutEnvKey(ctx context.Context, projectID uuid.UUID, name string, in EnvKeyPut, actor uuid.UUID, at time.Time) (EnvKey, bool, error)
+	// MakeEnvKeysSecret marks plain keys secret in one transaction (api-v1 v1.17).
+	// It locks the set, then the named values, and calls seal with each plain
+	// value. A missing set is ErrNotFound; a key not in the set is
+	// *MissingEnvKeyError and nothing changes. Keys already secret are skipped.
+	// The set's updated_at and updated_by change only when a key changed.
+	// There is no rehash: spec_hash covers key names only.
+	// It returns the set and the changed key names, sorted.
+	MakeEnvKeysSecret(ctx context.Context, projectID uuid.UUID, name string, keys []string, seal EnvSealer, actor uuid.UUID, at time.Time) (EnvSet, []string, error)
 	// DeleteEnvKey removes one key and leaves the set, including an empty set.
 	// A missing set or key is ErrNotFound. Referencing entries are rehashed.
 	DeleteEnvKey(ctx context.Context, projectID uuid.UUID, name, key string, actor uuid.UUID, at time.Time) error

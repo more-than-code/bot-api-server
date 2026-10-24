@@ -103,6 +103,21 @@ type EnvSecret struct {
 	KeyVersion int
 }
 
+// EnvSealer seals one stored plain value for MakeEnvKeysSecret, which calls
+// it while holding the set's locks. It must be pure CPU work and must not
+// call the Store. Only Nonce, Ciphertext, and KeyVersion of its result are read.
+type EnvSealer func(key, plain string) (EnvSecret, error)
+
+// MissingEnvKeyError is a MakeEnvKeysSecret key that is not in the set.
+// It matches ErrNotFound. The message names the key, never a value.
+type MissingEnvKeyError struct {
+	Key string
+}
+
+func (e *MissingEnvKeyError) Error() string { return "key " + e.Key + " not found" }
+
+func (e *MissingEnvKeyError) Is(target error) bool { return target == ErrNotFound }
+
 // EnvMaterial is a stored env value, including ciphertext. It is not returned over HTTP.
 type EnvMaterial struct {
 	Key        string

@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"errors"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -403,9 +404,14 @@ SELECT name FROM app.env_sets WHERE project_id = $1::uuid ORDER BY name
 }
 
 func (d *DB) GetEnvSet(ctx context.Context, projectID uuid.UUID, name string) (store.EnvSet, error) {
+	return envSetView(ctx, d.pool, projectID, name)
+}
+
+// envSetView reads one set through q, a pool or a transaction.
+func envSetView(ctx context.Context, q queryer, projectID uuid.UUID, name string) (store.EnvSet, error) {
 	var set store.EnvSet
 	var by string
-	err := d.pool.QueryRow(ctx, `
+	err := q.QueryRow(ctx, `
 SELECT name, updated_at, updated_by::text
 FROM app.env_sets
 WHERE project_id = $1::uuid AND name = $2
@@ -416,7 +422,7 @@ WHERE project_id = $1::uuid AND name = $2
 	if set.UpdatedBy, err = parseID(by); err != nil {
 		return store.EnvSet{}, err
 	}
-	rows, err := d.pool.Query(ctx, `
+	rows, err := q.Query(ctx, `
 SELECT key, is_secret, value
 FROM app.env_values
 WHERE project_id = $1::uuid AND set_name = $2
@@ -541,17 +547,8 @@ func (d *DB) DeleteEnvKey(ctx context.Context, projectID uuid.UUID, name, key st
 		return mapErr(err)
 	}
 	defer tx.Rollback(ctx)
-	var locked string
-	err = tx.QueryRow(ctx, `
-SELECT name FROM app.env_sets
-WHERE project_id = $1::uuid AND name = $2
-FOR UPDATE
-`, projectID.String(), name).Scan(&locked)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return store.ErrNotFound
-	}
-	if err != nil {
-		return mapErr(err)
+	if err := lockEnvSet(ctx, tx, projectID, name); err != nil {
+		return err
 	}
 	tag, err := execTag(ctx, tx, `
 DELETE FROM app.env_values
@@ -573,6 +570,107 @@ WHERE project_id = $1::uuid AND name = $2
 		return err
 	}
 	return mapErr(tx.Commit(ctx))
+}
+
+// MakeEnvKeysSecret implements store.Store.MakeEnvKeysSecret; see that contract.
+func (d *DB) MakeEnvKeysSecret(ctx context.Context, projectID uuid.UUID, name string, keys []string, seal store.EnvSealer, actor uuid.UUID, at time.Time) (store.EnvSet, []string, error) {
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return store.EnvSet{}, nil, mapErr(err)
+	}
+	defer tx.Rollback(ctx)
+	// Lock the set before its values. PutEnvKey takes the same order.
+	if err := lockEnvSet(ctx, tx, projectID, name); err != nil {
+		return store.EnvSet{}, nil, err
+	}
+	rows, err := tx.Query(ctx, `
+SELECT key, is_secret, value FROM app.env_values
+WHERE project_id = $1::uuid AND set_name = $2 AND key = ANY($3::text[])
+ORDER BY key
+FOR UPDATE
+`, projectID.String(), name, keys)
+	if err != nil {
+		return store.EnvSet{}, nil, mapErr(err)
+	}
+	// plain holds each named plain key's value. A secret key maps to nil.
+	plain := map[string]*string{}
+	for rows.Next() {
+		var key string
+		var secret bool
+		var value *string
+		if err := rows.Scan(&key, &secret, &value); err != nil {
+			rows.Close()
+			return store.EnvSet{}, nil, mapErr(err)
+		}
+		if secret {
+			value = nil
+		} else if value == nil {
+			// Defensive: env_values_form_chk forbids a plain row with NULL value.
+			value = new(string)
+		}
+		plain[key] = value
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return store.EnvSet{}, nil, mapErr(err)
+	}
+	for _, key := range keys {
+		if _, ok := plain[key]; !ok {
+			return store.EnvSet{}, nil, &store.MissingEnvKeyError{Key: key}
+		}
+	}
+	changed := []string{}
+	for _, key := range keys {
+		value := plain[key]
+		if value == nil {
+			continue // already secret, or a duplicate of a key sealed above
+		}
+		sealed, err := seal(key, *value)
+		if err != nil {
+			return store.EnvSet{}, nil, err
+		}
+		if err := exec(ctx, tx, `
+UPDATE app.env_values
+SET is_secret = true, value = NULL, nonce = $4, ciphertext = $5, key_version = $6
+WHERE project_id = $1::uuid AND set_name = $2 AND key = $3
+`, projectID.String(), name, key, sealed.Nonce, sealed.Ciphertext, sealed.KeyVersion); err != nil {
+			return store.EnvSet{}, nil, mapErr(err)
+		}
+		plain[key] = nil
+		changed = append(changed, key)
+	}
+	if len(changed) > 0 {
+		if err := exec(ctx, tx, `
+UPDATE app.env_sets SET updated_at = $3, updated_by = $4::uuid
+WHERE project_id = $1::uuid AND name = $2
+`, projectID.String(), name, at, actor.String()); err != nil {
+			return store.EnvSet{}, nil, mapErr(err)
+		}
+	}
+	// Read the view before commit so nothing can fail after the change lands.
+	set, err := envSetView(ctx, tx, projectID, name)
+	if err != nil {
+		return store.EnvSet{}, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.EnvSet{}, nil, mapErr(err)
+	}
+	sort.Strings(changed)
+	return set, changed, nil
+}
+
+// lockEnvSet locks one set row. A missing set is ErrNotFound.
+func lockEnvSet(ctx context.Context, tx pgx.Tx, projectID uuid.UUID, name string) error {
+	var locked string
+	err := tx.QueryRow(ctx, `
+SELECT name FROM app.env_sets
+WHERE project_id = $1::uuid AND name = $2
+FOR UPDATE
+`, projectID.String(), name).Scan(&locked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.ErrNotFound
+	}
+	return mapErr(err)
 }
 
 func storedEnvKey(key string, secret bool, plain string) store.EnvKey {
