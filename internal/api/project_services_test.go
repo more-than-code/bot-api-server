@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http"
 	"net/url"
 	"strings"
@@ -589,4 +590,90 @@ func sameStrings(got, want []string) bool {
 		}
 	}
 	return true
+}
+
+func TestProjectServiceIncludeHealthChecks(t *testing.T) {
+	fx := newProjectServiceFixture(t)
+	home := fx.home.ID.String()
+	live, ready := "/live", "/ready"
+	if _, err := fx.w.mem.ReplaceHealthChecks(context.Background(), fx.apiID, []store.HealthCheckInput{
+		{Protocol: "http", Port: 8080, Path: &live, IntervalSec: 30, ExpectStatusMin: 200, ExpectStatusMax: 299, Enabled: true},
+		{Protocol: "http", Port: 8080, Path: &ready, IntervalSec: 60, ExpectStatusMin: 200, ExpectStatusMax: 399, Enabled: false},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	counter := &checksBatchCounter{Store: fx.w.srv.Store}
+	fx.w.srv.Store = counter
+
+	code, env := fx.w.do(fx.tok["home"], http.MethodGet, "/v1/services/"+fx.apiID.String(), "")
+	if code != http.StatusOK {
+		t.Fatalf("detail %d %s", code, env.Msg)
+	}
+	detail, _ := json.Marshal(objectPayload(t, env)["health_checks"])
+
+	with := fx.list(t, fx.tok["home"], home, url.Values{"include": {"health_checks"}})
+	if counter.n != 1 {
+		t.Fatalf("batch calls %d", counter.n)
+	}
+	items := listItems(t, with)
+	if len(items) != 4 {
+		t.Fatalf("items %d", len(items))
+	}
+	for _, item := range items {
+		checks, ok := item["health_checks"].([]any)
+		if !ok {
+			t.Fatalf("health_checks %#v", item["health_checks"])
+		}
+		if item["id"] == fx.apiID.String() {
+			got, _ := json.Marshal(checks)
+			if len(checks) != 2 || string(got) != string(detail) {
+				t.Fatalf("list checks %s detail %s", got, detail)
+			}
+		} else if len(checks) != 0 {
+			t.Fatalf("%v checks %#v", item["name"], checks)
+		}
+	}
+
+	without := fx.list(t, fx.tok["home"], home, url.Values{})
+	if counter.n != 1 {
+		t.Fatal("list without include read checks")
+	}
+	for _, item := range listItems(t, without) {
+		if _, ok := item["health_checks"]; ok {
+			t.Fatalf("health_checks without include %#v", item)
+		}
+	}
+
+	first := fx.list(t, fx.tok["home"], home, url.Values{"include": {"health_checks"}, "limit": {"2"}})
+	plain := fx.list(t, fx.tok["home"], home, url.Values{"limit": {"2"}})
+	if objectPayload(t, first)["next_cursor"] != objectPayload(t, plain)["next_cursor"] {
+		t.Fatal("include changed the cursor")
+	}
+
+	empty := fx.list(t, fx.tok["home"], home, url.Values{"include": {"health_checks"}, "q": {"no-such-service-zz"}})
+	if items, ok := objectPayload(t, empty)["items"].([]any); !ok || len(items) != 0 {
+		t.Fatalf("empty page items %#v", objectPayload(t, empty)["items"])
+	}
+	code, env = fx.w.do(fx.tok["outsider"], http.MethodGet, servicesPath(home, url.Values{"include": {"health_checks"}}), "")
+	if code != http.StatusNotFound || env.Code != "not_found" {
+		t.Fatalf("non-member %d %s %s", code, env.Code, env.Msg)
+	}
+
+	for _, bad := range []string{"x", "health_check", "health_checks,x"} {
+		code, env = fx.w.do(fx.tok["home"], http.MethodGet, servicesPath(home, url.Values{"include": {bad}}), "")
+		if code != http.StatusBadRequest || env.Code != "bad_request" || env.Msg != "invalid include" {
+			t.Fatalf("include %q: %d %s %s", bad, code, env.Code, env.Msg)
+		}
+	}
+}
+
+// checksBatchCounter counts ListHealthChecksForServices calls.
+type checksBatchCounter struct {
+	store.Store
+	n int
+}
+
+func (c *checksBatchCounter) ListHealthChecksForServices(ctx context.Context, ids []string) (map[string][]store.HealthCheck, error) {
+	c.n++
+	return c.Store.ListHealthChecksForServices(ctx, ids)
 }

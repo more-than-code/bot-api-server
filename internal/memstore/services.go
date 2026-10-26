@@ -188,7 +188,27 @@ func (m *Mem) listHealthChecksLocked(serviceID uuid.UUID) []store.HealthCheck {
 	if out == nil {
 		out = []store.HealthCheck{}
 	}
+	// Ordered by id, as the DB does.
+	sort.Slice(out, func(i, j int) bool { return out[i].ID.String() < out[j].ID.String() })
 	return out
+}
+
+func (m *Mem) ListHealthChecksForServices(_ context.Context, serviceIDs []string) (map[string][]store.HealthCheck, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[string][]store.HealthCheck{}
+	for _, raw := range serviceIDs {
+		id, err := uuid.Parse(raw)
+		if err != nil {
+			continue
+		}
+		checks := m.listHealthChecksLocked(id)
+		if len(checks) == 0 {
+			continue
+		}
+		out[id.String()] = checks
+	}
+	return out, nil
 }
 
 func (m *Mem) HealthChecksForHost(_ context.Context, hostID uuid.UUID) ([]store.AgentCheck, error) {

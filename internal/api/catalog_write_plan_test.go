@@ -107,9 +107,9 @@ func TestLoggingPlan(t *testing.T) {
 }
 
 func TestHealthcheckPlan(t *testing.T) {
-	img := mustPlanImage(t, "web", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD","hello world"]}}`, nil, nil)
+	img := mustPlanImage(t, "web", `{"kind":"service","image":"nginx","healthcheck":{"test":["echo","hello world"]}}`, nil, nil)
 	got := catalogCreatePlan("Proj", "web", img)
-	want := `healthcheck CMD "hello world" interval 30 timeout 5 retries 3 start 0`
+	want := `healthcheck echo "hello world" interval 30 timeout 5 retries 3 start 0`
 	if !strings.Contains(got, want) {
 		t.Fatalf("create plan %s", got)
 	}

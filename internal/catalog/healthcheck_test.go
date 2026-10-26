@@ -18,24 +18,24 @@ func TestHealthcheckRules(t *testing.T) {
 		spec string
 		want string
 	}{
-		{"low interval", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD"],"interval_sec":4}}`, "invalid healthcheck.interval_sec"},
-		{"high interval", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD"],"interval_sec":301}}`, "invalid healthcheck.interval_sec"},
-		{"float interval", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD"],"interval_sec":30.0}}`, "invalid healthcheck.interval_sec"},
-		{"low timeout", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD"],"timeout_sec":0}}`, "invalid healthcheck.timeout_sec"},
-		{"high timeout", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD"],"timeout_sec":61}}`, "invalid healthcheck.timeout_sec"},
-		{"timeout equals interval", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD"],"interval_sec":5}}`, "invalid healthcheck.timeout_sec"},
-		{"timeout not less", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD"],"interval_sec":30,"timeout_sec":30}}`, "invalid healthcheck.timeout_sec"},
-		{"retries", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD"],"retries":0}}`, "invalid healthcheck.retries"},
-		{"retries high", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD"],"retries":11}}`, "invalid healthcheck.retries"},
-		{"retries bool", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD"],"retries":true}}`, "invalid healthcheck.retries"},
-		{"start", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD"],"start_period_sec":601}}`, "invalid healthcheck.start_period_sec"},
+		{"low interval", `{"kind":"service","image":"nginx","healthcheck":{"test":["true"],"interval_sec":4}}`, "invalid healthcheck.interval_sec"},
+		{"high interval", `{"kind":"service","image":"nginx","healthcheck":{"test":["true"],"interval_sec":301}}`, "invalid healthcheck.interval_sec"},
+		{"float interval", `{"kind":"service","image":"nginx","healthcheck":{"test":["true"],"interval_sec":30.0}}`, "invalid healthcheck.interval_sec"},
+		{"low timeout", `{"kind":"service","image":"nginx","healthcheck":{"test":["true"],"timeout_sec":0}}`, "invalid healthcheck.timeout_sec"},
+		{"high timeout", `{"kind":"service","image":"nginx","healthcheck":{"test":["true"],"timeout_sec":61}}`, "invalid healthcheck.timeout_sec"},
+		{"timeout equals interval", `{"kind":"service","image":"nginx","healthcheck":{"test":["true"],"interval_sec":5}}`, "invalid healthcheck.timeout_sec"},
+		{"timeout not less", `{"kind":"service","image":"nginx","healthcheck":{"test":["true"],"interval_sec":30,"timeout_sec":30}}`, "invalid healthcheck.timeout_sec"},
+		{"retries", `{"kind":"service","image":"nginx","healthcheck":{"test":["true"],"retries":0}}`, "invalid healthcheck.retries"},
+		{"retries high", `{"kind":"service","image":"nginx","healthcheck":{"test":["true"],"retries":11}}`, "invalid healthcheck.retries"},
+		{"retries bool", `{"kind":"service","image":"nginx","healthcheck":{"test":["true"],"retries":true}}`, "invalid healthcheck.retries"},
+		{"start", `{"kind":"service","image":"nginx","healthcheck":{"test":["true"],"start_period_sec":601}}`, "invalid healthcheck.start_period_sec"},
 		{"nul", `{"kind":"service","image":"nginx","healthcheck":{"test":["` + sentinel + `\u0000"]}}`, "invalid healthcheck.test"},
 		{"empty arg", `{"kind":"service","image":"nginx","healthcheck":{"test":[""]}}`, "invalid healthcheck.test"},
 		{"long arg", `{"kind":"service","image":"nginx","healthcheck":{"test":["` + strings.Repeat("a", 1025) + `"]}}`, "invalid healthcheck.test"},
 		{"33 args", `{"kind":"service","image":"nginx","healthcheck":{"test":` + args33 + `}}`, "invalid healthcheck.test"},
 		{"test string", `{"kind":"service","image":"nginx","healthcheck":{"test":"` + sentinel + `"}}`, "invalid healthcheck.test"},
 		{"missing test", `{"kind":"service","image":"nginx","healthcheck":{}}`, "invalid healthcheck.test"},
-		{"unknown", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD"],"shell":true}}`, "invalid healthcheck"},
+		{"unknown", `{"kind":"service","image":"nginx","healthcheck":{"test":["true"],"shell":true}}`, "invalid healthcheck"},
 		{"not object", `{"kind":"service","image":"nginx","healthcheck":"` + sentinel + `"}`, "invalid healthcheck"},
 		{"job", `{"kind":"job","image":"nginx","healthcheck":{"test":["` + sentinel + `"]}}`, "healthcheck applies to services"},
 		{"job junk", `{"kind":"job","image":"nginx","healthcheck":"` + sentinel + `"}`, "healthcheck applies to services"},
@@ -62,6 +62,50 @@ func TestHealthcheckRules(t *testing.T) {
 	}
 }
 
+func TestHealthcheckTestKeyword(t *testing.T) {
+	const sentinel = "SENTINEL_ARGV"
+	const want = "invalid healthcheck.test: give the command itself, without CMD, CMD-SHELL or NONE"
+	for _, test := range []string{
+		`["CMD","` + sentinel + `"]`, `["CMD-SHELL","` + sentinel + `"]`, `["NONE","` + sentinel + `"]`,
+		`["CMD"]`, `["CMD-SHELL"]`, `["NONE"]`,
+	} {
+		spec := `{"kind":"service","image":"nginx","healthcheck":{"test":` + test + `}}`
+		_, err := BuildImage("web", []byte(spec), nil, nil)
+		var fe *FieldError
+		if !errors.As(err, &fe) || fe.Code != CodeBadRequest || fe.Msg != want || strings.Contains(err.Error(), sentinel) {
+			t.Fatalf("%s: %v", test, err)
+		}
+	}
+	// The rule is an exact, case-sensitive match on test[0] (api-v1 v1.18 item 1),
+	// so "CMD " and "cmd" are ordinary commands.
+	for _, test := range []string{`["redis-cli","ping"]`, `["sh","-c","x"]`, `["echo","CMD"]`, `["cmd"]`, `["CMD "]`} {
+		img, err := BuildImage("web", []byte(`{"kind":"service","image":"nginx","healthcheck":{"test":`+test+`}}`), nil, nil)
+		if err != nil || img.Healthcheck == nil {
+			t.Fatalf("%s: %v", test, err)
+		}
+	}
+}
+
+func TestHealthcheckStoredKeywordParses(t *testing.T) {
+	// Entries stored before v1.18 are not rewritten (api-v1 v1.18 item 1).
+	img, err := BuildImage("web", []byte(`{"kind":"service","image":"nginx","healthcheck":{"test":["x"]}}`), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img.Healthcheck.Test = []string{"CMD", "x"}
+	stored := SpecJSON(img)
+	if !strings.Contains(stored, `"test":["CMD","x"]`) {
+		t.Fatalf("stored %s", stored)
+	}
+	parsed, err := ParseStored([]byte(stored))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if SpecJSON(parsed) != stored || CanonicalImage(parsed, nil) != CanonicalImage(img, nil) || ImageHash(parsed, nil) != ImageHash(img, nil) {
+		t.Fatalf("round trip %s", SpecJSON(parsed))
+	}
+}
+
 func TestHealthcheckDefaultsAndHash(t *testing.T) {
 	bare, err := BuildImage("web", []byte(`{"kind":"service","image":"nginx"}`), nil, nil)
 	if err != nil {
@@ -71,7 +115,7 @@ func TestHealthcheckDefaultsAndHash(t *testing.T) {
 	if ImageHash(bare, nil) != pinned || strings.Contains(SpecJSON(bare), "healthcheck") || strings.Contains(CanonicalImage(bare, nil), "healthcheck") {
 		t.Fatalf("absent healthcheck changed the hash %s", ImageHash(bare, nil))
 	}
-	img, err := BuildImage("web", []byte(`{"kind":"service","image":"nginx","healthcheck":{"test":["CMD","wget"]}}`), nil, nil)
+	img, err := BuildImage("web", []byte(`{"kind":"service","image":"nginx","healthcheck":{"test":["wget"]}}`), nil, nil)
 	if err != nil || img.Healthcheck == nil {
 		t.Fatal(err)
 	}
@@ -79,7 +123,7 @@ func TestHealthcheckDefaultsAndHash(t *testing.T) {
 	if h.IntervalSec != 30 || h.TimeoutSec != 5 || h.Retries != 3 || h.StartPeriodSec != 0 {
 		t.Fatalf("defaults %+v", h)
 	}
-	want := `"healthcheck":{"interval_sec":30,"retries":3,"start_period_sec":0,"test":["CMD","wget"],"timeout_sec":5}`
+	want := `"healthcheck":{"interval_sec":30,"retries":3,"start_period_sec":0,"test":["wget"],"timeout_sec":5}`
 	stored := SpecJSON(img)
 	if !strings.Contains(stored, want) || !strings.Contains(CanonicalImage(img, nil), want) {
 		t.Fatalf("stored %s", stored)
@@ -97,7 +141,7 @@ func TestHealthcheckDefaultsAndHash(t *testing.T) {
 	if err != nil || SpecJSON(again) != stored {
 		t.Fatalf("round trip %v %s", err, SpecJSON(again))
 	}
-	changed, err := BuildImage("web", []byte(`{"kind":"service","image":"nginx","healthcheck":{"test":["CMD","wget"],"retries":4}}`), nil, nil)
+	changed, err := BuildImage("web", []byte(`{"kind":"service","image":"nginx","healthcheck":{"test":["wget"],"retries":4}}`), nil, nil)
 	if err != nil || ImageHash(changed, nil) == ImageHash(img, nil) {
 		t.Fatal("retries did not change spec_hash")
 	}
@@ -119,14 +163,14 @@ func TestHealthcheckTimeoutBudget(t *testing.T) {
 		t.Fatalf("job deploy %d rollback %d", DeployTimeoutSec(job), RollbackTimeoutSec(job))
 	}
 	// healthy_after_sec wins when it is longer than the healthcheck wait.
-	short, err := BuildImage("web", []byte(`{"kind":"service","image":"nginx","healthy_after_sec":100,"healthcheck":{"test":["CMD"],"interval_sec":5,"timeout_sec":1,"retries":1,"start_period_sec":0}}`), nil, nil)
+	short, err := BuildImage("web", []byte(`{"kind":"service","image":"nginx","healthy_after_sec":100,"healthcheck":{"test":["true"],"interval_sec":5,"timeout_sec":1,"retries":1,"start_period_sec":0}}`), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if DeployTimeoutSec(short) != 300+100+60 || RollbackTimeoutSec(short) != 300+100+60 {
 		t.Fatalf("healthy wins deploy %d rollback %d", DeployTimeoutSec(short), RollbackTimeoutSec(short))
 	}
-	maxImg, err := BuildImage("web", []byte(`{"kind":"service","image":"nginx","healthy_after_sec":600,"healthcheck":{"test":["CMD"],"interval_sec":300,"timeout_sec":60,"retries":10,"start_period_sec":600}}`), nil, nil)
+	maxImg, err := BuildImage("web", []byte(`{"kind":"service","image":"nginx","healthy_after_sec":600,"healthcheck":{"test":["true"],"interval_sec":300,"timeout_sec":60,"retries":10,"start_period_sec":600}}`), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

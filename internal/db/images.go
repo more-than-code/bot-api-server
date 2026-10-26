@@ -526,6 +526,8 @@ FOR UPDATE
 		return store.EnvKey{}, false, mapErr(err)
 	} else if in.Secret != nil && *in.Secret != isSecret {
 		return store.EnvKey{}, false, store.ErrSecretFixed
+	} else if isSecret && in.Plain == "" {
+		return store.EnvKey{}, false, store.ErrSecretEmpty
 	}
 	if err := upsertEnvValue(ctx, tx, projectID, name, in.Key, isSecret, in.Plain, in.Nonce, in.Ciphertext, in.KeyVersion, created); err != nil {
 		return store.EnvKey{}, false, err

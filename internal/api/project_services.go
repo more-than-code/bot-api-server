@@ -34,6 +34,16 @@ func (s *Server) handleProjectServices(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// include is not part of the cursor hash (api-v1 v1.18).
+	withChecks := false
+	switch r.URL.Query().Get("include") {
+	case "":
+	case "health_checks":
+		withChecks = true
+	default:
+		writeCode(w, "bad_request", "invalid include")
+		return
+	}
 	page, err := s.Store.ListProjectServices(r.Context(), projectID, q, s.now())
 	if err != nil {
 		if errors.Is(err, store.ErrInvalid) {
@@ -50,12 +60,49 @@ func (s *Server) handleProjectServices(w http.ResponseWriter, r *http.Request) {
 			RevokedAt: page.Items[i].HostRevokedAt,
 		})
 	}
+	var items any = nonNilSlice(page.Items)
+	if withChecks {
+		rows, err := s.projectServicesWithChecks(r, page.Items)
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		items = rows
+	}
 	writeOK(w, http.StatusOK, map[string]any{
-		"items":       nonNilSlice(page.Items),
+		"items":       items,
 		"next_cursor": servicePageCursor(offset, q.Limit, page.Total, hash, true),
 		"prev_cursor": servicePageCursor(offset, q.Limit, page.Total, hash, false),
 		"total":       page.Total,
 	})
+}
+
+// projectServiceWithChecks is one include=health_checks row. HealthChecks
+// matches GET /v1/services/{id}: ordered by id, [] when there are none.
+type projectServiceWithChecks struct {
+	store.ProjectService
+	HealthChecks []store.HealthCheck `json:"health_checks"`
+}
+
+// projectServicesWithChecks reads the checks of the whole page in one store call.
+func (s *Server) projectServicesWithChecks(r *http.Request, items []store.ProjectService) ([]projectServiceWithChecks, error) {
+	ids := make([]string, len(items))
+	for i := range items {
+		ids[i] = items[i].ID.String()
+	}
+	checks, err := s.Store.ListHealthChecksForServices(r.Context(), ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]projectServiceWithChecks, len(items))
+	for i := range items {
+		got := checks[ids[i]]
+		if got == nil {
+			got = []store.HealthCheck{}
+		}
+		out[i] = projectServiceWithChecks{ProjectService: items[i], HealthChecks: got}
+	}
+	return out, nil
 }
 
 func (s *Server) projectServiceQuery(w http.ResponseWriter, r *http.Request) (store.ServiceListQuery, string, int, bool) {

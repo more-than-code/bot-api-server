@@ -271,6 +271,32 @@ func assertEnvKeyUpsertDelete(t *testing.T, d *DB, ctx context.Context, at time.
 	if err != nil || string(opened) != "two" {
 		t.Fatalf("flag mismatch changed the value %q %v", opened, err)
 	}
+	if _, _, err := d.PutEnvKey(ctx, home.ID, "svc", sealOf("svc", "TOKEN", ""), owner.ID, at.Add(3*time.Minute)); !errors.Is(err, store.ErrSecretEmpty) {
+		t.Fatalf("empty secret %v", err)
+	}
+	view, err = d.GetEnvSet(ctx, home.ID, "svc")
+	token = envRows(t, d, ctx, home.ID, "svc")["TOKEN"]
+	if err != nil || !view.UpdatedAt.Equal(at.Add(2*time.Minute)) || !token.IsSecret {
+		t.Fatalf("empty secret wrote the set %#v %v", view.UpdatedAt, err)
+	}
+	opened, err = box.Open(seal.EnvAAD(pid, "svc", "TOKEN"), token.Nonce, token.Ciphertext)
+	if err != nil || string(opened) != "two" {
+		t.Fatalf("empty secret changed the value %q %v", opened, err)
+	}
+	stored, created, err = d.PutEnvKey(ctx, home.ID, "svc", sealOf("svc", "NOTE", ""), owner.ID, at.Add(3*time.Minute))
+	if err != nil || created || stored.IsSecret || stored.Value == nil || *stored.Value != "" {
+		t.Fatalf("empty plain %#v %v %v", stored, created, err)
+	}
+	// A separate set, so the new key does not rehash "web".
+	stored, created, err = d.PutEnvKey(ctx, home.ID, "blank", sealOf("blank", "FRESH", ""), owner.ID, at.Add(3*time.Minute))
+	if err != nil || !created || !stored.IsSecret {
+		t.Fatalf("empty new secret %#v %v %v", stored, created, err)
+	}
+	fresh := envRows(t, d, ctx, home.ID, "blank")["FRESH"]
+	opened, err = box.Open(seal.EnvAAD(pid, "blank", "FRESH"), fresh.Nonce, fresh.Ciphertext)
+	if err != nil || string(opened) != "" || !fresh.IsSecret {
+		t.Fatalf("empty new secret opened %q %v", opened, err)
+	}
 	extra, created, err := d.PutEnvKey(ctx, home.ID, "svc", sealOf("svc", "EXTRA", "three"), owner.ID, at.Add(4*time.Minute))
 	if err != nil || !created || !extra.IsSecret {
 		t.Fatalf("add %#v %v %v", extra, created, err)

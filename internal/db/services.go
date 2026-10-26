@@ -510,6 +510,36 @@ ORDER BY id ASC
 	return out, nil
 }
 
+func (d *DB) ListHealthChecksForServices(ctx context.Context, serviceIDs []string) (map[string][]store.HealthCheck, error) {
+	out := map[string][]store.HealthCheck{}
+	if len(serviceIDs) == 0 {
+		return out, nil
+	}
+	// uuid[] rather than the usual ::text match, so an index on service_id is usable.
+	rows, err := d.pool.Query(ctx, `
+SELECT id::text, service_id::text, protocol, port, path, interval_sec, expect_status_min, expect_status_max, enabled
+FROM app.health_checks
+WHERE service_id = ANY(CAST($1 AS uuid[]))
+ORDER BY service_id, id
+`, serviceIDs)
+	if err != nil {
+		return nil, mapErr(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		c, err := scanCheck(rows)
+		if err != nil {
+			return nil, err
+		}
+		key := c.ServiceID.String()
+		out[key] = append(out[key], c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapErr(err)
+	}
+	return out, nil
+}
+
 func (d *DB) HealthChecksForHost(ctx context.Context, hostID uuid.UUID) ([]store.AgentCheck, error) {
 	rows, err := d.pool.Query(ctx, `
 SELECT c.id::text, s.name, c.protocol, c.port, c.path, c.interval_sec, c.expect_status_min, c.expect_status_max

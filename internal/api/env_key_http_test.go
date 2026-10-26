@@ -187,6 +187,39 @@ func TestEnvKeyValidation(t *testing.T) {
 	}
 }
 
+func TestEnvKeySecretEmpty(t *testing.T) {
+	w := newWorld(t)
+	w.srv.Secrets = testBox(t)
+	owner := w.user("owner@ex.com", "Owner")
+	sc := w.scene(owner, w.user("a@ex.com", "A"), w.user("v@ex.com", "V"), w.user("s@ex.com", "S"), w.user("e@ex.com", "E"))
+	tok := w.token(owner.ID)
+	project := sc.project.ID.String()
+	const kept = "kept-secret-value"
+
+	status, env, _ := putKey(t, w, tok, project, "svc", "TOKEN", kept, nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	status, env, _ = putKey(t, w, tok, project, "svc", "PLAIN", "x", boolPtr(false))
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	before := countAction(w.mem.AllAudits(), audit.ActionEnvSetKeyPut)
+	for _, secret := range []*bool{nil, boolPtr(true)} {
+		status, env, _ = putKey(t, w, tok, project, "svc", "TOKEN", "", secret)
+		mustHTTP(t, status, env, http.StatusBadRequest, "bad_request", "a secret value cannot be empty; delete the key instead")
+	}
+	if countAction(w.mem.AllAudits(), audit.ActionEnvSetKeyPut) != before {
+		t.Fatal("refused empty secret wrote an env_set.key_put audit row")
+	}
+	status, env, _ = mustCall(t, w, tok, http.MethodGet, envPath(project, "svc"), "")
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	assertSecretKey(t, keysByName(t, env)["TOKEN"], catalog.SecretPreview(kept))
+
+	status, env, _ = putKey(t, w, tok, project, "svc", "PLAIN", "", nil)
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	assertPlainKey(t, objectPayload(t, env), "")
+	status, env, _ = putKey(t, w, tok, project, "svc", "FRESH", "", boolPtr(true))
+	mustHTTP(t, status, env, http.StatusOK, "ok", "ok")
+	assertSecretKey(t, objectPayload(t, env), "••••")
+}
+
 func TestEnvKeyDeleteVoidsApprovals(t *testing.T) {
 	w := newWorld(t)
 	w.srv.Secrets = testBox(t)

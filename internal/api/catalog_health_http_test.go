@@ -27,7 +27,18 @@ func TestHealthcheckHTTP(t *testing.T) {
 		t.Fatalf("field error echoed argv %s", raw)
 	}
 
-	created := createImage(t, w, tok, sc.project.ID, "web", `{"kind":"service","image":"nginx","healthcheck":{"test":["CMD","wget"]}}`)
+	const keywordMsg = "invalid healthcheck.test: give the command itself, without CMD, CMD-SHELL or NONE"
+	status, env, raw = mustCall(t, w, tok, http.MethodPost, "/v1/projects/"+project+"/catalog", `{"name":"web","kind":"image","spec":{"kind":"service","image":"nginx","healthcheck":{"test":["CMD","`+sentinel+`"]}}}`)
+	mustHTTP(t, status, env, http.StatusBadRequest, "bad_request", keywordMsg)
+	if strings.Contains(raw, sentinel) {
+		t.Fatalf("keyword error echoed argv %s", raw)
+	}
+	created := createImage(t, w, tok, sc.project.ID, "web", `{"kind":"service","image":"nginx","healthcheck":{"test":["wget"]}}`)
+	status, env, raw = mustCall(t, w, tok, http.MethodPut, "/v1/projects/"+project+"/catalog/web", `{"kind":"image","spec":{"kind":"service","image":"nginx","healthcheck":{"test":["CMD-SHELL","`+sentinel+`"]}}}`)
+	mustHTTP(t, status, env, http.StatusBadRequest, "bad_request", keywordMsg)
+	if strings.Contains(raw, sentinel) {
+		t.Fatalf("keyword error echoed argv %s", raw)
+	}
 	spec, _ := created["spec"].(map[string]any)
 	hc, _ := spec["healthcheck"].(map[string]any)
 	if hc["interval_sec"] != float64(30) || hc["timeout_sec"] != float64(5) || hc["retries"] != float64(3) || hc["start_period_sec"] != float64(0) {

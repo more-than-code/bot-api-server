@@ -151,6 +151,25 @@ func TestDelegatedCatalogValidation(t *testing.T) {
 	}
 }
 
+func TestDelegatedCatalogHealthKeyword(t *testing.T) {
+	c := newCatalogCast(t)
+	const msg = "invalid healthcheck.test: give the command itself, without CMD, CMD-SHELL or NONE"
+	bad := `{"kind":"service","image":"nginx","healthcheck":{"test":["NONE"]}}`
+	status, env := c.w.do(c.tok, http.MethodPost, catalogCollection(c.sc.project.ID), catalogImageBody("web", bad, "kw-create"))
+	mustHTTP(t, status, env, http.StatusBadRequest, "bad_request", msg)
+	createImage(t, c.w, c.console, c.sc.project.ID, "web", nginxSpec)
+	status, env = c.w.do(c.tok, http.MethodPut, catalogItem(c.sc.project.ID, "web"), catalogImagePutBody(bad, "kw-update"))
+	mustHTTP(t, status, env, http.StatusBadRequest, "bad_request", msg)
+	if len(issuedDetails(t, auditRows(t, c.w, c.sc.project.ID))) != 0 {
+		t.Fatal("a refused healthcheck.test issued a plan")
+	}
+	// Confirm rebuilds the stored body with the same rules.
+	_, err := c.w.srv.rebuildCatalogWrite(context.Background(), c.sc.project.ID, "web", []byte(bad), c.owner.ID, time.Now())
+	if err == nil || err.Error() != msg {
+		t.Fatalf("confirm rebuild %v", err)
+	}
+}
+
 func TestDelegatedCatalogProgramForbidden(t *testing.T) {
 	c := newCatalogCast(t)
 	path := catalogCollection(c.sc.project.ID)

@@ -462,6 +462,9 @@ func (m *Mem) PutEnvKey(_ context.Context, projectID uuid.UUID, name string, in 
 		if in.Secret != nil && *in.Secret != secret {
 			return store.EnvKey{}, false, store.ErrSecretFixed
 		}
+		if secret && in.Plain == "" {
+			return store.EnvKey{}, false, store.ErrSecretEmpty
+		}
 	}
 	row := envValueRec{Key: in.Key, IsSecret: secret}
 	if secret {

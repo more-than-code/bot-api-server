@@ -657,6 +657,7 @@ func decodeOptionalString(fields map[string]json.RawMessage, name string) (strin
 }
 
 // decodeHealthcheck applies defaults and rejects a job before it inspects test.
+// test is the bare command (no leading CMD, CMD-SHELL or NONE).
 // Errors name the field and do not include argv.
 func decodeHealthcheck(raw json.RawMessage, kind string) (*Healthcheck, error) {
 	if len(bytes.TrimSpace(raw)) == 0 || string(bytes.TrimSpace(raw)) == "null" {
@@ -725,6 +726,11 @@ func decodeHealthTest(raw json.RawMessage) ([]string, error) {
 		if len(item) < 1 || len(item) > maxHealthArg || strings.ContainsRune(item, 0) {
 			return nil, fieldErr("invalid healthcheck.test")
 		}
+	}
+	// Deploybot adds Docker's CMD itself; a leading keyword would become argv[0].
+	switch items[0] {
+	case "CMD", "CMD-SHELL", "NONE":
+		return nil, fieldErr("invalid healthcheck.test: give the command itself, without CMD, CMD-SHELL or NONE")
 	}
 	return items, nil
 }

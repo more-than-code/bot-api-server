@@ -226,8 +226,8 @@ func (s *Server) handleEnvKeyPut(w http.ResponseWriter, r *http.Request) {
 		Ciphertext: sealed.Ciphertext,
 		KeyVersion: sealed.KeyVersion,
 	}, p.User.ID, s.now())
-	if errors.Is(err, store.ErrSecretFixed) {
-		writeCode(w, "bad_request", store.ErrSecretFixed.Error())
+	if errors.Is(err, store.ErrSecretFixed) || errors.Is(err, store.ErrSecretEmpty) {
+		writeCode(w, "bad_request", err.Error())
 		return
 	}
 	if err != nil {

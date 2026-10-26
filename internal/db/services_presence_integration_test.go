@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,58 @@ func TestServicePresenceIntegration(t *testing.T) {
 	t.Run("project delete gone", func(t *testing.T) { assertProjectDeleteMarksGone(t, d, ctx) })
 	t.Run("revoked backfill", func(t *testing.T) { assertRevokedHostBackfill(t, d, ctx) })
 	t.Run("ownership ends", func(t *testing.T) { assertOwnershipEnds(t, d, ctx) })
+	t.Run("checks for services", func(t *testing.T) { assertHealthChecksForServices(t, d, ctx) })
+}
+
+func assertHealthChecksForServices(t *testing.T, d *DB, ctx context.Context) {
+	t.Helper()
+	at := time.Now().UTC().Truncate(time.Microsecond)
+	tag := strings.ReplaceAll(uuid.New().String(), "-", "")[:10]
+	user := mustSvcUser(t, d, ctx, "batch-"+tag, at)
+	project := mustSvcProject(t, d, ctx, user.ID, "Batch", "batch-"+tag, at)
+	host := enrollHostDB(t, d, ctx, project.ID, user.ID, "batch-"+tag, at)
+	if err := d.UpsertDiscovered(ctx, host.ID, []store.Discovered{
+		{Name: "one", Kind: "process", Ports: []int{1}},
+		{Name: "two", Kind: "process", Ports: []int{2}},
+		{Name: "none", Kind: "process", Ports: []int{3}},
+	}, at, true, true); err != nil {
+		t.Fatal(err)
+	}
+	one := serviceByNameDB(t, d, ctx, host.ID, "one", at)
+	two := serviceByNameDB(t, d, ctx, host.ID, "two", at)
+	none := serviceByNameDB(t, d, ctx, host.ID, "none", at)
+	live, ready := "/live", "/ready"
+	if _, err := d.ReplaceHealthChecks(ctx, one.ID, []store.HealthCheckInput{
+		{Protocol: "http", Port: 1, Path: &live, IntervalSec: 30, ExpectStatusMin: 200, ExpectStatusMax: 299, Enabled: true},
+		{Protocol: "http", Port: 1, Path: &ready, IntervalSec: 60, ExpectStatusMin: 200, ExpectStatusMax: 399, Enabled: false},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ReplaceHealthChecks(ctx, two.ID, []store.HealthCheckInput{
+		{Protocol: "tcp", Port: 2, IntervalSec: 30, ExpectStatusMin: 200, ExpectStatusMax: 399, Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.ListHealthChecksForServices(ctx, []string{one.ID.String(), two.ID.String(), none.ID.String()})
+	if err != nil || len(got) != 2 {
+		t.Fatalf("batch %v %v", got, err)
+	}
+	if _, ok := got[none.ID.String()]; ok {
+		t.Fatal("service without checks has a key")
+	}
+	for _, id := range []uuid.UUID{one.ID, two.ID} {
+		want, err := d.ListHealthChecks(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if batch := got[id.String()]; len(want) == 0 || !reflect.DeepEqual(batch, want) {
+			t.Fatalf("%s batch %+v want %+v", id, batch, want)
+		}
+	}
+	empty, err := d.ListHealthChecksForServices(ctx, nil)
+	if err != nil || empty == nil || len(empty) != 0 {
+		t.Fatalf("empty ids %v %v", empty, err)
+	}
 }
 
 func openPresenceDB(t *testing.T) (*DB, context.Context) {

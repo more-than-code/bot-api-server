@@ -427,6 +427,31 @@ func TestEnvKeyUpsertDelete(t *testing.T) {
 	if err != nil || !view.UpdatedAt.Equal(at.Add(2*time.Minute)) {
 		t.Fatalf("flag mismatch wrote the set %#v %v", view.UpdatedAt, err)
 	}
+	if _, _, err := m.PutEnvKey(ctx, home.ID, "svc", sealOf("TOKEN", ""), owner.ID, at.Add(3*time.Minute)); !errors.Is(err, store.ErrSecretEmpty) {
+		t.Fatalf("empty secret %v", err)
+	}
+	view, err = m.GetEnvSet(ctx, home.ID, "svc")
+	if err != nil || !view.UpdatedAt.Equal(at.Add(2*time.Minute)) {
+		t.Fatalf("empty secret wrote the set %#v %v", view.UpdatedAt, err)
+	}
+	mats, err = m.ListEnvMaterial(ctx, home.ID, "svc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range mats {
+		if item.Key != "TOKEN" {
+			continue
+		}
+		found = true
+		opened, err := box.Open(seal.EnvAAD(pid, "svc", "TOKEN"), item.Nonce, item.Ciphertext)
+		if err != nil || string(opened) != "two" {
+			t.Fatalf("empty secret changed the value %q %v", opened, err)
+		}
+	}
+	if !found {
+		t.Fatal("TOKEN missing after the empty secret refusal")
+	}
 	extra := sealOf("EXTRA", "three")
 	stored, created, err = m.PutEnvKey(ctx, home.ID, "svc", extra, owner.ID, at.Add(4*time.Minute))
 	if err != nil || !created {

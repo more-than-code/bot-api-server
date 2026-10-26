@@ -28,6 +28,8 @@ var (
 	ErrInvalid = errors.New("invalid")
 	// ErrSecretFixed is a key PUT whose is_secret differs from the stored flag.
 	ErrSecretFixed = errors.New("secret flag is fixed; delete and re-add the key")
+	// ErrSecretEmpty is a key PUT of "" over an existing secret key (api-v1 v1.18).
+	ErrSecretEmpty = errors.New("a secret value cannot be empty; delete the key instead")
 	// ErrTooManyFiles is a new file name when the project already has MaxProjectFiles.
 	ErrTooManyFiles = errors.New("too many files")
 	// ErrReuse is a second redemption of an authorization code or a rotated refresh token.
@@ -539,6 +541,10 @@ type Store interface {
 	UpsertDiscovered(ctx context.Context, hostID uuid.UUID, items []Discovered, at time.Time, complete bool, presence bool) error
 	ReplaceHealthChecks(ctx context.Context, serviceID uuid.UUID, checks []HealthCheckInput) ([]HealthCheck, error)
 	ListHealthChecks(ctx context.Context, serviceID uuid.UUID) ([]HealthCheck, error)
+	// ListHealthChecksForServices reads the checks of many services in one call
+	// (api-v1 v1.18 include=health_checks). Keys are service ids; a service
+	// without checks has no key. Each slice is ordered by id like ListHealthChecks.
+	ListHealthChecksForServices(ctx context.Context, serviceIDs []string) (map[string][]HealthCheck, error)
 	HealthChecksForHost(ctx context.Context, hostID uuid.UUID) ([]AgentCheck, error)
 
 	// InsertBatch inserts samples once per (host, batch). inserted is false when the batch was already stored.
@@ -720,6 +726,7 @@ type Store interface {
 	PutEnvSet(ctx context.Context, projectID uuid.UUID, name string, keys []EnvSecret, actor uuid.UUID, at time.Time, newKeysSecret bool) (EnvSet, error)
 	// PutEnvKey creates the set when it is absent and upserts one key.
 	// A Secret that differs from the stored flag is ErrSecretFixed.
+	// An empty Plain for an existing secret key is ErrSecretEmpty; nothing is written.
 	// The bool is true when the key was created. Only a created key rehashes.
 	PutEnvKey(ctx context.Context, projectID uuid.UUID, name string, in EnvKeyPut, actor uuid.UUID, at time.Time) (EnvKey, bool, error)
 	// MakeEnvKeysSecret marks plain keys secret in one transaction (api-v1 v1.17).
