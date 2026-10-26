@@ -260,6 +260,7 @@ WHERE id = $1::uuid
 	assertImages(t, d, ctx, at)
 	assertEnvReplaceKeepsVisibility(t, d, ctx, at)
 	assertEnvKeyUpsertDelete(t, d, ctx, at)
+	assertEnvMergeCreate(t, d, ctx, at)
 	assertEnvMakeSecret(t, d, ctx, at)
 }
 

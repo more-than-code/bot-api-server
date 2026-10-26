@@ -724,6 +724,17 @@ type Store interface {
 	// Keys left out are removed.
 	// Referencing image entries are rehashed. A changed hash voids approvals.
 	PutEnvSet(ctx context.Context, projectID uuid.UUID, name string, keys []EnvSecret, actor uuid.UUID, at time.Time, newKeysSecret bool) (EnvSet, error)
+	// CreateEnvSet creates the set with keys (api-v1 v1.19 mode create).
+	// An existing set is ErrConflict and nothing changes. Each key is secret
+	// when newKeysSecret is true. Referencing image entries are rehashed.
+	CreateEnvSet(ctx context.Context, projectID uuid.UUID, name string, keys []EnvSecret, actor uuid.UUID, at time.Time, newKeysSecret bool) (EnvSet, error)
+	// MergeEnvSet upserts keys into an existing set (api-v1 v1.19 mode merge).
+	// A missing set is ErrNotFound. A key already in the set keeps is_secret;
+	// a key new to the set is secret when newKeysSecret is true. Keys left out
+	// are kept. An empty Plain for an existing secret key is ErrSecretEmpty.
+	// Any error writes nothing. Referencing image entries are rehashed.
+	// It returns the set and the names new to the set, sorted.
+	MergeEnvSet(ctx context.Context, projectID uuid.UUID, name string, keys []EnvSecret, actor uuid.UUID, at time.Time, newKeysSecret bool) (EnvSet, []string, error)
 	// PutEnvKey creates the set when it is absent and upserts one key.
 	// A Secret that differs from the stored flag is ErrSecretFixed.
 	// An empty Plain for an existing secret key is ErrSecretEmpty; nothing is written.

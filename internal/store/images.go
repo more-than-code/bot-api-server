@@ -91,10 +91,10 @@ type EnvSet struct {
 	UpdatedBy uuid.UUID `json:"updated_by"`
 }
 
-// EnvSecret is one env value prepared for PutEnvSet.
+// EnvSecret is one env value prepared for PutEnvSet, CreateEnvSet, and MergeEnvSet.
 // Nonce, Ciphertext, and KeyVersion seal Plain (AAD project_id|set|key).
-// PutEnvSet stores Plain only when that key already exists and is not secret.
-// A new key, and a key that stays secret, store the seal and not Plain.
+// The store keeps Plain for a key that is plain (an existing plain key, or a
+// new key when newKeysSecret is false) and the seal for a key that is secret.
 type EnvSecret struct {
 	Key        string
 	Plain      string

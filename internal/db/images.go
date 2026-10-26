@@ -488,6 +488,97 @@ SET updated_at = EXCLUDED.updated_at, updated_by = EXCLUDED.updated_by
 	return d.GetEnvSet(ctx, projectID, name)
 }
 
+// CreateEnvSet inserts the set row with ON CONFLICT DO NOTHING, so the
+// existence check and the insert are one statement in one transaction.
+func (d *DB) CreateEnvSet(ctx context.Context, projectID uuid.UUID, name string, keys []store.EnvSecret, actor uuid.UUID, at time.Time, newKeysSecret bool) (store.EnvSet, error) {
+	if !catalog.ValidName(name) {
+		return store.EnvSet{}, store.ErrInvalid
+	}
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return store.EnvSet{}, mapErr(err)
+	}
+	defer tx.Rollback(ctx)
+	tag, err := execTag(ctx, tx, `
+INSERT INTO app.env_sets (project_id, name, updated_at, updated_by)
+VALUES ($1::uuid, $2, $3, $4::uuid)
+ON CONFLICT (project_id, name) DO NOTHING
+`, projectID.String(), name, at, actor.String())
+	if err != nil {
+		return store.EnvSet{}, mapErr(err)
+	}
+	if tag == "INSERT 0 0" {
+		return store.EnvSet{}, store.ErrConflict
+	}
+	for _, key := range keys {
+		if err := insertEnvValue(ctx, tx, projectID, name, key, nil, newKeysSecret); err != nil {
+			return store.EnvSet{}, err
+		}
+	}
+	if err := d.rehashTx(ctx, tx, projectID, name, at); err != nil {
+		return store.EnvSet{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.EnvSet{}, mapErr(err)
+	}
+	return d.GetEnvSet(ctx, projectID, name)
+}
+
+// MergeEnvSet locks the set row, then its values (the order PutEnvSet and
+// PutEnvKey take), and upserts each pasted key.
+func (d *DB) MergeEnvSet(ctx context.Context, projectID uuid.UUID, name string, keys []store.EnvSecret, actor uuid.UUID, at time.Time, newKeysSecret bool) (store.EnvSet, []string, error) {
+	if !catalog.ValidName(name) {
+		return store.EnvSet{}, nil, store.ErrInvalid
+	}
+	tx, err := d.pool.Begin(ctx)
+	if err != nil {
+		return store.EnvSet{}, nil, mapErr(err)
+	}
+	defer tx.Rollback(ctx)
+	if err := lockEnvSet(ctx, tx, projectID, name); err != nil {
+		return store.EnvSet{}, nil, err
+	}
+	kept, err := envVisibility(ctx, tx, projectID, name)
+	if err != nil {
+		return store.EnvSet{}, nil, err
+	}
+	for _, key := range keys {
+		if secret, ok := kept[key.Key]; ok && secret && key.Plain == "" {
+			return store.EnvSet{}, nil, store.ErrSecretEmpty
+		}
+	}
+	created := []string{}
+	for _, key := range keys {
+		secret, exists := kept[key.Key]
+		if !exists {
+			secret = newKeysSecret
+			created = append(created, key.Key)
+		}
+		if err := upsertEnvValue(ctx, tx, projectID, name, key.Key, secret, key.Plain, key.Nonce, key.Ciphertext, key.KeyVersion, !exists); err != nil {
+			return store.EnvSet{}, nil, err
+		}
+	}
+	if err := exec(ctx, tx, `
+UPDATE app.env_sets SET updated_at = $3, updated_by = $4::uuid
+WHERE project_id = $1::uuid AND name = $2
+`, projectID.String(), name, at, actor.String()); err != nil {
+		return store.EnvSet{}, nil, mapErr(err)
+	}
+	if err := d.rehashTx(ctx, tx, projectID, name, at); err != nil {
+		return store.EnvSet{}, nil, err
+	}
+	// Read the view before commit so nothing can fail after the change lands.
+	set, err := envSetView(ctx, tx, projectID, name)
+	if err != nil {
+		return store.EnvSet{}, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return store.EnvSet{}, nil, mapErr(err)
+	}
+	sort.Strings(created)
+	return set, created, nil
+}
+
 func (d *DB) PutEnvKey(ctx context.Context, projectID uuid.UUID, name string, in store.EnvKeyPut, actor uuid.UUID, at time.Time) (store.EnvKey, bool, error) {
 	if !catalog.ValidName(name) {
 		return store.EnvKey{}, false, store.ErrInvalid
@@ -500,7 +591,7 @@ func (d *DB) PutEnvKey(ctx context.Context, projectID uuid.UUID, name string, in
 		return store.EnvKey{}, false, mapErr(err)
 	}
 	defer tx.Rollback(ctx)
-	// Lock the set before its values. PutEnvSet takes the same order.
+	// Lock the set before its values. PutEnvSet and MergeEnvSet take the same order.
 	if err := exec(ctx, tx, `
 INSERT INTO app.env_sets (project_id, name, updated_at, updated_by)
 VALUES ($1::uuid, $2, $3, $4::uuid)

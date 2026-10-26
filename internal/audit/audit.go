@@ -57,6 +57,7 @@ const (
 	ActionCatalogAutoRollback      = "catalog.auto_rollback"
 	ActionCatalogAutoGaveUp        = "catalog.auto_gave_up"
 	ActionEnvSetReplace            = "env_set.replace"
+	ActionEnvSetMerge              = "env_set.merge"
 	ActionEnvSetKeyPut             = "env_set.key_put"
 	ActionEnvSetKeyDelete          = "env_set.key_delete"
 	ActionEnvSetKeySecret          = "env_set.key_secret"

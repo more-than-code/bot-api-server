@@ -100,10 +100,19 @@ func (s *Server) handleEnvSetPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Dotenv        string `json:"dotenv"`
-		NewKeysSecret *bool  `json:"new_keys_secret"`
+		Dotenv        string  `json:"dotenv"`
+		NewKeysSecret *bool   `json:"new_keys_secret"`
+		Mode          *string `json:"mode"`
 	}
 	if !decodeRaw(w, raw, &body) {
+		return
+	}
+	mode := "replace"
+	if body.Mode != nil {
+		mode = *body.Mode
+	}
+	if mode != "replace" && mode != "create" && mode != "merge" {
+		writeCode(w, "bad_request", `mode must be "replace", "create" or "merge"`)
 		return
 	}
 	newKeysSecret := true
@@ -123,7 +132,7 @@ func (s *Server) handleEnvSetPut(w http.ResponseWriter, r *http.Request) {
 	keys := make([]store.EnvSecret, 0, len(pairs))
 	names := make([]string, 0, len(pairs))
 	for _, pair := range pairs {
-		// Seal every key. PutEnvSet keeps an existing key's visibility
+		// Seal every key. The store keeps an existing key's visibility
 		// inside its transaction and stores this seal only when the key is secret.
 		sealed, err := s.sealValue(id, name, pair.Key, pair.Value)
 		if err != nil {
@@ -134,19 +143,61 @@ func (s *Server) handleEnvSetPut(w http.ResponseWriter, r *http.Request) {
 		keys = append(keys, sealed)
 		names = append(names, pair.Key)
 	}
-	set, err := s.Store.PutEnvSet(r.Context(), id, name, keys, p.User.ID, s.now(), newKeysSecret)
+	sort.Strings(names)
+	if mode == "merge" {
+		s.mergeEnvSet(w, r, p, id, name, keys, names, newKeysSecret)
+		return
+	}
+	var set store.EnvSet
+	if mode == "create" {
+		set, err = s.Store.CreateEnvSet(r.Context(), id, name, keys, p.User.ID, s.now(), newKeysSecret)
+	} else {
+		set, err = s.Store.PutEnvSet(r.Context(), id, name, keys, p.User.ID, s.now(), newKeysSecret)
+	}
+	if mode == "create" && errors.Is(err, store.ErrConflict) {
+		writeCode(w, "conflict", fmt.Sprintf("env set %s already exists", name))
+		return
+	}
 	if err != nil {
 		s.writeErr(w, err, false)
 		return
 	}
 	set = fillPreviews(set, keys)
-	sort.Strings(names)
 	s.auditOK(r.Context(), p, store.AuditRow{
 		ProjectID: idPtr(id),
 		Action:    audit.ActionEnvSetReplace,
 		Detail:    map[string]any{"set": name, "keys": names},
 	})
 	writeOK(w, http.StatusOK, fillEnvSet(set))
+}
+
+// mergeEnvSet adds pasted keys to an existing set (api-v1 v1.19 mode merge).
+// names are the pasted key names, sorted.
+func (s *Server) mergeEnvSet(w http.ResponseWriter, r *http.Request, p principal, id uuid.UUID, name string, keys []store.EnvSecret, names []string, newKeysSecret bool) {
+	set, created, err := s.Store.MergeEnvSet(r.Context(), id, name, keys, p.User.ID, s.now(), newKeysSecret)
+	switch {
+	case errors.Is(err, store.ErrSecretEmpty):
+		writeCode(w, "bad_request", err.Error())
+		return
+	case errors.Is(err, store.ErrNotFound):
+		writeCode(w, "not_found", fmt.Sprintf("no env set %s", name))
+		return
+	case err != nil:
+		s.writeErr(w, err, false)
+		return
+	}
+	s.auditOK(r.Context(), p, store.AuditRow{
+		ProjectID: idPtr(id),
+		Action:    audit.ActionEnvSetMerge,
+		Detail:    map[string]any{"set": name, "keys": names, "created": created},
+	})
+	// Keys left out of the paste keep their stored values, so their previews
+	// come from the stored seals.
+	filled, ok := s.withPreviews(w, r, id, set)
+	if !ok {
+		return
+	}
+	writeOK(w, http.StatusOK, filled)
 }
 
 func (s *Server) handleEnvSetDelete(w http.ResponseWriter, r *http.Request) {

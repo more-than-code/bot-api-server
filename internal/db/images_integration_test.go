@@ -363,6 +363,125 @@ func assertEnvKeyUpsertDelete(t *testing.T, d *DB, ctx context.Context, at time.
 	}
 }
 
+func assertEnvMergeCreate(t *testing.T, d *DB, ctx context.Context, at time.Time) {
+	t.Helper()
+	owner := catalogUser(t, d, ctx, "env-merge", at)
+	home := catalogProject(t, d, ctx, owner.ID, "Merge", "envmerge", at)
+	host := enrollHostDB(t, d, ctx, home.ID, owner.ID, "merge-host", at)
+	box, err := seal.New(bytes.Repeat([]byte{5}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid := home.ID.String()
+	sealed := func(set, key, plain string) store.EnvSecret {
+		t.Helper()
+		nonce, ciphertext, err := box.Seal(seal.EnvAAD(pid, set, key), []byte(plain))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return store.EnvSecret{Key: key, Plain: plain, Nonce: nonce, Ciphertext: ciphertext, KeyVersion: seal.KeyVersion}
+	}
+	openKey := func(set, key string) string {
+		t.Helper()
+		row := envRows(t, d, ctx, home.ID, set)[key]
+		opened, err := box.Open(seal.EnvAAD(pid, set, key), row.Nonce, row.Ciphertext)
+		if err != nil {
+			t.Fatalf("open %s.%s %v", set, key, err)
+		}
+		return string(opened)
+	}
+
+	// create: a new set is created; an existing one is ErrConflict and unchanged.
+	if _, err := d.CreateEnvSet(ctx, home.ID, "svc", []store.EnvSecret{sealed("svc", "TOKEN", "one"), sealed("svc", "NOTE", "note")}, owner.ID, at, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.PutEnvKey(ctx, home.ID, "svc", store.EnvKeyPut{Key: "VIS", Plain: "v1", Secret: boolRef(false)}, owner.ID, at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.CreateEnvSet(ctx, home.ID, "svc", []store.EnvSecret{sealed("svc", "OTHER", "x")}, owner.ID, at.Add(time.Minute), true); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("create existing %v", err)
+	}
+	rows := envRows(t, d, ctx, home.ID, "svc")
+	if len(rows) != 3 || openKey("svc", "TOKEN") != "one" {
+		t.Fatalf("create conflict changed rows %#v", rows)
+	}
+	view, err := d.GetEnvSet(ctx, home.ID, "svc")
+	if err != nil || !view.UpdatedAt.Equal(at) {
+		t.Fatalf("create conflict touched the set %#v %v", view, err)
+	}
+	// create with newKeysSecret false stores plain values.
+	if _, err := d.CreateEnvSet(ctx, home.ID, "plainset", []store.EnvSecret{sealed("plainset", "P", "pv")}, owner.ID, at, false); err != nil {
+		t.Fatal(err)
+	}
+	if row := envRows(t, d, ctx, home.ID, "plainset")["P"]; row.IsSecret || row.Plain != "pv" || len(row.Nonce) != 0 {
+		t.Fatalf("plain create row %#v", row)
+	}
+
+	img, err := catalog.BuildImage("web", []byte(`{"kind":"service","image":"nginx","env_sets":["svc"]}`), catalog.SetKeys{"svc": {"NOTE", "TOKEN", "VIS"}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := catalog.ImageHash(img, map[string]string{"svc": catalog.EnvKeyDigest([]string{"NOTE", "TOKEN", "VIS"})})
+	entry, err := d.CreateCatalogEntry(ctx, home.ID, store.CatalogWrite{
+		Name: "web", Kind: "image", ImageRaw: []byte(catalog.SpecJSON(img)),
+		SpecHash: hash, CommandDisplay: img.Image, Actor: owner.ID, At: at,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ApproveCatalog(ctx, host.ID, entry.ID, hash, owner.ID, at); err != nil {
+		t.Fatal(err)
+	}
+
+	// merge on a missing set is ErrNotFound and creates nothing.
+	if _, _, err := d.MergeEnvSet(ctx, home.ID, "missing", []store.EnvSecret{sealed("missing", "A", "a")}, owner.ID, at, true); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("merge missing %v", err)
+	}
+	if _, err := d.GetEnvSet(ctx, home.ID, "missing"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("merge created the set %v", err)
+	}
+
+	// An empty value for an existing secret key rolls back the whole merge.
+	if _, _, err := d.MergeEnvSet(ctx, home.ID, "svc", []store.EnvSecret{sealed("svc", "VIS", "v2"), sealed("svc", "ADDED", "added"), sealed("svc", "TOKEN", "")}, owner.ID, at.Add(time.Minute), true); !errors.Is(err, store.ErrSecretEmpty) {
+		t.Fatalf("merge empty secret %v", err)
+	}
+	rows = envRows(t, d, ctx, home.ID, "svc")
+	if len(rows) != 3 || rows["VIS"].Plain != "v1" || openKey("svc", "TOKEN") != "one" {
+		t.Fatalf("refused merge wrote rows %#v", rows)
+	}
+
+	// A value-only merge keeps flags, other keys, the hash and the approval.
+	set, created, err := d.MergeEnvSet(ctx, home.ID, "svc", []store.EnvSecret{sealed("svc", "VIS", "v2"), sealed("svc", "TOKEN", "two")}, owner.ID, at.Add(2*time.Minute), true)
+	if err != nil || len(created) != 0 || len(set.Keys) != 3 || !set.UpdatedAt.Equal(at.Add(2*time.Minute)) {
+		t.Fatalf("value merge %#v %v %v", set, created, err)
+	}
+	rows = envRows(t, d, ctx, home.ID, "svc")
+	if rows["VIS"].IsSecret || rows["VIS"].Plain != "v2" || len(rows["VIS"].Nonce) != 0 || !rows["TOKEN"].IsSecret || openKey("svc", "TOKEN") != "two" || openKey("svc", "NOTE") != "note" {
+		t.Fatalf("value merge rows %#v", rows)
+	}
+	got, err := d.GetCatalogEntry(ctx, home.ID, "web")
+	if err != nil || got.SpecHash != hash || catalogApprovalCount(t, d, ctx, entry.ID) != 1 {
+		t.Fatalf("value merge hash %s approvals %d %v", got.SpecHash, catalogApprovalCount(t, d, ctx, entry.ID), err)
+	}
+
+	// A merge adding names follows newKeysSecret and voids the approval;
+	// an existing secret key stays secret although newKeysSecret is false.
+	set, created, err = d.MergeEnvSet(ctx, home.ID, "svc", []store.EnvSecret{sealed("svc", "ZPLAIN", "zp"), sealed("svc", "APLAIN", "ap"), sealed("svc", "TOKEN", "three")}, owner.ID, at.Add(3*time.Minute), false)
+	if err != nil || len(created) != 2 || created[0] != "APLAIN" || created[1] != "ZPLAIN" || len(set.Keys) != 5 {
+		t.Fatalf("add merge %#v %v %v", set, created, err)
+	}
+	rows = envRows(t, d, ctx, home.ID, "svc")
+	if rows["APLAIN"].IsSecret || rows["APLAIN"].Plain != "ap" || rows["ZPLAIN"].IsSecret || !rows["TOKEN"].IsSecret || openKey("svc", "TOKEN") != "three" {
+		t.Fatalf("add merge rows %#v", rows)
+	}
+	got, err = d.GetCatalogEntry(ctx, home.ID, "web")
+	if err != nil || got.SpecHash == hash || catalogApprovalCount(t, d, ctx, entry.ID) != 0 {
+		t.Fatalf("add merge hash %s approvals %d %v", got.SpecHash, catalogApprovalCount(t, d, ctx, entry.ID), err)
+	}
+}
+
+func boolRef(v bool) *bool { return &v }
+
 func envRows(t *testing.T, d *DB, ctx context.Context, projectID uuid.UUID, name string) map[string]store.EnvMaterial {
 	t.Helper()
 	mats, err := d.ListEnvMaterial(ctx, projectID, name)

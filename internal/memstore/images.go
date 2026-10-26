@@ -390,6 +390,10 @@ func (m *Mem) envSetViewLocked(projectID uuid.UUID, set envSetRec) store.EnvSet 
 func (m *Mem) PutEnvSet(_ context.Context, projectID uuid.UUID, name string, keys []store.EnvSecret, actor uuid.UUID, at time.Time, newKeysSecret bool) (store.EnvSet, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.putEnvSetLocked(projectID, name, keys, actor, at, newKeysSecret)
+}
+
+func (m *Mem) putEnvSetLocked(projectID uuid.UUID, name string, keys []store.EnvSecret, actor uuid.UUID, at time.Time, newKeysSecret bool) (store.EnvSet, error) {
 	if !m.projectAliveLocked(projectID) {
 		return store.EnvSet{}, store.ErrNotFound
 	}
@@ -422,6 +426,71 @@ func (m *Mem) PutEnvSet(_ context.Context, projectID uuid.UUID, name string, key
 	m.envValues[id] = values
 	m.rehashSetLocked(projectID, name, at)
 	return m.envSetViewLocked(projectID, rec), nil
+}
+
+func (m *Mem) CreateEnvSet(_ context.Context, projectID uuid.UUID, name string, keys []store.EnvSecret, actor uuid.UUID, at time.Time, newKeysSecret bool) (store.EnvSet, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.envSets[envKey(projectID, name)]; exists {
+		return store.EnvSet{}, store.ErrConflict
+	}
+	return m.putEnvSetLocked(projectID, name, keys, actor, at, newKeysSecret)
+}
+
+func (m *Mem) MergeEnvSet(_ context.Context, projectID uuid.UUID, name string, keys []store.EnvSecret, actor uuid.UUID, at time.Time, newKeysSecret bool) (store.EnvSet, []string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.projectAliveLocked(projectID) {
+		return store.EnvSet{}, nil, store.ErrNotFound
+	}
+	if !catalog.ValidName(name) {
+		return store.EnvSet{}, nil, store.ErrInvalid
+	}
+	id := envKey(projectID, name)
+	set, ok := m.envSets[id]
+	if !ok {
+		return store.EnvSet{}, nil, store.ErrNotFound
+	}
+	values := append([]envValueRec(nil), m.envValues[id]...)
+	index := map[string]int{}
+	for i, v := range values {
+		index[v.Key] = i
+	}
+	for _, k := range keys {
+		if i, ok := index[k.Key]; ok && values[i].IsSecret && k.Plain == "" {
+			return store.EnvSet{}, nil, store.ErrSecretEmpty
+		}
+	}
+	created := []string{}
+	for _, k := range keys {
+		i, exists := index[k.Key]
+		secret := newKeysSecret
+		if exists {
+			secret = values[i].IsSecret
+		}
+		row := envValueRec{Key: k.Key, IsSecret: secret}
+		if secret {
+			row.Nonce = append([]byte(nil), k.Nonce...)
+			row.Ciphertext = append([]byte(nil), k.Ciphertext...)
+			row.KeyVersion = k.KeyVersion
+		} else {
+			row.Plain = k.Plain
+		}
+		if exists {
+			values[i] = row
+			continue
+		}
+		index[k.Key] = len(values)
+		values = append(values, row)
+		created = append(created, k.Key)
+	}
+	set.UpdatedAt = at
+	set.UpdatedBy = actor
+	m.envSets[id] = set
+	m.envValues[id] = values
+	m.rehashSetLocked(projectID, name, at)
+	sort.Strings(created)
+	return m.envSetViewLocked(projectID, set), created, nil
 }
 
 func (m *Mem) PutEnvKey(_ context.Context, projectID uuid.UUID, name string, in store.EnvKeyPut, actor uuid.UUID, at time.Time) (store.EnvKey, bool, error) {
