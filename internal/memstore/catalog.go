@@ -2,9 +2,11 @@ package memstore
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/more-than-code/bot-api-server/internal/audit"
 	"github.com/more-than-code/bot-api-server/internal/secret"
 	"github.com/more-than-code/bot-api-server/internal/store"
 )
@@ -195,6 +197,54 @@ func (m *Mem) ListCatalogEntries(_ context.Context, projectID uuid.UUID) ([]stor
 	}
 	sortEntries(out)
 	return out, nil
+}
+
+// CatalogLastDeployed mirrors the DB rule (api-v1 v1.21): image deploys and
+// allowed program.run audit rows started via console or mcp, the latter at or
+// after the entry's created_at.
+func (m *Mem) CatalogLastDeployed(_ context.Context, projectID uuid.UUID, entries []store.CatalogEntry) (map[uuid.UUID]time.Time, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := map[uuid.UUID]time.Time{}
+	images := map[uuid.UUID]bool{}
+	programs := map[string]store.CatalogEntry{}
+	for _, e := range entries {
+		if e.Kind == "image" {
+			images[e.ID] = true
+		} else {
+			programs[e.Name] = e
+		}
+	}
+	keep := func(id uuid.UUID, at time.Time) {
+		if prev, ok := out[id]; !ok || at.After(prev) {
+			out[id] = at.UTC()
+		}
+	}
+	for _, row := range m.imageDeploys {
+		if images[row.EntryID] && m.entries[row.EntryID].ProjectID == projectID && byPersonOrAI(row.Via) {
+			keep(row.EntryID, row.StartedAt)
+		}
+	}
+	for _, a := range m.audits {
+		if a.ProjectID == nil || *a.ProjectID != projectID || a.Action != audit.ActionProgramRun ||
+			a.Decision != audit.DecisionAllowed || !byPersonOrAI(a.Via) {
+			continue
+		}
+		var detail struct {
+			Entry string `json:"entry"`
+		}
+		if json.Unmarshal(a.Detail, &detail) != nil {
+			continue
+		}
+		if e, ok := programs[detail.Entry]; ok && !a.At.Before(e.CreatedAt) {
+			keep(e.ID, a.At)
+		}
+	}
+	return out, nil
+}
+
+func byPersonOrAI(via string) bool {
+	return via == audit.ViaConsole || via == audit.ViaMCP
 }
 
 func sortEntries(out []store.CatalogEntry) {

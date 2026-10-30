@@ -75,7 +75,55 @@ func (s *Server) handleCatalogList(w http.ResponseWriter, r *http.Request) {
 		entry.MyActions = myActions(held)
 		items = append(items, entry)
 	}
+	if err := s.fillLastDeployed(r, id, items); err != nil {
+		s.fail(w, err)
+		return
+	}
 	writeOK(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// fillLastDeployed sets last_deployed_at (api-v1 v1.21) on the visible
+// entries with one store call for the whole list.
+func (s *Server) fillLastDeployed(r *http.Request, projectID uuid.UUID, items []store.CatalogEntry) error {
+	if len(items) == 0 {
+		return nil
+	}
+	last, err := s.Store.CatalogLastDeployed(r.Context(), projectID, items)
+	if err != nil {
+		return err
+	}
+	for i := range items {
+		if at, ok := last[items[i].ID]; ok {
+			items[i].LastDeployedAt = &at
+		}
+	}
+	return nil
+}
+
+// replacedLastDeployed fills last_deployed_at on a replace response. The
+// replace has already committed and been audited, so a failed read is logged
+// and the field stays null (api-v1 v1.21 item 1).
+func (s *Server) replacedLastDeployed(r *http.Request, projectID uuid.UUID, entry store.CatalogEntry) store.CatalogEntry {
+	filled, err := s.withLastDeployed(r, projectID, entry)
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "://") {
+			msg = "redacted"
+		}
+		s.logger().Error("last_deployed_at read failed on replace", "err", msg)
+		return entry
+	}
+	return filled
+}
+
+// withLastDeployed is fillLastDeployed for one entry (GET). A create
+// response keeps null (api-v1 v1.21).
+func (s *Server) withLastDeployed(r *http.Request, projectID uuid.UUID, entry store.CatalogEntry) (store.CatalogEntry, error) {
+	one := []store.CatalogEntry{entry}
+	if err := s.fillLastDeployed(r, projectID, one); err != nil {
+		return store.CatalogEntry{}, err
+	}
+	return one[0], nil
 }
 
 func (s *Server) handleCatalogParse(w http.ResponseWriter, r *http.Request) {
@@ -189,6 +237,11 @@ func (s *Server) handleCatalogGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	entry, err := s.withLastDeployed(r, id, entry)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
 	writeOK(w, http.StatusOK, entry)
 }
 
@@ -257,13 +310,13 @@ func (s *Server) handleCatalogPut(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	entry.MyActions = myActions(heldActions(entry.Kind, authz.RoleOwner, p.User.ID, nil))
 	s.auditOK(r.Context(), p, store.AuditRow{
 		ProjectID: idPtr(id),
 		Action:    audit.ActionCatalogUpdate,
 		Detail:    map[string]any{"name": entry.Name, "old_spec_hash": old, "spec_hash": entry.SpecHash},
 	})
-	writeOK(w, http.StatusOK, entry)
+	entry.MyActions = myActions(heldActions(entry.Kind, authz.RoleOwner, p.User.ID, nil))
+	writeOK(w, http.StatusOK, s.replacedLastDeployed(r, id, entry))
 }
 
 func (s *Server) handleCatalogDelete(w http.ResponseWriter, r *http.Request) {

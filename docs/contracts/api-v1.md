@@ -672,3 +672,12 @@ ImageSpec    gains "files":[{"file":string,"target":string}]   // default []
 2. **Approvals and hash:** as today. A merge that adds a key name changes `spec_hash` of entries using the set and voids their host approvals (v1.13 item 7); a value-only merge does not.
 3. **Audit:** `replace` and `create` keep `env_set.replace` (`set`, `keys`). `merge` writes `env_set.merge` with `set`, `keys` (the pasted names) and `created` (the names new to the set). Never values. A delegated (MCP) call is refused `forbidden` before the body is read, and audited `env_set.replace` (denied, `via` mcp) for every mode.
 4. **Rollback note:** a v1.18 API refuses the unknown `mode` field (`bad_request "invalid json"`), so the console that sends `mode` ships after this API and rolls back first.
+
+## v1.21 last deployed time on catalog entries (2026-10-30, approved spec `docs/spec-catalog-last-deployed.md` rev 1; no migration required, an index may be added)
+
+1. **CatalogEntry** gains `"last_deployed_at": RFC3339 | null`. It is read-only, set by the server, and returned by `GET /v1/projects/{id}/catalog`, `GET /v1/projects/{id}/catalog/{name}` and the replace response (`PUT …/catalog/{name}`). A create response, and the delegated catalog-write confirm response (create or update), carry `null`. On a replace, a failure to read the time does not fail the request; the field is then `null`. A write body that contains it is refused as an unknown field, like other server-set fields.
+2. **Image entry:** the newest `started_at` of the entry's image deploys on any host and with any outcome, counting only deploys started `via` `console` or `mcp`. Rows written by the agent (automatic restart, rollback or give-up) never count. `null` when there is none.
+3. **Program entry:** the newest time of an allowed `program.run` audit row for the entry's name in its project, `via` `console` or `mcp`, at or after the entry was created (so an entry re-created under an old name starts empty). An allowed run that then failed or found the host offline still counts. Denied runs, stop and restart don't count. `null` when there is none.
+4. **Visibility and order are unchanged.** The list keeps its name order and viewer filtering. The value is computed per list request with a fixed number of queries, not one per entry.
+5. **MCP `list_catalog`** returns `last_deployed_at` for each item.
+6. **Unchanged:** all writes, `spec_hash`, deploy, run and rollback, and the agent protocol.

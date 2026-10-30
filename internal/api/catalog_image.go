@@ -524,12 +524,7 @@ func (s *Server) writeImage(w http.ResponseWriter, r *http.Request, p principal,
 		s.fail(w, err)
 		return
 	}
-	actions, err := s.callerActions(r, projectID, p.User.ID, entry)
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	entry.MyActions = actions
+	// Audit right after the commit, before any read that could fail.
 	detail := map[string]any{"name": entry.Name, "spec_hash": entry.SpecHash}
 	action := audit.ActionCatalogCreate
 	status := http.StatusCreated
@@ -539,6 +534,15 @@ func (s *Server) writeImage(w http.ResponseWriter, r *http.Request, p principal,
 		detail["old_spec_hash"] = old
 	}
 	s.auditOK(r.Context(), p, store.AuditRow{ProjectID: idPtr(projectID), Action: action, Detail: detail})
+	actions, err := s.callerActions(r, projectID, p.User.ID, entry)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	entry.MyActions = actions
+	if replace {
+		entry = s.replacedLastDeployed(r, projectID, entry)
+	}
 	writeOK(w, status, entry)
 }
 

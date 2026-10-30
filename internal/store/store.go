@@ -622,6 +622,13 @@ type Store interface {
 	DeleteCatalogEntry(ctx context.Context, projectID uuid.UUID, name string) (CatalogEntry, error)
 	GetCatalogEntry(ctx context.Context, projectID uuid.UUID, name string) (CatalogEntry, error)
 	ListCatalogEntries(ctx context.Context, projectID uuid.UUID) ([]CatalogEntry, error)
+	// CatalogLastDeployed returns, by entry ID, the newest deploy or run that a
+	// person or AI started (via console or mcp; api-v1 v1.21). An image entry
+	// uses the newest image_deploys started_at on any host with any outcome; a
+	// program entry uses the newest allowed program.run audit row for its name
+	// in projectID. Entries with none are absent. It runs at most one query per
+	// kind, whatever the number of entries.
+	CatalogLastDeployed(ctx context.Context, projectID uuid.UUID, entries []CatalogEntry) (map[uuid.UUID]time.Time, error)
 	ListCatalogGrants(ctx context.Context, entryID uuid.UUID) ([]CatalogGrant, error)
 	ReplaceCatalogGrants(ctx context.Context, projectID uuid.UUID, name string, grants []CatalogGrant) error
 

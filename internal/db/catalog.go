@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/more-than-code/bot-api-server/internal/audit"
 	"github.com/more-than-code/bot-api-server/internal/secret"
 	"github.com/more-than-code/bot-api-server/internal/store"
 )
@@ -181,6 +182,81 @@ ORDER BY name COLLATE "C" ASC, id ASC
 		return nil, mapErr(err)
 	}
 	return out, nil
+}
+
+// CatalogLastDeployed runs one query for the image entries and one for the
+// program entries (api-v1 v1.21). Only rows started via console or mcp count;
+// program runs count from the entry's created_at.
+func (d *DB) CatalogLastDeployed(ctx context.Context, projectID uuid.UUID, entries []store.CatalogEntry) (map[uuid.UUID]time.Time, error) {
+	out := map[uuid.UUID]time.Time{}
+	var imageIDs, programIDs []string
+	for _, e := range entries {
+		if e.Kind == "image" {
+			imageIDs = append(imageIDs, e.ID.String())
+		} else {
+			programIDs = append(programIDs, e.ID.String())
+		}
+	}
+	if len(imageIDs) > 0 {
+		rows, err := d.pool.Query(ctx, `
+SELECT d.entry_id::text, max(d.started_at)
+FROM app.image_deploys d
+JOIN app.catalog_entries e ON e.id = d.entry_id
+WHERE e.project_id = $1::uuid
+  AND d.entry_id = ANY(CAST($2 AS uuid[]))
+  AND d.via IN ('console', 'mcp')
+GROUP BY d.entry_id
+`, projectID.String(), imageIDs)
+		if err != nil {
+			return nil, mapErr(err)
+		}
+		if err := collectLastDeployed(rows, out); err != nil {
+			return nil, err
+		}
+	}
+	if len(programIDs) > 0 {
+		// Runs count from the entry's creation, so a re-created name starts empty.
+		rows, err := d.pool.Query(ctx, `
+SELECT e.id::text, max(a.at)
+FROM app.catalog_entries e
+JOIN app.audit_log a
+  ON a.project_id = e.project_id
+ AND a.action = $3
+ AND a.decision = $4
+ AND a.via IN ('console', 'mcp')
+ AND a.detail->>'entry' = e.name
+ AND a.at >= e.created_at
+WHERE e.project_id = $1::uuid AND e.id = ANY(CAST($2 AS uuid[]))
+GROUP BY e.id
+`, projectID.String(), programIDs, audit.ActionProgramRun, audit.DecisionAllowed)
+		if err != nil {
+			return nil, mapErr(err)
+		}
+		if err := collectLastDeployed(rows, out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+func collectLastDeployed(rows pgx.Rows, out map[uuid.UUID]time.Time) error {
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		var at time.Time
+		if err := rows.Scan(&key, &at); err != nil {
+			return mapErr(err)
+		}
+		id, err := uuid.Parse(key)
+		if err != nil {
+			return err
+		}
+		out[id] = at.UTC()
+	}
+	if err := rows.Err(); err != nil {
+		return mapErr(err)
+	}
+	return nil
 }
 
 func (d *DB) ListCatalogGrants(ctx context.Context, entryID uuid.UUID) ([]store.CatalogGrant, error) {

@@ -8,6 +8,7 @@
       "created_by": "OWNER",
       "id": "ENTRY_WEB",
       "kind": "image",
+      "last_deployed_at": null,
       "my_actions": [
         "run",
         "stop",

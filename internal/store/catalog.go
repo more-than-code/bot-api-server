@@ -49,7 +49,9 @@ type ProgramSpec struct {
 }
 
 // CatalogEntry is one program the project may run. MyActions is filled by
-// the API for the caller; the store leaves it nil.
+// the API for the caller; the store leaves it nil. LastDeployedAt (api-v1
+// v1.21) is filled by the API on the list and single-entry reads from
+// CatalogLastDeployed; it is nil (JSON null) everywhere else.
 type CatalogEntry struct {
 	ID             uuid.UUID       `json:"id"`
 	ProjectID      uuid.UUID       `json:"project_id"`
@@ -63,6 +65,7 @@ type CatalogEntry struct {
 	CreatedAt      time.Time       `json:"created_at"`
 	UpdatedAt      time.Time       `json:"updated_at"`
 	MyActions      []string        `json:"my_actions"`
+	LastDeployedAt *time.Time      `json:"last_deployed_at"`
 }
 
 // CatalogWrite is a new or replaced catalog entry.
@@ -104,10 +107,12 @@ func (e CatalogEntry) MarshalJSON() ([]byte, error) {
 		CreatedAt      time.Time       `json:"created_at"`
 		UpdatedAt      time.Time       `json:"updated_at"`
 		MyActions      []string        `json:"my_actions"`
+		LastDeployedAt *time.Time      `json:"last_deployed_at"`
 	}{
 		ID: e.ID, ProjectID: e.ProjectID, Name: e.Name, Kind: e.Kind, Spec: spec,
 		SpecHash: e.SpecHash, CommandDisplay: e.CommandDisplay, CreatedBy: e.CreatedBy,
 		CreatedAt: e.CreatedAt, UpdatedAt: e.UpdatedAt, MyActions: e.MyActions,
+		LastDeployedAt: e.LastDeployedAt,
 	})
 }
 
